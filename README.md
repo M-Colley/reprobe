@@ -28,6 +28,12 @@ pip install -e .            # Python 3.11+; needs Docker available for runs
 reprobe doctor             # self-check: config, Docker, base images, Ollama
 ```
 
+The pinned Python/R analysis environments are published images —
+`ghcr.io/m-colley/reprobe-base-py:2026.1` and `…-base-r:2026.1`, built by
+[`images/build-images.sh`](images/build-images.sh). Authors can test their code
+against the exact same environment reviewers use (see
+[docs/chair-runbook.md](docs/chair-runbook.md)).
+
 ## Use
 
 ```bash
@@ -76,6 +82,7 @@ MVP + breadth: fetch (git / Zenodo / figshare / Dryad / OSF / Dataverse /
 Software Heritage / anonymous.4open.science / local / resolvable DOIs),
 detection, sandboxed Python/R/Jupyter/Rmd execution with CLI args + a
 split-by-language dependency-install phase, Unity T0 structural, badges, reports,
-batch dashboard, and the advisory LLM. Remaining: repo2docker fallback, the
-real base-image build, and Unity compile/build tiers — scoped in
-[docs/DESIGN.md §11](docs/DESIGN.md).
+batch dashboard, and the advisory LLM. Base images build via
+[`images/build-images.sh`](images/build-images.sh) and publish to
+`ghcr.io/m-colley/reprobe-base-{py,r}:2026.1`. Remaining: repo2docker fallback
+and Unity compile/build tiers — scoped in [docs/DESIGN.md §11](docs/DESIGN.md).
