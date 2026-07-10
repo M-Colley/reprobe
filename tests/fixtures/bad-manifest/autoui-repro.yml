@@ -1,0 +1,7 @@
+version: 1
+title: "Manifest with an unknown tool (must clamp to kind=custom, never crash)"
+run:
+  steps:
+    - tool: godot
+      project: game/
+badges_claimed: [available]

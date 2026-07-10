@@ -21,13 +21,15 @@ runs:
   steps:
     - name: Set up Python
       uses: actions/setup-python@v5
-      with: { python-version: "3.11" }
+      with: { python-version: "3.13" }
     - name: Install reprobe
       shell: bash
-      run: pip install -e .
+      # Install from the action's own checkout (repo root is two levels up),
+      # NEVER from the caller's workspace — that may hold an untrusted submission.
+      run: pip install "$GITHUB_ACTION_PATH/../.."
     - name: Doctor
       shell: bash
-      run: reprobe doctor || true
+      run: reprobe doctor
     - name: Run
       shell: bash
       run: |

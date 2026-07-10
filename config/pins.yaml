@@ -20,6 +20,9 @@ llm:
   enabled: true
   provider: ollama
   endpoint: "http://127.0.0.1:11434"
+  # Ollama runtime used by deploy/docker-compose.yml (keep its default in sync).
+  # Add the @sha256:... digest after first pull, like micromamba_base.
+  ollama_image: "ollama/ollama:0.12.5"
   model: "gemma4:e4b"              # Gemma 4 e4b (effective-4B edge build) — offline via Ollama, CPU-OK
   keep_alive: "10m"
   timeout_s: 60                   # hard wall-clock cap per LLM call
@@ -32,11 +35,12 @@ unity:
   image_repo: "unityci/editor"
   default_image_version: "3"      # GameCI image-tag suffix
   modules: ["linux-il2cpp"]
-  # Digest-pinned tag map; refresh with `reprobe unity-refresh` (Phase 3).
+  # Digest-pinned tag map; a future `reprobe unity-refresh` (Phase 3, not yet
+  # implemented) will refresh it. Leave empty until then.
   known_tags: {}
 
 fetch:
   # Used ONLY for the sandbox smoke test (`reprobe doctor --smoke`); not a runtime.
   smoke_image: "hello-world"
   # Generic image for repos when a base image isn't built yet (best-effort).
-  fallback_python_image: "python:3.11-slim"
+  fallback_python_image: "python:3.13-slim"

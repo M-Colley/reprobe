@@ -1,7 +1,8 @@
 # reprobe-controller — the orchestrator + docker CLI, for CI (Docker-out-of-Docker).
 # Mount the host docker socket at runtime; this image NEVER runs author code
 # itself — it spawns sibling sandboxed containers via the host daemon.
-FROM python:3.11-slim
+# Needs the repo ROOT as build context: `bash images/build-images.sh controller`.
+FROM python:3.13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates curl docker.io \

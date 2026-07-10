@@ -12,10 +12,14 @@ Hard guarantees applied here regardless of what a runner asks for:
   * /tmp is a noexec,nosuid tmpfs; no Docker socket; no host bind beyond the
     per-run work dir
   * a host-side hard timeout that ``docker kill``s the container
+  * a spec that violates the envelope (flag-shaped image, docker-socket or
+    out-of-work-root mount) raises ``SandboxViolation`` in ``build_argv``;
+    ``run_container`` surfaces it as a harness error, never as a launch
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import time
@@ -24,6 +28,51 @@ from pathlib import Path
 from typing import Optional
 
 from .models import ContainerSpec, RawRunOutput
+
+
+class SandboxViolation(RuntimeError):
+    """A ContainerSpec asked for something the sandbox envelope forbids."""
+
+
+# Strict image reference: name[:tag][@sha256:digest], lowercase repo path,
+# optional registry[:port]/ prefix. Anything else — leading '-', whitespace,
+# shell metacharacters — is rejected so an untrusted manifest image string can
+# never smuggle a docker flag into the argv (docker parses options up to the
+# first positional; the image is that positional).
+_IMAGE_RE = re.compile(
+    r"^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?::[0-9]+)?"   # first component (or registry[:port])
+    r"(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*"          # further path components
+    r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?"              # :tag
+    r"(?:@sha256:[0-9a-f]{64})?$"                           # @sha256:digest
+)
+
+
+def _validate_image(image: str) -> None:
+    if not _IMAGE_RE.fullmatch(image or ""):
+        raise SandboxViolation(
+            f"image reference rejected (must match name[:tag][@sha256:digest]): {image!r}"
+        )
+
+
+def _sock_check(s: str, source: str) -> None:
+    if s.endswith("/docker.sock") or s == "docker.sock" \
+            or s.startswith("//./pipe/") or "docker_engine" in s:
+        raise SandboxViolation(f"mount source touches the docker control socket: {source}")
+
+
+def _validate_mounts(spec: ContainerSpec, work_root: Optional[str | Path]) -> None:
+    root = Path(work_root).resolve() if work_root else None
+    for m in spec.mounts:
+        # Check the raw string BEFORE resolve(): resolving a Windows device
+        # path (\\.\pipe\...) touches the actual pipe and raises OSError.
+        _sock_check(str(m.source).replace("\\", "/").lower(), m.source)
+        try:
+            src = Path(m.source).resolve()
+        except OSError as exc:
+            raise SandboxViolation(f"mount source could not be resolved: {m.source} ({exc})") from exc
+        _sock_check(src.as_posix().lower(), m.source)
+        if root is not None and not src.is_relative_to(root):
+            raise SandboxViolation(f"mount source escapes the per-run work root ({root}): {m.source}")
 
 
 def docker_available() -> bool:
@@ -53,11 +102,19 @@ def _docker_path(p: str) -> str:
     return Path(p).resolve().as_posix()
 
 
-def build_argv(spec: ContainerSpec, limits: dict, *, container_name: str, allow_egress: bool) -> list[str]:
+def build_argv(spec: ContainerSpec, limits: dict, *, container_name: str, allow_egress: bool,
+               work_root: str | Path | None = None) -> list[str]:
     """Pure function: ContainerSpec + limits -> the exact `docker run` argv.
 
     Kept pure and importable so tests can assert the sandbox flags without a
-    daemon. This is the security surface — read it carefully."""
+    daemon. This is the security surface — read it carefully.
+
+    Raises ``SandboxViolation`` for a flag-shaped/malformed image reference, a
+    docker-socket mount, or (when ``work_root`` is given) a bind-mount source
+    outside the per-run work root. Callers should always pass ``work_root``;
+    ``None`` only skips the containment check, never the socket/image checks."""
+    _validate_image(spec.image)
+    _validate_mounts(spec, work_root)
     argv: list[str] = ["docker", "run", "--rm", "--name", container_name]
 
     # --- network ---------------------------------------------------------
@@ -135,6 +192,7 @@ def run_container(
     *,
     allow_egress: bool = False,
     dry_run: bool = False,
+    work_root: str | Path | None = None,
 ) -> RawRunOutput:
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +201,14 @@ def run_container(
         return RawRunOutput(exit_code=None, duration_s=0.0, error="no-image-resolved")
 
     name = f"reprobe-{uuid.uuid4().hex[:12]}"
-    argv = build_argv(spec, limits, container_name=name, allow_egress=allow_egress)
+    try:
+        argv = build_argv(spec, limits, container_name=name, allow_egress=allow_egress,
+                          work_root=work_root)
+    except SandboxViolation as exc:
+        msg = f"sandbox-violation: {exc}"
+        log_path.write_text(msg + "\n", encoding="utf-8")
+        return RawRunOutput(exit_code=None, duration_s=0.0, image=spec.image,
+                            log_path=str(log_path), error=msg)
     redacted = _redact(argv, spec)
 
     if dry_run:
@@ -164,14 +229,22 @@ def run_container(
     with log_path.open("w", encoding="utf-8", errors="replace") as log:
         log.write("$ " + " ".join(redacted) + "\n\n")
         log.flush()
+        completed = False
         try:
             proc = subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT, timeout=timeout_s)
             exit_code = proc.returncode
+            completed = True
         except subprocess.TimeoutExpired:
             timed_out = True
             exit_code = None
-            subprocess.run(["docker", "kill", name], capture_output=True)
             log.write(f"\n[reprobe] hard timeout after {timeout_s}s — container killed\n")
+        finally:
+            if not completed:
+                # --rm only fires when the container exits. On every non-normal
+                # path (timeout, KeyboardInterrupt, OSError, ...) force-stop by
+                # name so no exception can orphan a live author-code container.
+                subprocess.run(["docker", "kill", name], capture_output=True)
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
     return RawRunOutput(
         exit_code=exit_code,

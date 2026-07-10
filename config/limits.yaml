@@ -25,6 +25,7 @@ per_runner:
     timeout_s: 2100
     memory: "12g"
 
-# Per-submission egress allowlist (populated by `--allow-net host1 host2`).
-# Using it downgrades badge confidence and is flagged loudly in the report.
+# Per-submission egress allowlist — DECLARED BUT NOT YET ENFORCED; do not rely
+# on it. docker_exec never reads this list (`--allow-net` grants full egress
+# today, flagged in the report). Kept so the key name is stable once wired.
 allow_net_hosts: []

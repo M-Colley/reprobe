@@ -14,7 +14,10 @@ def test_only_docker_exec_launches_containers():
     for py in SRC.rglob("*.py"):
         if py.name in ALLOWED:
             continue
-        text = py.read_text(encoding="utf-8")
+        # strip `#` comments so prose ("docker run itself failed") can't trip
+        # the lint — actual launches are code, and code survives the strip
+        text = "\n".join(line.split("#", 1)[0]
+                         for line in py.read_text(encoding="utf-8").splitlines())
         # crude but effective: a `docker run` string or subprocess+docker in one file
         if re.search(r"docker[\"',\s]+run", text) or ('"docker"' in text and "subprocess" in text):
             offenders.append(str(py.relative_to(SRC)))

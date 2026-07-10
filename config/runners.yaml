@@ -1,7 +1,13 @@
 # ============================================================================
-#  runners.yaml  —  which runners exist and are enabled, and their default
-#  runtime image (a key into pins.yaml:base_images). The orchestrator core
-#  never changes when you add a runner; you add a row here + a plugin package.
+#  runners.yaml  —  which runners exist and are enabled. Each row's `plugin:`
+#  dotted path ("package.module:ClassName") is imported by the registry, so
+#  adding a runner = add a row here + an importable package; the orchestrator
+#  core never changes. A broken `plugin:` fails loudly, naming the row.
+#
+#  default_image:  overrides the runner's image (a key into
+#                  pins.yaml:base_images); null = host-side, no container.
+#  Omit `plugin:`  to merely enable/disable a runner shipped via the
+#                  `reprobe.runners` entry-point group instead.
 # ============================================================================
 
 runners:
@@ -29,4 +35,5 @@ runners:
     plugin: "reprobe.runners.unity:UnityRunner"
     default_image: null          # T0 structural runs host-side; no container
     enabled: true
-    tier: structural             # structural | compile | build  (T1/T2 need a Unity seat)
+    tier: structural             # informational only — T0 structural is the sole
+                                 # tier this build implements (docs/DESIGN.md §5)

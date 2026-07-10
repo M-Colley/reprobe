@@ -11,10 +11,8 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 
-import requests
-
 from ..models import FetchResult, Pin
-from .base import FetchError
+from .base import FetchError, get
 
 _ID_RE = re.compile(r"anonymous\.4open\.science/(?:r|api/repo)/([A-Za-z0-9_-]+)", re.I)
 
@@ -33,7 +31,7 @@ class AnonymousGithubFetcher:
         dest.mkdir(parents=True, exist_ok=True)
         url = f"https://anonymous.4open.science/api/repo/{repo_id}/zip"
         try:
-            r = requests.get(url, timeout=120)
+            r = get(url, timeout=120)
             r.raise_for_status()
             with zipfile.ZipFile(BytesIO(r.content)) as z:
                 z.extractall(dest)

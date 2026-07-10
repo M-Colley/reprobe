@@ -11,15 +11,20 @@ check**. Everything else is fixed.
    - `base_images.micromamba_base` → optionally a newer pinned digest.
    - `llm.model` → keep `gemma4:e4b` unless you want to move.
    - `unity.default_image_version` and the editor tag map (step 3).
-2. **Rebuild base images** *only if the science stack changed.* Edit
-   `images/base-py/env.yaml` (and `base-r`), then:
+2. **Rebuild base images.** Required whenever the `base_images.*` tags in
+   `pins.yaml` changed (a bumped tag exists only once you build it — otherwise
+   every run fails with `image-not-present`). Edit `images/base-py/env.yaml`
+   (and `base-r`) only if the science stack must also move, then:
    ```bash
    bash images/build-images.sh        # re-solves conda-lock, rebuilds, tags 2027.x
    ```
-   (CI does this automatically when `images/**` or `pins.yaml` changes.)
-3. **Refresh the Unity editor tag map** (only the part that genuinely ages):
+   You must run this manually — no CI rebuilds images yet. `pip install
+   conda-lock` first for reproducible bases.
+3. **Refresh the Unity editor tag map** — **skip until Phase 3 ships**; the
+   `reprobe unity-refresh` command does not exist yet and `unity.known_tags`
+   stays empty:
    ```bash
-   reprobe unity-refresh              # Phase 3; updates digest-pinned tag map
+   # reprobe unity-refresh            # Phase 3 — not yet implemented
    ```
 4. **Confirm it still works**:
    ```bash
@@ -37,7 +42,7 @@ check**. Everything else is fixed.
   reprobe batch submissions.csv      # -> out/dashboard.html + out/badges.json
   ```
   Sort the dashboard by verdict; triage anything flagged `no-checksum`,
-  `anonymized`, `needs-network`, or `no-matching-editor-image`.
+  `anonymized`, or `warnings` (the full set the dashboard emits today).
 - **Anonymized (double-blind) submissions:** `anonymous.4open.science` links work
   directly but carry no archival pin — the report says so. Remind authors that
   the **Available** badge needs a durable Zenodo/OSF deposit before publication.
@@ -49,6 +54,15 @@ Provide as environment variables when needed:
   Server endpoint — only if you enable Unity T1/T2 (your institution's own seat).
 - `ZENODO_TOKEN`, `OSF_TOKEN` — only for restricted/embargoed records.
 
+## Running in CI (controller mode)
+
+The optional `reprobe-controller` image (built by `bash images/build-images.sh
+controller`) mounts the host Docker socket at runtime — that is
+**root-equivalent on the host**. Run it only on a disposable CI runner or a
+dedicated VM, never on a personal machine. Author code still only ever runs in
+the sibling sandboxed containers; the socket belongs to the trusted
+orchestrator alone.
+
 ## What you never touch
 
 `src/` (orchestrator, runner contract, sandbox flags, fetchers, report schema),
@@ -58,6 +72,7 @@ runner plugin packages** (entry points), not core edits.
 ## If an upstream breaks
 
 GameCI and repo2docker are best-effort upstreams behind our interface. A break
-degrades one runner/strategy with a clean error (`no-matching-editor-image`,
-`repo2docker-build-failed`) — never the whole harness. Everything pinned is
-recorded in each report, so an old report reproduces years later.
+degrades one runner/strategy with a clean error — never the whole harness.
+(Specific error labels such as `no-matching-editor-image` and
+`repo2docker-build-failed` arrive with the Phase-2/3 runners.) Everything
+pinned is recorded in each report, so an old report reproduces years later.

@@ -31,6 +31,9 @@ def detect(
             for s in m_result.steps:
                 if not s.expected_outputs and exp:
                     s.expected_outputs = list(exp)
+            # the deterministic repo scan still informs environment planning
+            # (e.g. Dockerfile -> needs-repo2docker), so keep its flags
+            m_result.flags = sorted(set(m_result.flags) | set(heuristic.flags))
             return m_result, meta
         # codecheck or partial manifest: use heuristic steps + lifted expected outputs
         exp = meta.get("expected_outputs", [])

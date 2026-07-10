@@ -25,6 +25,13 @@ def _needs(kinds: set[str], *want: str) -> bool:
     return any(k in kinds for k in want)
 
 
+# Same invocation for manifest-declared and auto-detected lockfiles: guarded so
+# an image without renv fails loudly (non-zero -> install noted failed/skipped)
+# instead of a cryptic traceback or a silent "ok".
+_RENV_RESTORE = ("Rscript -e 'if (requireNamespace(\"renv\", quietly=TRUE)) renv::restore(prompt=FALSE) "
+                 "else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'")
+
+
 def plan(
     detect_result: DetectResult,
     manifest_meta: dict[str, Any],
@@ -36,6 +43,7 @@ def plan(
     src = Path(src_dir)
     env = (manifest_meta or {}).get("environment", {}) or {}
     kinds = set(detect_result.artifact_types)
+    builder = str(env.get("builder") or "")
 
     # 1) author pinned an image
     if env.get("image"):
@@ -48,41 +56,79 @@ def plan(
     image_key = "python" if py_needed or not r_needed else "r"
     image = config.base_image(image_key) or config.pins.get("fetch", {}).get("fallback_python_image", "")
 
-    install = _install_commands(env, src, r_needed)
+    install, dep_warnings = _install_commands(env, src, r_needed)
 
     flags = detect_result.flags
-    if "needs-repo2docker" in flags and allow_repo2docker:
+    if ("needs-repo2docker" in flags or builder == "repo2docker") and allow_repo2docker:
         # Phase 2: hand off to repo2docker_builder. For now, record intent.
         return EnvPlan(strategy="repo2docker", image=image, env_provenance="repo2docker-built",
                        install_commands=install, repo2docker_version=config.pins.get("tools", {}).get("repo2docker"),
-                       warnings=["repo2docker builder is a Phase-2 hook; using pinned base best-effort"])
+                       warnings=["repo2docker builder is a Phase-2 hook; using pinned base best-effort"]
+                                + dep_warnings)
 
     strategy = "pinned-base"
     warnings = []
+    if builder == "repo2docker":
+        strategy = "besteffort"
+        warnings.append("author requested builder: repo2docker; not built in this run — "
+                        "re-run with --allow-repo2docker")
+    elif builder == "author-image":
+        warnings.append("author requested builder: author-image but pinned no image; using pinned base")
+    elif builder not in ("", "pinned-base"):
+        warnings.append(f"unknown builder '{builder}' in manifest; using pinned base")
     if "needs-repo2docker" in flags:
         strategy = "besteffort"
         warnings.append("repo declares system-level setup (Dockerfile/postBuild/apt.txt); "
                         "pinned base may lack some deps. Re-run with --allow-repo2docker for fidelity.")
 
     return EnvPlan(strategy=strategy, image=image, env_provenance="harness-default",
-                   install_commands=install, warnings=warnings)
+                   install_commands=install, warnings=warnings + dep_warnings)
 
 
-def _install_commands(env: dict[str, Any], src: Path, r_needed: bool) -> list[str]:
+def _install_commands(env: dict[str, Any], src: Path, r_needed: bool) -> tuple[list[str], list[str]]:
+    """Returns (commands, warnings). Any declared or detected dependency file
+    the pinned-base builder does NOT install must surface as a warning — the
+    report says what was not installed (never over-claim)."""
     cmds: list[str] = []
-    dep = env.get("dependencies")
+    warnings: list[str] = []
+    dep = str(env.get("dependencies") or "")
     # explicit manifest dependency file
-    if dep and (src / dep).exists():
-        if str(dep).endswith(".txt"):
-            cmds.append(f"pip install --no-input --target=/work/.reprobe_deps -r {dep}")
-        elif str(dep).endswith("renv.lock"):
-            cmds.append("Rscript -e 'renv::restore(prompt=FALSE)'")
-    else:
+    if dep and not (src / dep).exists():
+        warnings.append(f"manifest declares dependencies '{dep}' but the file does not exist; "
+                        "auto-detecting instead")
+    elif dep.endswith(".txt"):
+        cmds.append(f"pip install --no-input --target=/work/.reprobe_deps -r {dep}")
+    elif dep.endswith("renv.lock"):
+        cmds.append(_RENV_RESTORE)
+    elif dep.endswith((".yml", ".yaml")):
+        warnings.append(f"conda file '{dep}' is not installed by the pinned-base builder; its packages were "
+                        "NOT installed — re-run with --allow-repo2docker for a faithful environment")
+    elif dep:
+        warnings.append(f"declared dependency file '{dep}' is not a supported type "
+                        "(requirements.txt | environment.yml | renv.lock); it was NOT installed")
+    if not cmds:
         # auto-detect common manifests (repo2docker-style conventions)
         if (src / "requirements.txt").is_file():
             cmds.append("pip install --no-input --target=/work/.reprobe_deps -r requirements.txt")
-        if (src / "renv.lock").is_file() and r_needed:
-            cmds.append("Rscript -e 'if (requireNamespace(\"renv\", quietly=TRUE)) renv::restore(prompt=FALSE)'")
+        if (src / "renv.lock").is_file():
+            if r_needed:
+                cmds.append(_RENV_RESTORE)
+            else:
+                warnings.append("renv.lock present but no R steps detected; R dependencies were NOT restored")
         elif (src / "install.R").is_file():
-            cmds.append("Rscript install.R")
-    return cmds
+            if r_needed:
+                cmds.append("Rscript install.R")
+            else:
+                warnings.append("install.R present but no R steps detected; it was NOT run")
+        if not dep.endswith((".yml", ".yaml")):
+            for cand in ("environment.yml", "environment.yaml", "binder/environment.yml"):
+                if (src / cand).is_file():
+                    warnings.append(f"conda file '{cand}' is not installed by the pinned-base builder; its packages "
+                                    "were NOT installed — re-run with --allow-repo2docker for a faithful environment")
+                    break
+    # record resolved versions in the install log so two runs are comparable
+    if any(c.startswith("pip install") for c in cmds):
+        cmds.append("pip freeze --path=/work/.reprobe_deps")
+    if any(c.startswith("Rscript") for c in cmds):
+        cmds.append("Rscript -e 'print(installed.packages()[, c(\"Package\", \"Version\")])'")
+    return cmds, warnings

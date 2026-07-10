@@ -1,17 +1,19 @@
 """Fetcher selection. Order matters: specific platforms before the generic git
 matcher; local path last as a catch-all. A bare DOI / doi.org URL that no
-platform claims directly is resolved (followed) and re-dispatched."""
+platform claims directly is resolved (followed) and re-dispatched.
+
+configure() rebuilds the list with chair-supplied host lists from the
+``fetch:`` section of config/pins.yaml (extra_git_hosts / dataverse_hosts), so
+adding an institutional GitLab or Dataverse install never means editing src/."""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
-import requests
-
 from ..models import FetchResult
 from .anonymous_github import AnonymousGithubFetcher
-from .base import Fetcher, FetchError
+from .base import Fetcher, FetchError, get
 from .dataverse import DataverseFetcher
 from .dryad import DryadFetcher
 from .figshare import FigshareFetcher
@@ -21,18 +23,31 @@ from .osf import OSFFetcher
 from .software_heritage import SoftwareHeritageFetcher
 from .zenodo import ZenodoFetcher
 
-# Specific platforms first; git + local are the broad catch-alls.
-_FETCHERS: list[Fetcher] = [
-    AnonymousGithubFetcher(),
-    ZenodoFetcher(),
-    FigshareFetcher(),
-    DryadFetcher(),
-    OSFFetcher(),
-    DataverseFetcher(),
-    SoftwareHeritageFetcher(),
-    GitHostFetcher(),
-    LocalFetcher(),
-]
+
+def _build(fetch_cfg: dict | None = None) -> list[Fetcher]:
+    cfg = fetch_cfg or {}
+    # Specific platforms first; git + local are the broad catch-alls.
+    return [
+        AnonymousGithubFetcher(),
+        ZenodoFetcher(),
+        FigshareFetcher(),
+        DryadFetcher(),
+        OSFFetcher(),
+        DataverseFetcher(extra_hosts=tuple(cfg.get("dataverse_hosts") or ())),
+        SoftwareHeritageFetcher(),
+        GitHostFetcher(extra_hosts=tuple(cfg.get("extra_git_hosts") or ())),
+        LocalFetcher(),
+    ]
+
+
+_FETCHERS: list[Fetcher] = _build()
+
+
+def configure(fetch_cfg: dict | None) -> None:
+    """Apply the config/pins.yaml ``fetch:`` section (call before fetch())."""
+    global _FETCHERS
+    _FETCHERS = _build(fetch_cfg)
+
 
 _DOI_LIKE = re.compile(r"^(https?://)?(dx\.)?doi\.org/10\.|^10\.\d{4,}/", re.I)
 
@@ -50,7 +65,7 @@ def select(ref: str) -> Fetcher | None:
 def _resolve_doi(ref: str) -> str | None:
     url = ref if ref.lower().startswith("http") else f"https://doi.org/{ref}"
     try:
-        r = requests.get(url, allow_redirects=True, timeout=30)
+        r = get(url, allow_redirects=True, timeout=30)
         return r.url
     except Exception:
         return None
@@ -71,6 +86,8 @@ def fetch(ref: str, dest: str | Path) -> FetchResult:
         raise FetchError(
             f"no fetcher matched '{ref}'. Supported: git hosts, Zenodo, figshare, "
             f"Dryad, OSF, Dataverse, Software Heritage, anonymous.4open.science, "
-            f"local paths, and resolvable DOIs."
+            f"local paths, and resolvable DOIs. Institutional git hosts / Dataverse "
+            f"installs can be added in config/pins.yaml (fetch.extra_git_hosts / "
+            f"fetch.dataverse_hosts)."
         )
     return fetcher.fetch(use_ref, dest)

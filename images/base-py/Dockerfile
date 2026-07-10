@@ -1,6 +1,7 @@
 # reprobe-base-py — pinned Python runtime for author analyses.
 # Non-root by default; the harness mounts a throwaway /work copy and runs with
-# --network none. Build via images/build-images.sh (which pins the digest).
+# --network none. Build via images/build-images.sh (which re-solves
+# conda-lock.yml — the committed lock is the reproducibility pin).
 ARG MICROMAMBA_BASE=mambaorg/micromamba:1.5.10-noble
 FROM ${MICROMAMBA_BASE}
 

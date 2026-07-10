@@ -56,6 +56,13 @@ class Runner(Protocol):
 # --------------------------------------------------------------------------- #
 # Shared base class with the common, boring logic.
 # --------------------------------------------------------------------------- #
+def _q(s: object) -> str:
+    """POSIX single-quote. The ONLY sanctioned way to put an author-controlled
+    value into a runner's ``bash -c`` command — never interpolate into double
+    quotes (``$(...)``, backticks and ``$VAR`` stay shell-active there)."""
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+
 def snapshot(rundir: Path) -> dict[str, float]:
     """Cheap mtime snapshot of files under rundir, to detect produced files."""
     idx: dict[str, float] = {}
@@ -75,6 +82,7 @@ class BaseRunner:
     display_name: str = ""
     handles_types: frozenset[str] = frozenset()
     image_key: str = "python"               # key into pins.yaml:base_images
+    host_only: bool = False                 # True -> container_spec returns None; no author code executes
 
     # -- routing ---------------------------------------------------------- #
     def can_handle(self, step: RunStep) -> bool:
@@ -134,6 +142,22 @@ class BaseRunner:
                 diagnostics={"timeout_s": ctx.limits.get("timeout_s")},
                 not_verified=list(caps.cannot_verify),
             )
+        if raw.exit_code in (125, 126, 127):
+            # docker-launcher reserved codes: 125 = docker run itself failed,
+            # 126/127 = command not executable/found. Blame the harness/image,
+            # not the author's code (126/127 CAN also come from an author
+            # script invoking a missing binary — hence the hedged wording).
+            return RunResult(
+                runner=self.id, target=ctx.step.target, status="error",
+                exit_code=raw.exit_code, duration_s=raw.duration_s, log_path=raw.log_path,
+                diagnostics={
+                    "harness_error": f"container command could not start (exit {raw.exit_code}); "
+                                     "check base image contents — this usually means the harness image, "
+                                     "not the artifact, is broken",
+                    "log_tail": _tail(raw.log_path),
+                },
+                not_verified=list(caps.cannot_verify),
+            )
 
         produced = self._produced(ctx)
         expected_met = self._expected_met(ctx, produced)
@@ -149,6 +173,15 @@ class BaseRunner:
             if expected_met:
                 claims.append(f"produced {len(expected_met)} declared output(s)")
         diagnostics = {}
+        # Record declared outputs THIS step did not produce. Status stays "pass"
+        # for a subset: detection broadcasts the manifest-wide expected_outputs
+        # onto every step, so each step of a healthy pipeline legitimately
+        # produces only its share — completeness is judged across the pipeline,
+        # not per step. But the missing set must be on the record (never
+        # over-claim: state what was verified AND what was not).
+        missing = sorted(set(ctx.step.expected_outputs) - set(expected_met))
+        if missing:
+            diagnostics["expected_missing"] = missing
         if not ok:
             diagnostics["log_tail"] = _tail(raw.log_path)
         return RunResult(

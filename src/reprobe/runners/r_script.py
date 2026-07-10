@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .base import BaseRunner, RunContext
+from .base import BaseRunner, RunContext, _q
 from ..models import Capabilities
 
 
@@ -24,7 +24,3 @@ class RScriptRunner(BaseRunner):
         # R_LIBS_USER points at packages installed during the gated-egress phase.
         return ["bash", "-c",
                 f"mkdir -p /work/.reprobe_Rlib; export R_LIBS_USER=/work/.reprobe_Rlib; Rscript {_q(t)} {extra}".rstrip()]
-
-
-def _q(s: str) -> str:
-    return "'" + s.replace("'", "'\\''") + "'"

@@ -2,8 +2,9 @@
 # Build (and tag) the reprobe base images from config/pins.yaml.
 # Re-solves conda-lock.yml so the base is reproducible from the lock alone.
 #
-#   bash images/build-images.sh            # build py + r
+#   bash images/build-images.sh            # build py + r + controller
 #   bash images/build-images.sh py         # build only python base
+#   bash images/build-images.sh controller # build only the CI controller image
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,6 +22,7 @@ PY
 MAMBA_BASE="$(read_pin micromamba_base)"
 PY_TAG="$(read_pin python)"
 R_TAG="$(read_pin r)"
+CTRL_TAG="$(read_pin controller)"
 WHICH="${1:-all}"
 
 solve_lock() {  # $1 = images/base-xx dir
@@ -41,10 +43,15 @@ build() {  # $1 = dir, $2 = tag
   docker build --build-arg "MICROMAMBA_BASE=$MAMBA_BASE" -t "$tag" "$dir"
 }
 
-[ "$WHICH" = "all" ] || [ "$WHICH" = "py" ] && build images/base-py "$PY_TAG"
-[ "$WHICH" = "all" ] || [ "$WHICH" = "r" ]  && build images/base-r  "$R_TAG"
+if [ "$WHICH" = "all" ] || [ "$WHICH" = "py" ]; then build images/base-py "$PY_TAG"; fi
+if [ "$WHICH" = "all" ] || [ "$WHICH" = "r" ];  then build images/base-r  "$R_TAG"; fi
+if [ "$WHICH" = "all" ] || [ "$WHICH" = "controller" ]; then
+  # The controller COPYs pyproject/src/config, so it needs the repo-root context.
+  echo ">> building $CTRL_TAG from repo root"
+  docker build -f images/controller/Dockerfile -t "$CTRL_TAG" .
+fi
 
-echo "done. record the new digests in config/pins.yaml:"
-for t in "$PY_TAG" "$R_TAG"; do
-  docker image inspect "$t" --format '  {{index .RepoTags 0}}  ->  {{.Id}}' 2>/dev/null || true
-done
+echo "done. locally built images have no pullable registry digest — the committed"
+echo "conda-lock.yml next to each Dockerfile is the reproducibility pin. (Only add"
+echo "@sha256 digests to pins.yaml for images actually pushed/pulled, e.g. after"
+echo "'docker pull'; see the micromamba_base comment.)"

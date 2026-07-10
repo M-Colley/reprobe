@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
-
-import requests
+from urllib.parse import urlparse
 
 from ..models import FetchResult, Pin
 from .base import FetchError, download, maybe_unzip
@@ -23,9 +21,15 @@ _DOI = re.compile(r"(doi:10\.\S+|hdl:\S+)", re.I)
 class DataverseFetcher:
     name = "dataverse"
 
+    def __init__(self, extra_hosts: tuple[str, ...] = ()):
+        # chair-supplied installs whose hostname lacks "dataverse"
+        # (config/pins.yaml fetch.dataverse_hosts), e.g. darus.uni-stuttgart.de
+        self.extra_hosts = tuple(h.lower() for h in extra_hosts)
+
     def can_handle(self, ref: str) -> bool:
         r = ref.lower()
-        return "dataverse" in r and ("persistentid=" in r or "/dataset" in r)
+        known = "dataverse" in r or any(h in r for h in self.extra_hosts)
+        return known and ("persistentid=" in r or "/dataset" in r)
 
     def fetch(self, ref: str, dest: Path) -> FetchResult:
         parsed = urlparse(ref)
@@ -46,6 +50,8 @@ class DataverseFetcher:
         if not ok:
             raise FetchError(f"Dataverse download failed: {note}")
         maybe_unzip(dest, warnings)
+        warnings.append("Dataverse :persistentId access serves the latest published version; "
+                        "the concrete version fetched was not recorded")
         doi = pid[4:] if pid.lower().startswith("doi:") else pid
         return FetchResult(
             input=ref, resolved_type="dataverse", src_dir=str(dest),

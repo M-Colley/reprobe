@@ -7,8 +7,6 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
-import requests
-
 from ..models import FetchResult, Pin
 from .base import FetchError, download, maybe_unzip
 
@@ -36,6 +34,8 @@ class DryadFetcher:
         if not ok:
             raise FetchError(f"Dryad download failed: {note}")
         maybe_unzip(dest, warnings)
+        warnings.append("Dryad dataset endpoint serves the latest published version; "
+                        "the concrete version fetched was not recorded")
         return FetchResult(
             input=ref, resolved_type="dryad", src_dir=str(dest),
             pin=Pin(kind="version_doi", value=doi), fetch_layer="dryad-api",

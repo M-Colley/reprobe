@@ -12,7 +12,7 @@ Server — they are intentionally not enabled in this build.
 
 from __future__ import annotations
 
-import json
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -21,6 +21,10 @@ from .base import BaseRunner, RunContext
 from ..models import Capabilities, RawRunOutput, RunResult
 
 _VERSION_RE = re.compile(r"m_EditorVersion:\s*(\S+)")
+
+# The structural check runs host-side over an untrusted tree: never follow
+# symlinks, and stop after this many files (no container = no timeout).
+_MAX_SCAN_FILES = 200_000
 
 _STRUCTURAL_NOT_VERIFIED = [
     "the project compiles",
@@ -38,6 +42,7 @@ class UnityRunner(BaseRunner):
     display_name = "Unity project (structural)"
     handles_types = frozenset({"unity"})
     image_key = "unity"
+    host_only = True
 
     def capabilities(self) -> Capabilities:
         return Capabilities(
@@ -50,14 +55,25 @@ class UnityRunner(BaseRunner):
         return None
 
     def interpret(self, raw: Optional[RawRunOutput], ctx: RunContext) -> RunResult:
-        proj = ctx.src_dir / ctx.step.target if ctx.step.target not in (".", "") else ctx.src_dir
-        proj = proj.resolve()
+        src_root = ctx.src_dir.resolve()
+        proj = src_root if ctx.step.target in (".", "") else (ctx.src_dir / ctx.step.target).resolve()
+        # The target comes verbatim from the author manifest: absolute paths
+        # replace the join base and ../ walks out — refuse anything that
+        # resolves outside the fetched source tree (trust boundary: untrusted
+        # bytes must never steer host-side filesystem access).
+        if not proj.is_relative_to(src_root):
+            return RunResult(
+                runner=self.id, target=ctx.step.target, status="error",
+                exit_code=None, duration_s=0.0,
+                diagnostics={"harness_error": "unity target escapes the source directory; refusing host-side inspection"},
+                not_verified=list(_STRUCTURAL_NOT_VERIFIED),
+            )
 
         version = _read_editor_version(proj)
         has_assets = (proj / "Assets").is_dir()
         has_settings = (proj / "ProjectSettings").is_dir()
         manifest = proj / "Packages" / "manifest.json"
-        scenes = list((proj / "Assets").rglob("*.unity")) if has_assets else []
+        scene_count, truncated = _count_scenes(proj / "Assets") if has_assets else (0, False)
         committed_library = (proj / "Library").is_dir()
 
         diagnostics = {
@@ -65,13 +81,15 @@ class UnityRunner(BaseRunner):
             "has_assets": has_assets,
             "has_project_settings": has_settings,
             "packages_manifest": manifest.is_file(),
-            "scene_count": len(scenes),
+            "scene_count": scene_count,
             "committed_library_dir": committed_library,
             "suggested_editor_image": (
                 f"{(ctx.config.pins.get('unity', {}) or {}).get('image_repo', 'unityci/editor')}:{version}"
                 if version else None
             ),
         }
+        if truncated:
+            diagnostics["scan_truncated"] = f"stopped after {_MAX_SCAN_FILES} files; scene_count is a lower bound"
 
         detected = has_assets and has_settings
         claims, not_verified = [], list(_STRUCTURAL_NOT_VERIFIED)
@@ -93,9 +111,21 @@ class UnityRunner(BaseRunner):
         )
 
 
+def _count_scenes(assets: Path) -> tuple[int, bool]:
+    scenes = seen = 0
+    for root, dirs, files in os.walk(assets, followlinks=False):
+        for f in files:
+            seen += 1
+            if seen > _MAX_SCAN_FILES:
+                return scenes, True
+            if f.endswith(".unity"):
+                scenes += 1
+    return scenes, False
+
+
 def _read_editor_version(proj: Path) -> Optional[str]:
     pv = proj / "ProjectSettings" / "ProjectVersion.txt"
-    if not pv.is_file():
+    if not pv.is_file() or not pv.resolve().is_relative_to(proj):   # a symlinked version file could point anywhere
         return None
     m = _VERSION_RE.search(pv.read_text(encoding="utf-8", errors="replace"))
     return m.group(1) if m else None

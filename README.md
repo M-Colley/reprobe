@@ -4,8 +4,8 @@
 git repo or an archival DOI), detects what it is, builds a sandboxed
 environment, runs the data analyses (Python / R / Jupyter / R&nbsp;Markdown),
 and writes a report that maps to ACM artifact badges and FAIR principles. Unity
-prototypes are supported at a structural tier. A small **local** LLM (Gemma&nbsp;3
-4B via Ollama, fully offline) optionally assists — but only ever advises.
+prototypes are supported at a structural tier. A small **local** LLM (Gemma&nbsp;4
+(e4b) via Ollama, fully offline) optionally assists — but only ever advises.
 
 Built for the AutoUI Open Data chair to **reuse year over year**: the annual job
 is editing `config/pins.yaml`, not the code.

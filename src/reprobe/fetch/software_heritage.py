@@ -13,10 +13,8 @@ import re
 import time
 from pathlib import Path
 
-import requests
-
 from ..models import FetchResult, Pin
-from .base import FetchError, download, maybe_unzip
+from .base import FetchError, download, get, maybe_unzip, post
 
 _SWHID = re.compile(r"(swh:1:(?:dir|rev|snp|rel|cnt):[0-9a-f]{40})", re.I)
 _API = "https://archive.softwareheritage.org/api/1"
@@ -42,10 +40,10 @@ class SoftwareHeritageFetcher:
             warnings.append(f"{swhid} is not a directory SWHID; resolve to a swh:1:dir: for retrieval")
         else:
             try:
-                requests.post(f"{_API}/vault/flat/{dir_swhid}/", timeout=60)
+                post(f"{_API}/vault/flat/{dir_swhid}/", timeout=60)
                 bundle = None
                 for _ in range(3):                       # brief poll; cooking is async
-                    st = requests.get(f"{_API}/vault/flat/{dir_swhid}/", timeout=30).json()
+                    st = get(f"{_API}/vault/flat/{dir_swhid}/", timeout=30).json()
                     if st.get("status") == "done":
                         bundle = st.get("fetch_url") or f"{_API}/vault/flat/{dir_swhid}/raw/"
                         break

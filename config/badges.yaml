@@ -11,22 +11,32 @@ acm:
   available:
     # Granted deterministically with NO code execution.
     require_archival_pin: true
-    require_checksum_when_available: true
+    require_checksum_when_available: true   # false: archival pin alone grants, unverified bytes
     # Only ARCHIVAL persistent IDs grant the badge. A bare GitHub commit SHA is
     # reproducibly pinned but NOT archival (GitHub is not an archival repo), so
     # it yields a "candidate — deposit in Zenodo/Software Heritage" result.
     archival_pin_kinds: [version_doi, swhid]
 
   functional:
-    mode: candidate                   # candidate | granted  (candidate = human confirms)
-    require_primary_pass: true        # all primary/declared steps status=pass
-    require_expected_output: true     # >= 1 declared expected_output produced
+    # candidate is a HARD invariant: any other value is clamped back to
+    # candidate and called out in the report notes (never silently honored).
+    mode: candidate
+    require_primary_pass: true        # all primary steps status=pass (false: >=1 pass suffices, noted)
+    require_expected_output: true     # >= 1 declared expected_output produced (false: relaxed, noted)
 
   results_reproduced:
     mode: not-evaluated               # requires comparing produced vs published results
 
 fair:
-  findable:     { require_persistent_id: true }
-  accessible:   { require_open_or_documented_access: true }
-  interoperable: { prefer_standard_formats: [csv, json, parquet, png, pdf, ipynb] }
-  reusable:     { reward_manifest: true, reward_open_license: true }
+  findable:
+    require_persistent_id: true       # persistent = acm.available.archival_pin_kinds (one knob, no drift)
+  accessible:
+    require_open_or_documented_access: true
+    # Resolver types that imply open (or documented) access. Adding a fetcher?
+    # Add its resolved_type here — no code change needed.
+    open_access_types: [zenodo, git, osf, figshare, dryad, dataverse, software_heritage, local]
+  interoperable:
+    prefer_standard_formats: [csv, json, parquet, png, pdf, ipynb]
+  reusable:
+    reward_manifest: true
+    reward_open_license: true

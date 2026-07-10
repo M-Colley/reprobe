@@ -10,13 +10,15 @@ import re
 from typing import Any
 
 _SUSPICIOUS = re.compile(
-    r"(?:\$\(|`|;\s*rm\s|--privileged|/var/run/docker\.sock|curl\s|wget\s|nc\s|bash\s+-c|os\.system|subprocess)",
+    r"(?:\$\(|`|;\s*rm\s|--privileged|/var/run/docker\.sock|curl\s|wget\s|nc\s|bash\s+-c|os\.system|subprocess|<\s*script)",
     re.I,
 )
 
 # Display-only fields: advisory text shown to a human, NEVER executed by the
-# harness. They may legitimately contain commands/markdown backticks. The only
-# field the harness could ever act on is a run-order "path", which stays strict.
+# harness. They may legitimately contain commands/markdown backticks (the report
+# renderer must escape them). The only field the harness could ever act on is a
+# run-order "path", which stays strict here AND is validated against the real
+# file tree in roles.detect_run_order.
 _FREEFORM_FIELDS = {"notes", "summary", "likely_cause", "why", "suggested_fixes", "uncertain"}
 
 

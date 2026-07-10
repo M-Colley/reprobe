@@ -71,7 +71,7 @@ reprobe/
 │   └── build-images.sh           # builds & tags all base images from pins.yaml
 │
 ├── src/reprobe/
-│   ├── cli.py                    # run | batch | report | doctor | build-images | unity-refresh | explain
+│   ├── cli.py                    # run | detect | batch | doctor | version (unity-refresh is Phase 3)
 │   ├── orchestrator.py           # the 6-stage state machine; owns work dirs
 │   ├── config.py  models.py      # pydantic: Submission, RunStep, RunResult, Report, ContainerSpec
 │   ├── docker_exec.py            # ◄ SINGLE chokepoint that shells out to `docker run` (§7)
@@ -142,7 +142,7 @@ USER $MAMBA_USER          # non-root by default (uid 57439)
 WORKDIR /work
 ```
 
-`base-py` carries the AutoUI-typical stack pinned: `python=3.11, jupyter, nbconvert, papermill, numpy, pandas, scikit-learn, xgboost, catboost, lightgbm, shap, matplotlib, seaborn, statsmodels`. `base-r` mirrors via micromamba-managed `r-base=4.4.*, r-tidyverse, r-rmarkdown, r-knitr, r-renv, pandoc` (one solver governs both stacks). Images are tagged `ghcr.io/autoui/reprobe-base-py:2026.1` (year.rev), digest recorded in every report. Built/cached images and Unity `Library/` live in named volumes for fast re-runs; digests still recorded so caching can't mask a change.
+`base-py` carries the AutoUI-typical stack pinned: `python=3.13, jupyter, nbconvert, papermill, numpy, pandas, scikit-learn, xgboost, catboost, lightgbm, shap, matplotlib, seaborn, statsmodels`. `base-r` mirrors via micromamba-managed `r-base=4.4.*, r-tidyverse, r-rmarkdown, r-knitr, r-renv, pandoc` (one solver governs both stacks). Images are tagged `ghcr.io/autoui/reprobe-base-py:2026.1` (year.rev), digest recorded in every report. Built/cached images and Unity `Library/` live in named volumes for fast re-runs; digests still recorded so caching can't mask a change.
 
 ---
 
@@ -347,8 +347,8 @@ Stance, stated plainly in `docs/badges.md`: **the harness grants Available, prop
 ### 9.3 Human-readable + batch + CI
 
 - Per-submission `report.md` + single-file `report.html`: badge chips, per-step table (claims vs `not_verified`), inline figures, logs, and the LLM summary clearly labeled *advisory*, with a "what was NOT checked" box.
-- `reprobe batch submissions.csv` → per-submission reports + static `out/dashboard.html` (sortable: submission, source, badges, verdict, runner tiers, warnings) with filters for `needs-auth`, `embargoed-until-DATE`, `lfs-incomplete`, `no-matching-editor-image`, `needs-network`, and a `badges.json`/CSV export for the proceedings.
-- **GitHub Actions:** `deploy/github-action/action.yml` runs the controller image in DooD; authors drop it in their repo for self-checks, the chair runs it as a batch matrix. A `build-base-images.yml` workflow rebuilds + pushes `reprobe-base-*` to GHCR when `images/**` or `pins.yaml` changes.
+- `reprobe batch submissions.csv` → per-submission reports + static `out/dashboard.html` (sortable: submission, source, badges, verdict) with a `badges.json` export. The dashboard flags emitted today are `warnings`, `anonymized`, and `no-checksum`; richer flags (`needs-auth`, `embargoed-until-DATE`, `lfs-incomplete`, `no-matching-editor-image`, `needs-network`) are planned, not yet emitted.
+- **GitHub Actions:** `deploy/github-action/action.yml` installs reprobe on the runner host from the action's own checkout and drives the host Docker daemon (sibling sandboxed containers); authors drop it in their repo for self-checks, the chair runs it as a batch matrix. `.github/workflows/test.yml` runs the deterministic unit suite on Python 3.10/3.13. A `build-base-images.yml` workflow that rebuilds + pushes `reprobe-base-*` to GHCR is planned (Phase 2); until then base images are built manually with `images/build-images.sh`.
 
 ```yaml
 - uses: autoui/reprobe-action@v1
@@ -363,15 +363,15 @@ Stance, stated plainly in `docs/badges.md`: **the harness grants Available, prop
 **The yearly job is editing data, not code.** A future chair touches `config/`, never `src/`, in the common case.
 
 **What changes per year (in likelihood order):**
-1. **`config/pins.yaml`** — the one file. Bump: `base_py_image`/`base_r_image` (`2027.1`), `micromamba_base` digest, `ollama_image`, `llm_model` (`gemma4:e4b`), `repo2docker` version, and the Unity block (`image_repo`, `default_image_version`, `known_tags_refreshed`).
-2. **Rebuild base images** only if the science stack moved: edit `images/base-*/env.yaml`, run `images/build-images.sh` (re-solves `conda-lock.yml`, rebuilds, tags `2027.x`); CI does this automatically on the change.
-3. **Refresh the `unityci/editor` tag map** — the one list that genuinely ages. `reprobe unity-refresh` queries Docker Hub and updates the digest-pinned tag map; the chair reviews and commits.
+1. **`config/pins.yaml`** — the one file. Bump: `base_images.python` / `base_images.r` (`2027.1`), the `base_images.micromamba_base` digest, `llm.ollama_image`, `llm.model` (`gemma4:e4b`), `tools.repo2docker`, and the `unity` block (`image_repo`, `default_image_version`, `known_tags`).
+2. **Rebuild base images** whenever the `base_images.*` tags changed (edit `images/base-*/env.yaml` only if the science stack moved): run `images/build-images.sh` manually (re-solves `conda-lock.yml`, rebuilds, tags `2027.x`). There is no CI image-build workflow yet.
+3. **Refresh the `unityci/editor` tag map** — the one list that genuinely ages. `reprobe unity-refresh` (Phase 3, not yet implemented — skip until then) will query Docker Hub and update the digest-pinned tag map for the chair to review and commit.
 4. **`config/badges.yaml` / `config/limits.yaml`** — if ACM thresholds or policy (timeouts, caps, default tiers) change.
 5. **Secrets** for the year (Unity seat / Licensing Server endpoint; archive tokens) via env — never committed.
 
 **What stays fixed (no annual work):** orchestrator, runner contract, sandbox flags, fetcher plugins, report schema, LLM prompts. New artifact types arrive as **new plugin packages** (entry points), not core edits. Fetcher plugins change only if a *platform* changes its API (rare, isolated to one file).
 
-**Guardrails:** `reprobe doctor` self-checks the whole config on `tests/fixtures/` (a known-good Python/R/Jupyter artifact + a deliberately-broken one), asserts all images are pullable, the lock solves, Ollama is reachable, Unity tags resolve, and golden reports still match — so a chair confirms "it still works" in one command before each review window. Everything is digest-pinned where possible, so an old report reproduces years later. GameCI/repo2docker are treated as **best-effort upstreams** behind our interface: a break degrades one runner/strategy with a clean error (`no-matching-editor-image`, `repo2docker-build-failed`), not the harness.
+**Guardrails:** `reprobe doctor` self-checks the whole config on `tests/fixtures/` (a known-good Python/R/Jupyter artifact + a deliberately-broken one), asserts all images are pullable, the lock solves, Ollama is reachable, Unity tags resolve, and golden reports still match — so a chair confirms "it still works" in one command before each review window. Everything is digest-pinned where possible, so an old report reproduces years later. GameCI/repo2docker are treated as **best-effort upstreams** behind our interface: a break degrades one runner/strategy with a clean error, not the harness (the specific labels `no-matching-editor-image` / `repo2docker-build-failed` land with the Phase-2/3 runners).
 
 **Trade-off, stated honestly:** we carry ~2 base-image Dockerfiles + a small orchestrator to maintain. In return there is no annual "the framework changed under us" rebuild — the yearly task collapses to bumping `pins.yaml` and occasionally re-solving a lock.
 
