@@ -26,6 +26,7 @@ from .models import (
     EnvPlan,
     FetchResult,
     Mount,
+    Pin,
     RawRunOutput,
     Report,
     RunResult,
@@ -104,7 +105,8 @@ class Orchestrator:
         try:
             fetch_res = fetch_ref(ref, srcdir)
         except FetchError as e:
-            report.source = {"input": ref, "error": str(e)}
+            report.source = _failed_source_section(ref, str(e))
+            report.not_verified.append(f"fetch failed ({e}); nothing about the artifact was checked")
             report.verdict = {"overall": "fetch-failed", "human_review_required": True}
             self._write(outdir, report)
             return report
@@ -339,6 +341,19 @@ def _source_section(f: FetchResult) -> dict[str, Any]:
         "pin": f.pin.model_dump(), "fetch_layer": f.fetch_layer,
         "anonymized": f.anonymized, "checksum_verified": f.checksum_verified,
         "warnings": f.warnings, "metadata": f.metadata,
+    }
+
+
+def _failed_source_section(ref: str, error: str) -> dict[str, Any]:
+    """A fetch failure still produces a renderable report. Keep the SAME shape
+    as _source_section (with safe defaults) so every consumer — html, markdown,
+    dashboard, badge logic — sees a consistent source object and never blows up
+    on a missing key."""
+    return {
+        "input": ref, "resolved_type": None,
+        "pin": Pin().model_dump(), "fetch_layer": None,
+        "anonymized": False, "checksum_verified": False,
+        "warnings": [], "metadata": {}, "error": error,
     }
 
 

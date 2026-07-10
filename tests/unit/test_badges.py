@@ -251,3 +251,35 @@ def test_markdown_shows_no_statement_verdict_note():
     out = markdown.render(_report(verdict=v))
     assert "nothing-executed" in out
     assert "no statement about the artifact" in out
+
+
+def _failed_report():
+    # Mirrors orchestrator._failed_source_section: a fetch failure still yields a
+    # renderable, shape-complete report (no badges/environment/steps).
+    return _report(
+        source={"input": "https://bad.invalid/x.git", "resolved_type": None,
+                "pin": Pin().model_dump(), "fetch_layer": None, "anonymized": False,
+                "checksum_verified": False, "warnings": [], "metadata": {},
+                "error": "git clone failed: could not resolve host"},
+        not_verified=["fetch failed (git clone failed: could not resolve host); "
+                      "nothing about the artifact was checked"],
+        verdict={"overall": "fetch-failed", "human_review_required": True},
+    )
+
+
+def test_html_renders_fetch_failed_report_without_error():
+    # Regression: a fetch-failed report has empty badges/environment; the renderer
+    # must not raise UndefinedError on the missing acm/pin keys.
+    out = html.render(_failed_report())
+    assert "fetch failed" in out.lower()
+    assert "could not resolve host" in out
+    assert "<b>Badges</b>" not in out          # no badge chips when nothing was fetched
+    assert "fetch-failed" in out               # verdict still shown
+
+
+def test_markdown_renders_fetch_failed_report_without_error():
+    out = markdown.render(_failed_report())
+    assert "Fetch failed" in out
+    assert "## Badges" not in out
+    assert "fetch-failed" in out
+    assert "What was NOT checked" in out

@@ -30,12 +30,14 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="muted">{{ r.harness_version }} · {{ r.timestamp }}</div>
 
 <div class="card"><b>Source</b><br>
- <code>{{ r.source.input }}</code> → {{ r.source.resolved_type }}
+ <code>{{ r.source.input }}</code>{% if r.source.resolved_type %} → {{ r.source.resolved_type }}
  · pin <code>{{ r.source.pin.kind }}</code>
- · checksum {{ r.source.checksum_verified }}{% if r.source.anonymized %} · <b>anonymized</b>{% endif %}
+ · checksum {{ r.source.checksum_verified }}{% endif %}{% if r.source.anonymized %} · <b>anonymized</b>{% endif %}
+ {% if r.source.error %}<div class="nv" style="margin-top:6px">⚠️ <b>fetch failed</b> — no code was run and nothing about the artifact was checked: {{ r.source.error }}</div>{% endif %}
  {% for w in r.source.warnings %}<div class="muted">⚠️ {{ w }}</div>{% endfor %}
 </div>
 
+{% if not r.source.error %}
 <div class="card"><b>Badges</b><br>
  {% set a = r.badges.acm %}
  {% macro chip(label,status) %}<span class="chip {{ {'granted':'granted','candidate':'candidate','not-met':'notmet','not-evaluated':'noteval'}[status] }}">{{ label }}: {{ status }}</span>{% endmacro %}
@@ -54,6 +56,7 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  {% if r.environment.resolved_deps_digest %}<div class="muted">deps digest <code>{{ r.environment.resolved_deps_digest }}</code></div>{% endif %}
  {% for w in r.environment.warnings %}<div class="muted">⚠️ {{ w }}</div>{% endfor %}
 </div>
+{% endif %}
 
 {% if r.provenance %}<div class="card"><b>Provenance</b><br>
  {% for k, v in r.provenance.items() %}<div class="muted">{{ k }}: <code>{{ v }}</code></div>{% endfor %}

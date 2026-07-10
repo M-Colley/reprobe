@@ -20,6 +20,21 @@ def render(r: Report) -> str:
     src = r.source
     L.append("## Source")
     L.append(f"- **Input:** `{src.get('input')}`")
+    if src.get("error"):
+        L.append(f"- ⚠️ **Fetch failed** — no code was run and nothing about the artifact "
+                 f"was checked: {src['error']}")
+        for w in src.get("warnings", []) or []:
+            L.append(f"  - ⚠️ {w}")
+        L.append("")
+        L.append("## Verdict")
+        L.append(f"**{r.verdict.get('overall')}** · human review required: "
+                 f"{r.verdict.get('human_review_required')}")
+        L.append("")
+        L.append("## What was NOT checked")
+        for x in sorted(set(r.not_verified)):
+            L.append(f"- {x}")
+        L.append("")
+        return "\n".join(L)
     L.append(f"- **Resolved:** {src.get('resolved_type')} · pin `{(src.get('pin') or {}).get('kind')}:"
              f"{(src.get('pin') or {}).get('value','')[:60]}`")
     L.append(f"- **Checksum verified:** {src.get('checksum_verified')} · **Anonymized:** {src.get('anonymized')}")
