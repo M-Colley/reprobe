@@ -95,6 +95,28 @@ def image_present(image: str) -> bool:
         return False
 
 
+def image_digest(image: str) -> Optional[str]:
+    """Resolve the immutable digest of the image actually on disk, so a report
+    pins exact bytes even though pins.yaml carries a mutable tag. Prefers the
+    registry RepoDigest (portable, pullable); falls back to the local content
+    Id when the image was built locally and never pushed. Returns None if the
+    image is absent or docker is unreachable (recorded as such, never faked)."""
+    if not image:
+        return None
+    try:
+        r = subprocess.run(
+            ["docker", "image", "inspect", image,
+             "--format", "{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}"],
+            capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return None
+        out = r.stdout.strip()
+        # RepoDigests look like "repo@sha256:..."; keep just the digest part.
+        return out.split("@", 1)[1] if "@" in out else out or None
+    except Exception:
+        return None
+
+
 def _docker_path(p: str) -> str:
     # Bind-mount sources MUST be absolute — Docker treats a relative path as a
     # named volume. Resolve to an absolute, forward-slash path (Docker Desktop

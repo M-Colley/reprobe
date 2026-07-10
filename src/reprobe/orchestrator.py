@@ -16,7 +16,7 @@ from typing import Any, Optional
 from . import __version__
 from .config import Config, load_config
 from .detect import detect as detect_artifacts
-from .docker_exec import run_container
+from .docker_exec import image_digest as _image_digest, run_container
 from .envbuild import plan as plan_env
 from .fetch import FetchError, configure as configure_fetchers, fetch as fetch_ref
 from .llm import from_config as llm_from_config, roles as llm_roles
@@ -179,6 +179,14 @@ class Orchestrator:
                     self._diagnose(res, llm_client, env_plan, step, logdir, runner.image_key)
                 results.append(res)
             self._collect_artifacts(results, rundir, outdir)
+            # Pin the exact image bytes that ran (pins.yaml carries a mutable tag).
+            # Resolve from the real daemon; None if absent/dry-run — never faked.
+            if not dry_run and any(r.executed for r in results):
+                img = report.environment.get("image")
+                digest = _image_digest(img) if img else None
+                if digest:
+                    env_plan.base_image_digest = digest
+                    report.environment["base_image_digest"] = digest
         report.steps = results
         report.unity = unity_section
 

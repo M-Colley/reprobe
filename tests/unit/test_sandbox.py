@@ -159,3 +159,39 @@ def test_dry_run_is_validated_too(tmp_path):
     raw = run_container(spec, load_config().limits_for("python"), tmp_path / "run.log",
                         dry_run=True)
     assert raw.error and "sandbox-violation" in raw.error
+
+
+# --- image_digest: pins exact bytes for the report, never fakes -------------
+
+def _patch_inspect(monkeypatch, stdout, returncode=0):
+    def fake_run(argv, **kw):
+        assert argv[:3] == ["docker", "image", "inspect"]
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+    monkeypatch.setattr(docker_exec.subprocess, "run", fake_run)
+
+
+def test_image_digest_prefers_repo_digest(monkeypatch):
+    _patch_inspect(monkeypatch, "ghcr.io/autoui/reprobe-base-py@sha256:" + "a" * 64 + "\n")
+    assert docker_exec.image_digest("ghcr.io/autoui/reprobe-base-py:2026.1") == "sha256:" + "a" * 64
+
+
+def test_image_digest_falls_back_to_local_id(monkeypatch):
+    # Locally-built, never-pushed image: no RepoDigest, template yields the Id.
+    _patch_inspect(monkeypatch, "sha256:" + "b" * 64 + "\n")
+    assert docker_exec.image_digest("local-only:latest") == "sha256:" + "b" * 64
+
+
+def test_image_digest_none_when_absent(monkeypatch):
+    _patch_inspect(monkeypatch, "", returncode=1)
+    assert docker_exec.image_digest("missing:tag") is None
+
+
+def test_image_digest_none_when_docker_unreachable(monkeypatch):
+    def boom(argv, **kw):
+        raise FileNotFoundError("docker not on PATH")
+    monkeypatch.setattr(docker_exec.subprocess, "run", boom)
+    assert docker_exec.image_digest("any:tag") is None
+
+
+def test_image_digest_empty_image_is_none():
+    assert docker_exec.image_digest("") is None
