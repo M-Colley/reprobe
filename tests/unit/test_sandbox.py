@@ -74,7 +74,7 @@ def test_valid_image_refs_accepted():
         "hello-world",
         "python:3.11-slim",
         "mambaorg/micromamba:1.5.10-noble",
-        "ghcr.io/autoui/reprobe-base-py:2026.1",
+        "ghcr.io/m-colley/reprobe-base-py:2026.1",
         "unityci/editor:ubuntu-2022.3.10f1-linux-il2cpp-3",
         "localhost:5000/img:tag",
         "python:3.11-slim@sha256:" + "a" * 64,
@@ -171,8 +171,8 @@ def _patch_inspect(monkeypatch, stdout, returncode=0):
 
 
 def test_image_digest_prefers_repo_digest(monkeypatch):
-    _patch_inspect(monkeypatch, "ghcr.io/autoui/reprobe-base-py@sha256:" + "a" * 64 + "\n")
-    assert docker_exec.image_digest("ghcr.io/autoui/reprobe-base-py:2026.1") == "sha256:" + "a" * 64
+    _patch_inspect(monkeypatch, "ghcr.io/m-colley/reprobe-base-py@sha256:" + "a" * 64 + "\n")
+    assert docker_exec.image_digest("ghcr.io/m-colley/reprobe-base-py:2026.1") == "sha256:" + "a" * 64
 
 
 def test_image_digest_falls_back_to_local_id(monkeypatch):
