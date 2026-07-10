@@ -106,17 +106,35 @@ def batch(
     no_llm: bool = typer.Option(False, "--no-llm"),
 ):
     """Run a whole review season and emit a sortable dashboard."""
+    import shutil
+
+    from . import __version__ as _v
+    from .models import Report
     from .report import dashboard as dash
 
     refs = _read_refs(csv_path)
     orch = _orch(workroot, config_dir)
+    outdir = Path(out)
+    outdir.mkdir(parents=True, exist_ok=True)
     reports = []
     for ref in refs:
         console.print(f"[cyan]>[/cyan] {ref}")
-        rep = orch.run(ref, do_run=not no_run, use_llm=not no_llm)
+        sid = submission_id(ref)
+        try:
+            rep = orch.run(ref, do_run=not no_run, use_llm=not no_llm, sid=sid)
+        except Exception as e:  # one bad submission must never abort the season
+            console.print(f"[red]  harness error[/red]: {type(e).__name__}: {e}")
+            rep = Report(submission_id=sid, harness_version=f"reprobe {_v}",
+                         timestamp="", source={"input": ref, "error": f"{type(e).__name__}: {e}"},
+                         verdict={"overall": "infra-error", "human_review_required": True,
+                                  "note": "harness crashed on this submission — no statement about the artifact"})
         reports.append(rep.model_dump(mode="json"))
-    outdir = Path(out)
-    outdir.mkdir(parents=True, exist_ok=True)
+        # dashboard hrefs are <sid>/report.html — make out/ a self-contained bundle
+        src_report = Path(workroot) / sid / "out" / "report.html"
+        if src_report.is_file():
+            dst = outdir / sid / "report.html"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_report, dst)
     (outdir / "dashboard.html").write_text(dash.render(reports), encoding="utf-8")
     (outdir / "badges.json").write_text(json.dumps(
         [{"submission_id": r["submission_id"], "badges": r["badges"]} for r in reports], indent=2), encoding="utf-8")
@@ -129,6 +147,8 @@ def doctor(
     smoke: bool = typer.Option(False, "--smoke", help="run a sandbox smoke test (hello-world)"),
 ):
     """Self-check: config, Docker, base images, Ollama, sandbox flags."""
+    import shutil as _shutil
+
     cfg = load_config(config_dir)
     ok = True
     t = Table("check", "status", "detail")
@@ -136,14 +156,21 @@ def doctor(
     t.add_row("config dir", "ok", str(cfg.config_dir))
     t.add_row("pins.yaml", "ok" if cfg.pins else "FAIL", f"year={cfg.pins.get('year')}")
 
+    git_ok = _shutil.which("git") is not None
+    ok &= git_ok
+    t.add_row("git", "ok" if git_ok else "FAIL",
+              "on PATH" if git_ok else "not found — install git before fetching repositories")
+
     dav = docker_available()
     ok &= dav
     t.add_row("docker", "ok" if dav else "FAIL", "daemon reachable" if dav else "not available")
 
+    # Missing base images mean nothing can run — fail loudly, don't just advise.
     for key in ("python", "r"):
         img = cfg.base_image(key)
         present = image_present(img) if dav else False
-        t.add_row(f"base image [{key}]", "ok" if present else "--",
+        ok &= present
+        t.add_row(f"base image [{key}]", "ok" if present else "FAIL",
                   f"{img} {'present' if present else '(build with images/build-images.sh)'}")
 
     from .llm import from_config as llm_from_config
@@ -151,12 +178,21 @@ def doctor(
     if client is None:
         t.add_row("LLM", "--", "disabled in pins.yaml")
     else:
-        up = client.available()
-        t.add_row("LLM (Ollama)", "ok" if up else "--",
-                  f"{cfg.llm.get('model')} {'reachable' if up else 'not running (optional; --no-llm works)'}")
+        st = client.status()
+        t.add_row("LLM (Ollama)", "ok" if st.get("ok") else "--",
+                  f"{st.get('detail')} (optional; --no-llm works)")
 
-    enabled = [row["id"] for row in cfg.runner_rows if row.get("enabled", True)]
-    t.add_row("runners", "ok", ", ".join(enabled))
+    from .runners import RunnerLoadError, load_runners as _load_runners
+    errs: list[str] = []
+    try:
+        loaded = _load_runners(rows=cfg.runner_rows, errors=errs)
+        detail = ", ".join(sorted(loaded)) or "(none)"
+        t.add_row("runners", "ok" if loaded else "FAIL", detail)
+    except RunnerLoadError as e:
+        ok = False
+        t.add_row("runners", "FAIL", str(e))
+    for msg in errs:
+        t.add_row("runners", "--", msg)
     console.print(t)
 
     if smoke:
@@ -173,6 +209,13 @@ def doctor(
                 console.print(f"  [dim]{' '.join(raw.argv_redacted)}[/dim]")
 
     raise typer.Exit(0 if ok else 1)
+
+
+@app.command("unity-refresh")
+def unity_refresh():
+    """Refresh the Unity image tag map (Phase 3 — not yet implemented)."""
+    console.print("unity-refresh is not yet implemented (Phase 3) — nothing to do this year. "
+                  "Unity projects are checked structurally (T0) without it.")
 
 
 @app.command()

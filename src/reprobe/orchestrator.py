@@ -18,7 +18,7 @@ from .config import Config, load_config
 from .detect import detect as detect_artifacts
 from .docker_exec import run_container
 from .envbuild import plan as plan_env
-from .fetch import FetchError, fetch as fetch_ref
+from .fetch import FetchError, configure as configure_fetchers, fetch as fetch_ref
 from .llm import from_config as llm_from_config, roles as llm_roles
 from .models import (
     ContainerSpec,
@@ -54,8 +54,11 @@ class Orchestrator:
     def __init__(self, config: Optional[Config] = None, *, workroot: str | Path = "work"):
         self.config = config or load_config()
         self.workroot = Path(workroot)
+        configure_fetchers(self.config.fetch_cfg)   # extra_git_hosts / dataverse_hosts from pins.yaml
         enabled = {row["id"] for row in self.config.runner_rows if row.get("enabled", True)}
-        self.runners = load_runners(enabled_ids=enabled or None)
+        self._runner_load_errors: list[str] = []
+        self.runners = load_runners(enabled_ids=enabled or None, rows=self.config.runner_rows,
+                                    errors=self._runner_load_errors)
 
     # ------------------------------------------------------------------ #
     def run(
@@ -80,13 +83,22 @@ class Orchestrator:
         for d in (srcdir, outdir, logdir):
             d.mkdir(parents=True, exist_ok=True)
 
+        report = Report(submission_id=sid, harness_version=f"reprobe {__version__}", timestamp=_now())
+        report.provenance = self._provenance()
+
         llm_client = None
         if use_llm:
             llm_client = llm_from_config(self.config.llm)
-            if llm_client is not None and not llm_client.available():
-                llm_client = None
-
-        report = Report(submission_id=sid, harness_version=f"reprobe {__version__}", timestamp=_now())
+            if llm_client is not None:
+                status = llm_client.status()
+                if not status.get("ok"):
+                    # enabled-but-broken is not the same as --no-llm; say why.
+                    report.llm = {"status": "enabled-but-unavailable",
+                                  "model": self.config.llm.get("model"),
+                                  "detail": status.get("detail")}
+                    llm_client = None
+                else:
+                    report.llm = {"model": self.config.llm.get("model"), "source": "llm-advisory"}
 
         # -- (1) FETCH (network on; code NOT run) ----------------------- #
         try:
@@ -106,7 +118,7 @@ class Orchestrator:
             "run_plan_source": detect_res.run_plan_source,
             "llm_confidence": detect_res.llm_confidence,
             "flags": detect_res.flags,
-            "notes": detect_res.notes,
+            "notes": detect_res.notes + self._runner_load_errors,
             "steps": [s.target for s in detect_res.steps],
         }
 
@@ -123,8 +135,7 @@ class Orchestrator:
         ran = False
         if do_run and detect_res.steps:
             ran = True
-            if rundir.exists():
-                shutil.rmtree(rundir, ignore_errors=True)
+            rundir = self._fresh_rundir(work, rundir)
             shutil.copytree(srcdir, rundir)
             self._install_phase(env_plan, rundir, logdir, install=install, dry_run=dry_run, report=report)
 
@@ -139,10 +150,13 @@ class Orchestrator:
                 runner = runner_for(step, self.runners)
                 if runner is None:
                     results.append(RunResult(runner=step.runner or "?", target=step.target,
-                                             status="skipped", diagnostics={"reason": "no runner"}))
+                                             status="skipped", executed=False,
+                                             diagnostics={"reason": "no runner",
+                                                          "loaded_runners": sorted(self.runners)}))
                     continue
-                image = None if runner.image_key == "unity" else (
-                    env_plan.image if env_plan.env_provenance == "author-specified"
+                image = None if getattr(runner, "host_only", False) else (
+                    env_plan.image
+                    if env_plan.env_provenance in ("author-specified", "fallback-generic")
                     else self.config.base_image(runner.image_key) or env_plan.image)
                 ctx = RunContext(step=step, rundir=rundir, src_dir=srcdir, out_dir=outdir,
                                  image=image, config=self.config,
@@ -151,6 +165,7 @@ class Orchestrator:
                 spec = runner.container_spec(ctx)
                 if spec is None:                       # host-only runner (Unity T0)
                     res = runner.interpret(None, ctx)
+                    res.executed = False               # authoritative: no author code ran
                     if runner.id == "unity":
                         unity_section = _unity_section(res)
                 else:
@@ -158,7 +173,8 @@ class Orchestrator:
                         spec = spec.model_copy(update={"network": "egress"})
                     log_path = logdir / f"step{i:02d}-{runner.id}.log"
                     raw = run_container(spec, ctx.limits, log_path,
-                                        allow_egress=allow_egress_runtime, dry_run=dry_run)
+                                        allow_egress=allow_egress_runtime, dry_run=dry_run,
+                                        work_root=rundir)
                     res = runner.interpret(raw, ctx)
                     self._diagnose(res, llm_client, env_plan, step, logdir, runner.image_key)
                 results.append(res)
@@ -171,13 +187,14 @@ class Orchestrator:
             fetch_res, results, detect_res,
             badges_cfg=self.config.badges, functional_requested=functional_requested, ran=ran)
         report.verdict = badge_rules.verdict(results, ran)
-        report.not_verified = sorted({x for r in results for x in r.not_verified})
+        report.not_verified = sorted(
+            {x for r in results for x in r.not_verified} | set(report.not_verified))
 
         # -- (6) LLM SUMMARY (advisory) --------------------------------- #
         if llm_client is not None:
             summary = llm_roles.summarize(llm_client, report.model_dump(mode="json"))
             if summary:
-                report.llm = {"summary": summary, "model": self.config.llm.get("model"), "source": "llm-advisory"}
+                report.llm["summary"] = summary
 
         self._write(outdir, report)
         return report
@@ -201,18 +218,34 @@ class Orchestrator:
         prep = ("set -e; mkdir -p /work/.reprobe_deps /work/.reprobe_Rlib; export HOME=/work; "
                 "export R_LIBS_USER=/work/.reprobe_Rlib; export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; ")
 
+        install_results: dict[str, Any] = {}
         for key, cmds in groups.items():
             if not cmds:
                 continue
-            image = self.config.base_image(key) or env_plan.image
+            image = (env_plan.image if env_plan.env_provenance == "fallback-generic"
+                     else self.config.base_image(key) or env_plan.image)
             spec = ContainerSpec(image=image, command=["bash", "-c", prep + " ; ".join(cmds)],
                                  workdir="/work",
                                  mounts=[Mount(source=rundir.as_posix(), target="/work", read_only=False)],
                                  network="egress")
-            raw = run_container(spec, relaxed, logdir / f"install-{key}.log",
-                                allow_egress=True, dry_run=dry_run)
-            note = f"install[{key}] ({'ok' if raw.exit_code == 0 else 'failed/skipped'}; egress phase)"
+            log_path = logdir / f"install-{key}.log"
+            raw = run_container(spec, relaxed, log_path, allow_egress=True, dry_run=dry_run,
+                                work_root=rundir)
+            ok = raw.exit_code == 0
+            install_results[key] = {"exit_code": raw.exit_code, "ok": ok}
+            note = f"install[{key}] ({'ok' if ok else 'failed/skipped'}; egress phase)"
             report.environment.setdefault("notes", []).append(note)
+            if not ok:
+                report.not_verified.append(
+                    f"dependency install ({key}) failed or was skipped; step failures may be "
+                    "environmental rather than the artifact's fault")
+        report.environment["install_results"] = install_results
+        # Hash the install logs (they end with pip freeze / installed.packages()) so
+        # two runs of the same deposit are comparable without re-solving.
+        digest = _hash_install_logs(logdir)
+        if digest:
+            env_plan.resolved_deps_digest = digest
+            report.environment["resolved_deps_digest"] = digest
 
     def _diagnose(self, res: RunResult, llm_client, env_plan: EnvPlan, step,
                   logdir: Path | None = None, image_key: str | None = None) -> None:
@@ -250,6 +283,33 @@ class Orchestrator:
                     except OSError:
                         pass
 
+    def _provenance(self) -> dict[str, Any]:
+        prov: dict[str, Any] = {
+            "pins_year": self.config.pins.get("year"),
+            "pins_revision": self.config.pins.get("revision"),
+        }
+        for name in ("pins", "limits", "runners", "badges"):
+            p = self.config.config_dir / f"{name}.yaml"
+            if p.is_file():
+                prov[f"{name}.yaml_sha256"] = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+        if self.config.llm.get("enabled"):
+            prov["llm_model"] = self.config.llm.get("model")
+            prov["llm_confidence_threshold"] = self.config.llm.get("confidence_threshold")
+        return prov
+
+    @staticmethod
+    def _fresh_rundir(work: Path, rundir: Path) -> Path:
+        """Remove the previous run copy; if Windows file locks defeat rmtree,
+        fall back to a fresh uniquely-named dir instead of crashing mid-batch."""
+        if rundir.exists():
+            shutil.rmtree(rundir, ignore_errors=True)
+        if rundir.exists():
+            for n in range(1, 100):
+                cand = work / f"run-{n}"
+                if not cand.exists():
+                    return cand
+        return rundir
+
     def _write(self, outdir: Path, report: Report) -> None:
         (outdir / "report.json").write_text(
             json.dumps(report.model_dump(mode="json"), indent=2), encoding="utf-8")
@@ -278,8 +338,21 @@ def _env_section(p: EnvPlan) -> dict[str, Any]:
     return {
         "strategy": p.strategy, "image": p.image, "env_provenance": p.env_provenance,
         "install_commands": p.install_commands, "repo2docker_version": p.repo2docker_version,
+        "base_image_digest": p.base_image_digest, "resolved_deps_digest": p.resolved_deps_digest,
         "warnings": p.warnings,
     }
+
+
+def _hash_install_logs(logdir: Path) -> Optional[str]:
+    h = hashlib.sha256()
+    found = False
+    for log in sorted(logdir.glob("install-*.log")):
+        try:
+            h.update(log.read_bytes())
+            found = True
+        except OSError:
+            pass
+    return f"sha256:{h.hexdigest()[:32]}" if found else None
 
 
 def _unity_section(res: RunResult) -> dict[str, Any]:

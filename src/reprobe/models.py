@@ -83,6 +83,7 @@ class RunResult(BaseModel):
     runner: str
     target: str
     status: RunStatus
+    executed: bool = True               # False for host-only tiers (no author code ran)
     tier_reached: Optional[str] = None
     exit_code: Optional[int] = None
     duration_s: float = 0.0
@@ -127,7 +128,8 @@ class DetectResult(BaseModel):
 class EnvPlan(BaseModel):
     strategy: Literal["pinned-base", "repo2docker", "author-image", "besteffort"] = "pinned-base"
     image: str
-    env_provenance: Literal["author-specified", "harness-default", "repo2docker-built"] = "harness-default"
+    env_provenance: Literal["author-specified", "harness-default", "repo2docker-built",
+                            "fallback-generic"] = "harness-default"
     install_commands: list[str] = Field(default_factory=list)   # run in a gated-egress phase
     base_image_digest: Optional[str] = None
     resolved_deps_digest: Optional[str] = None
@@ -144,6 +146,7 @@ class Report(BaseModel):
     harness_version: str
     timestamp: str
     source: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)   # pins + config hashes for later re-runs
     environment: dict[str, Any] = Field(default_factory=dict)
     detect: dict[str, Any] = Field(default_factory=dict)
     steps: list[RunResult] = Field(default_factory=list)

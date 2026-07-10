@@ -231,7 +231,7 @@ Reports **which tier it reached**, never a bare pass/fail.
 
 **The hard "never silently runs code" guarantee is structural, not a prompt instruction:**
 - The LLM client returns **data only**. There is no tool/function-calling surface wired to it — it physically cannot execute anything.
-- LLM-proposed plans/fixes are **inert** unless the operator passes `--apply-llm-fixes` (or `--llm-autorun` for run-order) **and** `confidence ≥ threshold`. Default: off → printed as a labeled suggestion; the step is marked `skipped: no manifest, LLM plan not auto-executed`.
+- LLM output is **advisory-only** — nothing it returns is ever applied, at any confidence. The llm package enforces `pins.yaml llm.confidence_threshold` by stamping below-threshold advice `meets_threshold: false` ("shown for transparency only, never applied"), and run-order suggestions are validated against the real file tree before being surfaced.
 - `llm/guard.py` validates every response against the passive schema and rejects anything with shell/exec strings outside declared fields. Every LLM-derived report statement is labeled `source: "llm-advisory"` with its confidence, visually distinct from harness-verified facts.
 - `--no-llm` makes the harness **fully functional and deterministic** with the LLM off (detection falls back to `signatures.py`; reports lose only the narrative summary). Golden tests must pass with the LLM disabled — proving the LLM is non-load-bearing.
 
@@ -393,7 +393,7 @@ Stance, stated plainly in `docs/badges.md`: **the harness grants Available, prop
 
 **Phase 3 — Unity (2 wks).** T0 structural first (no license — ships and is useful immediately). Version→image resolution + `unity-refresh`. T1 compile + T2 Linux-player build behind the license boundary, with caching, timeouts, the `no-matching-editor-image` clean failure, and the honest `not_verified` wording wired into the report.
 
-**Phase 4 — LLM polish (1 wk).** Ollama sidecar + Gemma 4 (e4b). Wire the three bounded roles + `guard.py` + `--no-llm`/`--apply-llm-fixes` gating; render LLM output as clearly-labeled, confidence-scored advice. Confirm golden tests pass **with the LLM disabled** (proves the value-add is non-load-bearing).
+**Phase 4 — LLM polish (1 wk).** Ollama sidecar + Gemma 4 (e4b). Wire the three bounded roles + `guard.py` + `--no-llm`; render LLM output as clearly-labeled, confidence-scored advice (advisory-only — never applied). Confirm golden tests pass **with the LLM disabled** (proves the value-add is non-load-bearing).
 
 **Phase 5 — Reuse seal (≤1 wk).** `chair-runbook.md`, `doctor` polish, a pin-only "next year" dry run, tag `v1.0` + base images `2026.1`.
 

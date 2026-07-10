@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config
+from ..docker_exec import docker_available, image_present
 from ..models import DetectResult, EnvPlan
 
 
@@ -81,7 +82,22 @@ def plan(
         warnings.append("repo declares system-level setup (Dockerfile/postBuild/apt.txt); "
                         "pinned base may lack some deps. Re-run with --allow-repo2docker for fidelity.")
 
-    return EnvPlan(strategy=strategy, image=image, env_provenance="harness-default",
+    # Pinned base declared but not present locally: fall back to the generic
+    # image (python stacks only — there is no generic R fallback) rather than
+    # letting every step fail with an image-missing infra error.
+    provenance = "harness-default"
+    if image and docker_available() and not image_present(image):
+        fallback = config.fetch_cfg.get("fallback_python_image", "")
+        if image_key == "python" and fallback:
+            warnings.append(f"pinned base image '{image}' is not present locally; using generic "
+                            f"fallback '{fallback}' (best-effort — build the real base with "
+                            "images/build-images.sh)")
+            image, provenance = fallback, "fallback-generic"
+        else:
+            warnings.append(f"pinned base image '{image}' is not present locally and no fallback "
+                            "applies — steps will report an infra error, not an artifact failure")
+
+    return EnvPlan(strategy=strategy, image=image, env_provenance=provenance,
                    install_commands=install, warnings=warnings + dep_warnings)
 
 

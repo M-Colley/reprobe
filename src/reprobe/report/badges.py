@@ -91,6 +91,17 @@ def decide(
             else:
                 functional = "not-met"
 
+    # Pipeline-level completeness: per-step status stays honest for multi-step
+    # pipelines (the manifest's outputs are broadcast onto every step), but the
+    # human confirmer must see anything declared that NO step ever produced.
+    if ran and functional_requested:
+        declared = {o for d in detect.steps for o in d.expected_outputs}
+        produced = {o for s in steps for o in s.expected_met}
+        missing = sorted(declared - produced)
+        if missing:
+            notes.append(f"{len(missing)} declared output(s) never produced by any step: "
+                         + ", ".join(missing))
+
     acm = {
         "available": available,
         "functional": functional,
@@ -102,7 +113,7 @@ def decide(
 
 
 def _primary_steps(steps: list[RunResult], detect: DetectResult) -> list[RunResult]:
-    runnable = [s for s in steps if s.runner != "unity"]   # unity T0 is structural, not functional
+    runnable = [s for s in steps if s.executed]   # host-only tiers (Unity T0) are structural, not functional
     primary_targets = {d.target for d in detect.steps if getattr(d, "primary", True)}
     gated = [s for s in runnable if s.target in primary_targets]
     return gated or runnable   # defensive: if targets don't line up, gate on everything
@@ -171,7 +182,7 @@ def _fair(fetch: FetchResult, detect: DetectResult, *,
 def verdict(steps: list[RunResult], ran: bool) -> dict[str, Any]:
     if not ran:
         return {"overall": "not-run", "human_review_required": True}
-    runnable = [s for s in steps if s.runner != "unity"]
+    runnable = [s for s in steps if s.executed]
     statuses = [s.status for s in runnable]
     if not runnable:
         overall = "structural-only"

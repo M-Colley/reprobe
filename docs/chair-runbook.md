@@ -69,6 +69,14 @@ orchestrator alone.
 the safety envelope, and the LLM prompts. New artifact types arrive as **new
 runner plugin packages** (entry points), not core edits.
 
+## If a URL reports "no fetcher matched"
+
+Institutional hosts the built-in fetchers don't recognize are a config fix, not
+a code fix: add the hostname to `pins.yaml` under `fetch.extra_git_hosts`
+(institutional GitLab/Gitea, e.g. `gitlab.lrz.de`) or `fetch.dataverse_hosts`
+(Dataverse installs whose hostname lacks "dataverse", e.g.
+`darus.uni-stuttgart.de`), then re-run.
+
 ## If an upstream breaks
 
 GameCI and repo2docker are best-effort upstreams behind our interface. A break

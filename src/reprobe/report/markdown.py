@@ -27,6 +27,13 @@ def render(r: Report) -> str:
         L.append(f"  - ⚠️ {w}")
     L.append("")
 
+    det_notes = (r.detect or {}).get("notes") or []
+    if det_notes:
+        L.append("## Detection")
+        for n in det_notes:
+            L.append(f"- ℹ️ {n}")
+        L.append("")
+
     env = r.environment
     L.append("## Environment")
     L.append(f"- **Strategy:** {env.get('strategy')} ({env.get('env_provenance')})")
@@ -66,6 +73,9 @@ def render(r: Report) -> str:
             head += f" (tier: {s.tier_reached})"
         L.append(head)
         L.append(f"- runner: `{s.runner}` · exit: {s.exit_code} · {s.duration_s}s")
+        if s.diagnostics.get("harness_error"):
+            L.append(f"- ⚠️ **harness error** — no statement about the artifact: "
+                     f"{s.diagnostics['harness_error']}")
         if s.claims:
             L.append("- **Verified claims:**")
             for c in s.claims:

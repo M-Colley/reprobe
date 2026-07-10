@@ -25,8 +25,12 @@ llm:
   ollama_image: "ollama/ollama:0.12.5"
   model: "gemma4:e4b"              # Gemma 4 e4b (effective-4B edge build) — offline via Ollama, CPU-OK
   keep_alive: "10m"
-  timeout_s: 60                   # hard wall-clock cap per LLM call
-  confidence_threshold: 0.6       # below this, LLM suggestions are shown but never applied
+  # Read timeout per LLM call (connect is capped at 5s in code). With stream=false
+  # this effectively caps generation time, but it is not a strict wall-clock bound.
+  timeout_s: 60
+  # Advice below this is stamped meets_threshold: false in the report ("shown for
+  # transparency only, never applied"). Advice is never auto-applied either way.
+  confidence_threshold: 0.6
 
 tools:
   repo2docker: "jupyter-repo2docker==2024.07.0"   # opt-in fallback builder only
@@ -44,3 +48,7 @@ fetch:
   smoke_image: "hello-world"
   # Generic image for repos when a base image isn't built yet (best-effort).
   fallback_python_image: "python:3.13-slim"
+  # Institutional hosts the built-in fetchers should also accept — the fix for
+  # "no fetcher matched" without touching src/ (see chair runbook).
+  extra_git_hosts: []               # e.g. [gitlab.lrz.de]
+  dataverse_hosts: []               # installs whose hostname lacks "dataverse", e.g. [darus.uni-stuttgart.de]

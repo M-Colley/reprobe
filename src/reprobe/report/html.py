@@ -44,6 +44,10 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  <div class="muted" style="margin-top:6px">FAIR — findable: {{ r.badges.fair.findable }} · accessible: {{ r.badges.fair.accessible }} · interoperable: {{ r.badges.fair.interoperable }} · reusable: {{ r.badges.fair.reusable }}</div>
 </div>
 
+{% if r.detect.notes %}<div class="card"><b>Detection</b><br>
+ {% for n in r.detect.notes %}<div class="muted">ℹ️ {{ n }}</div>{% endfor %}
+</div>{% endif %}
+
 <div class="card"><b>Environment</b><br>
  {{ r.environment.strategy }} ({{ r.environment.env_provenance }}) · <code>{{ r.environment.image }}</code>
  {% if r.environment.base_image_digest %}<div class="muted">image digest <code>{{ r.environment.base_image_digest }}</code></div>{% endif %}
@@ -61,7 +65,8 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  <tr><td><code>{{ s.target }}</code></td><td>{{ s.runner }}{% if s.tier_reached %}<br><span class="muted">{{ s.tier_reached }}</span>{% endif %}</td>
  <td class="{{ {'pass':'pass','fail':'fail','error':'fail','timeout':'fail','partial':'partial','skipped':'partial'}.get(s.status,'') }}">{{ s.status }}</td>
  <td>{{ s.duration_s }}s</td>
- <td>{% for c in s.claims %}✓ {{ c }}<br>{% endfor %}{% for c in s.not_verified %}<span class="muted">✗ {{ c }}</span><br>{% endfor %}
+ <td>{% if s.diagnostics.harness_error %}<div class="nv">⚠️ <b>harness error</b> — no statement about the artifact: {{ s.diagnostics.harness_error }}</div>{% endif %}
+ {% for c in s.claims %}✓ {{ c }}<br>{% endfor %}{% for c in s.not_verified %}<span class="muted">✗ {{ c }}</span><br>{% endfor %}
  {% if s.diagnostics.llm_advisory %}<div class="adv" style="margin-top:6px">💡 <b>diagnosis (advisory):</b> {{ s.diagnostics.llm_advisory.likely_cause }}{% for f in s.diagnostics.llm_advisory.suggested_fixes %}<br>→ {{ f }}{% endfor %}</div>{% endif %}</td></tr>
  {% else %}<tr><td colspan="5" class="muted">no runnable steps executed</td></tr>{% endfor %}
  </table>

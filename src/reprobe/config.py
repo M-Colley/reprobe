@@ -57,9 +57,11 @@ class Config:
         base = dict(self.limits.get("defaults", {}))
         per = (self.limits.get("per_runner", {}) or {}).get(runner_id, {})
         base.update(per)
-        # per-submission allowlist is global
-        base["allow_net_hosts"] = self.limits.get("allow_net_hosts", []) or []
         return base
+
+    @property
+    def fetch_cfg(self) -> dict[str, Any]:
+        return self.pins.get("fetch", {}) or {}
 
     @property
     def llm(self) -> dict[str, Any]:
