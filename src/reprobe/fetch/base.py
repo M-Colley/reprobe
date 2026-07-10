@@ -119,10 +119,10 @@ def _check_tar_member(m: tarfile.TarInfo) -> None:
 
 def _extract_tar(t: tarfile.TarFile, dest: Path) -> None:
     try:
-        t.extractall(dest, filter="data")   # sanitizes members (3.12+, backported to 3.10.12/3.11.4)
+        t.extractall(dest, filter="data")   # sanitizes members; present on 3.12+ and 3.11.4+
         return
     except TypeError:
-        pass                                # older interpreter: validate by hand
+        pass                                # 3.11.0–3.11.3: no filter= kwarg, validate by hand
     members = t.getmembers()
     for m in members:
         _check_tar_member(m)

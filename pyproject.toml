@@ -7,7 +7,7 @@ name = "reprobe"
 version = "0.1.0"
 description = "Reusable artifact-reproducibility harness for AutoUI open data — URL in, runnable check out."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "AutoUI Open Data" }]
 dependencies = [

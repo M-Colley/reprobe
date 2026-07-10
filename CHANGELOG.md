@@ -4,6 +4,10 @@
 
 - **Python 3.13 is the default runtime** (was 3.11): `base-py` env, controller
   image, `fetch.fallback_python_image`, and the GitHub Action.
+- **Harness now requires Python ≥ 3.11** (`requires-python`, was `>=3.10`): drops
+  the oldest interpreter for the chair's orchestrator and moves the floor toward
+  the safe `tarfile.extractall(filter="data")` backport (the manual member
+  validator still covers 3.11.0–3.11.3).
 - **GitHub Action:** installs reprobe from the action's own checkout
   (`$GITHUB_ACTION_PATH`), never the caller's workspace (which may hold an
   untrusted submission); `reprobe doctor` failures now fail the job instead of
@@ -16,7 +20,7 @@
   no longer tells the chair to record local `.Id` digests in pins.yaml — the
   committed `conda-lock.yml` is the reproducibility pin for local builds.
 - **CI:** new `.github/workflows/test.yml` runs the daemon-free unit suite on
-  Python 3.10/3.13.
+  Python 3.11/3.13.
 - **Docs truth pass:** removed the false "CI rebuilds images" claim (manual
   `images/build-images.sh` until the Phase-2 workflow ships); marked
   `reprobe unity-refresh` as Phase 3 / not implemented; trimmed dashboard

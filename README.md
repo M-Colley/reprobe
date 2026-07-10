@@ -24,7 +24,7 @@ anything. `reprobe --no-llm` is fully functional and deterministic.
 ## Install
 
 ```bash
-pip install -e .            # Python 3.10+; needs Docker available for runs
+pip install -e .            # Python 3.11+; needs Docker available for runs
 reprobe doctor             # self-check: config, Docker, base images, Ollama
 ```
 
