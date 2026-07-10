@@ -1,0 +1,13 @@
+version: 1
+title: "Example analysis fixture (stdlib-only)"
+environment:
+  builder: pinned-base
+  type: python
+  dependencies: null          # uses only the Python standard library
+run:
+  steps:
+    - 01_analyze.py
+expected_outputs:
+  - results/summary.csv
+  - figures/summary.txt
+badges_claimed: [available, functional]

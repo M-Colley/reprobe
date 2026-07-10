@@ -1,0 +1,32 @@
+# ============================================================================
+#  badges.yaml  —  declarative badge decision rules. Tuning thresholds is a
+#  config change, not a code change. The reporter (report/badges.py) reads this.
+#
+#  Stance: the harness GRANTS only "Available" automatically; it PROPOSES
+#  "Functional" as a candidate for a human; it never auto-grants anything
+#  deeper. Over-claiming is the cardinal sin of an automated repro checker.
+# ============================================================================
+
+acm:
+  available:
+    # Granted deterministically with NO code execution.
+    require_archival_pin: true
+    require_checksum_when_available: true
+    # Only ARCHIVAL persistent IDs grant the badge. A bare GitHub commit SHA is
+    # reproducibly pinned but NOT archival (GitHub is not an archival repo), so
+    # it yields a "candidate — deposit in Zenodo/Software Heritage" result.
+    archival_pin_kinds: [version_doi, swhid]
+
+  functional:
+    mode: candidate                   # candidate | granted  (candidate = human confirms)
+    require_primary_pass: true        # all primary/declared steps status=pass
+    require_expected_output: true     # >= 1 declared expected_output produced
+
+  results_reproduced:
+    mode: not-evaluated               # requires comparing produced vs published results
+
+fair:
+  findable:     { require_persistent_id: true }
+  accessible:   { require_open_or_documented_access: true }
+  interoperable: { prefer_standard_formats: [csv, json, parquet, png, pdf, ipynb] }
+  reusable:     { reward_manifest: true, reward_open_license: true }

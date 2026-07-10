@@ -1,0 +1,42 @@
+# ============================================================================
+#  pins.yaml  —  THE ONE FILE A FUTURE CHAIR EDITS.
+#  Bump versions/digests here each year; you should never need to touch src/.
+#  Everything pinned is recorded in every report so old reports reproduce later.
+#  Run `reprobe doctor` after any change to confirm the harness still works.
+# ============================================================================
+
+year: 2026
+revision: 1                       # base-image tag becomes "<year>.<revision>"
+
+base_images:
+  # The immutable build base. Add the @sha256:... digest after first pull:
+  #   docker pull mambaorg/micromamba:1.5.10-noble && docker inspect ...
+  micromamba_base: "mambaorg/micromamba:1.5.10-noble"
+  python:     "ghcr.io/autoui/reprobe-base-py:2026.1"   # built by images/build-images.sh
+  r:          "ghcr.io/autoui/reprobe-base-r:2026.1"
+  controller: "ghcr.io/autoui/reprobe-controller:2026.1"
+
+llm:
+  enabled: true
+  provider: ollama
+  endpoint: "http://127.0.0.1:11434"
+  model: "gemma4:e4b"              # Gemma 4 e4b (effective-4B edge build) — offline via Ollama, CPU-OK
+  keep_alive: "10m"
+  timeout_s: 60                   # hard wall-clock cap per LLM call
+  confidence_threshold: 0.6       # below this, LLM suggestions are shown but never applied
+
+tools:
+  repo2docker: "jupyter-repo2docker==2024.07.0"   # opt-in fallback builder only
+
+unity:
+  image_repo: "unityci/editor"
+  default_image_version: "3"      # GameCI image-tag suffix
+  modules: ["linux-il2cpp"]
+  # Digest-pinned tag map; refresh with `reprobe unity-refresh` (Phase 3).
+  known_tags: {}
+
+fetch:
+  # Used ONLY for the sandbox smoke test (`reprobe doctor --smoke`); not a runtime.
+  smoke_image: "hello-world"
+  # Generic image for repos when a base image isn't built yet (best-effort).
+  fallback_python_image: "python:3.11-slim"

@@ -1,0 +1,43 @@
+name: "reprobe check"
+description: "Fetch, sandbox-run, and report on a research artifact (AutoUI open data)."
+inputs:
+  submission:
+    description: "git URL, Zenodo DOI/record, anonymous.4open.science link, or path"
+    required: true
+  tiers:
+    description: "comma list, e.g. structural,compile (Unity tiers need a Unity seat)"
+    required: false
+    default: "structural"
+  llm:
+    description: "enable the local LLM advisory (true/false)"
+    required: false
+    default: "false"
+  args:
+    description: "extra args passed to `reprobe run`"
+    required: false
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with: { python-version: "3.11" }
+    - name: Install reprobe
+      shell: bash
+      run: pip install -e .
+    - name: Doctor
+      shell: bash
+      run: reprobe doctor || true
+    - name: Run
+      shell: bash
+      run: |
+        LLM_FLAG=""
+        [ "${{ inputs.llm }}" = "true" ] || LLM_FLAG="--no-llm"
+        reprobe run "${{ inputs.submission }}" $LLM_FLAG ${{ inputs.args }}
+    - name: Upload report
+      uses: actions/upload-artifact@v4
+      with:
+        name: reprobe-report
+        path: work/*/out/
+# Note: the host runner must have Docker available (the action launches sibling
+# sandboxed containers). For batch matrices, drive `reprobe batch` instead.

@@ -1,0 +1,30 @@
+# ============================================================================
+#  limits.yaml  —  the sandbox envelope enforced by docker_exec.py on EVERY
+#  author-code container. A runner can only *request* via ContainerSpec; these
+#  values clamp the request. Change policy here, never in src/.
+# ============================================================================
+
+defaults:
+  network: none                 # none | egress  (egress only for sanctioned phases)
+  cpus: "4"
+  memory: "8g"                  # also caps memory-swap to the same value (no swap blowout)
+  pids: 512
+  timeout_s: 1800               # host-side hard timeout; container is docker-killed on expiry
+  tmpfs_size: "512m"            # /tmp mounted noexec,nosuid
+  nofile: 4096
+  nproc: 512
+  user: "57439:57439"          # non-root (micromamba default uid); reject uid-0 images
+  runtime: ""                   # set to "runsc" for gVisor kernel-level isolation
+  read_only_rootfs: true
+  drop_all_caps: true
+  no_new_privileges: true
+  seccomp: "default"
+
+per_runner:
+  unity:
+    timeout_s: 2100
+    memory: "12g"
+
+# Per-submission egress allowlist (populated by `--allow-net host1 host2`).
+# Using it downgrades badge confidence and is flagged loudly in the report.
+allow_net_hosts: []

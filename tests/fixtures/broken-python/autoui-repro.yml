@@ -1,0 +1,9 @@
+version: 1
+title: "Deliberately broken fixture (raises at runtime)"
+environment:
+  type: python
+run:
+  steps:
+    - broken.py
+expected_outputs: [results/out.csv]
+badges_claimed: [available, functional]

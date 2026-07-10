@@ -1,0 +1,32 @@
+# Local stack: the Ollama sidecar (Gemma 4 (e4b)) on a private network.
+# The harness CLI runs on the host and talks to Ollama at 127.0.0.1:11434.
+# Bring up only the LLM:  docker compose -f deploy/docker-compose.yml up -d ollama
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: reprobe-ollama
+    ports:
+      - "127.0.0.1:11434:11434"      # bind to loopback only
+    volumes:
+      - ollama-models:/root/.ollama
+    networks: [reprobe]
+    # GPU is optional; uncomment for NVIDIA acceleration:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
+
+  # one-shot: pull the model declared in pins.yaml after `ollama` is up
+  model-pull:
+    image: ollama/ollama:latest
+    depends_on: [ollama]
+    entrypoint: ["/bin/sh", "-c", "OLLAMA_HOST=ollama:11434 ollama pull gemma4:e4b"]
+    networks: [reprobe]
+    restart: "no"
+
+volumes:
+  ollama-models:
+
+networks:
+  reprobe:
+    driver: bridge

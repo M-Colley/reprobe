@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoui.org/schemas/autoui-repro.schema.json",
+  "title": "autoui-repro manifest",
+  "description": "Optional author manifest that removes guesswork from reprobe. All fields optional except version.",
+  "type": "object",
+  "required": ["version"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "title": { "type": "string" },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "builder": { "enum": ["pinned-base", "repo2docker", "author-image"] },
+        "type": { "enum": ["python", "r", "jupyter", "unity", "custom"] },
+        "dependencies": { "type": ["string", "null"], "description": "requirements.txt | environment.yml | renv.lock" },
+        "image": { "type": ["string", "null"], "description": "optional pinned image digest to use as-is" }
+      }
+    },
+    "data": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "source": { "type": "string", "description": "DOI or URL the data is fetched from" },
+          "checksum": { "type": "string" }
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string", "description": "a file path to execute" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "path": { "type": "string" },
+                  "kind": { "enum": ["python", "r", "jupyter", "rmarkdown", "custom"] },
+                  "runner": { "type": "string" },
+                  "args": { "type": "array", "items": { "type": "string" }, "description": "command-line arguments passed to the script" },
+                  "tool": { "type": "string", "description": "e.g. unity" },
+                  "project": { "type": "string" },
+                  "tier": { "enum": ["structural", "compile", "build"] },
+                  "expected_outputs": { "type": "array", "items": { "type": "string" } },
+                  "description": { "type": "string" }
+                }
+              }
+            ]
+          }
+        },
+        "network": { "type": "boolean", "default": false }
+      }
+    },
+    "expected_outputs": { "type": "array", "items": { "type": "string" } },
+    "badges_claimed": {
+      "type": "array",
+      "items": { "enum": ["available", "functional", "reusable", "reproduced"] }
+    }
+  }
+}

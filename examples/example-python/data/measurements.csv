@@ -1,0 +1,11 @@
+driver_id,reaction_time_s,condition
+1,1.82,baseline
+2,2.41,fatigue
+3,1.95,baseline
+4,3.10,cognitive_load
+5,2.05,baseline
+6,2.88,fatigue
+7,1.74,baseline
+8,3.32,visual_distraction
+9,2.19,cognitive_load
+10,1.91,baseline

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoui.org/schemas/report.schema.json",
+  "title": "reprobe report",
+  "type": "object",
+  "required": ["schema_version", "submission_id", "harness_version", "timestamp", "source", "badges", "verdict"],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "submission_id": { "type": "string" },
+    "harness_version": { "type": "string" },
+    "timestamp": { "type": "string" },
+    "source": {
+      "type": "object",
+      "properties": {
+        "input": { "type": "string" },
+        "resolved_type": { "type": "string" },
+        "pin": { "type": "object", "properties": {
+          "kind": { "enum": ["version_doi", "git_sha", "swhid", "git_tag", "none"] },
+          "value": { "type": "string" } } },
+        "fetch_layer": { "type": "string" },
+        "anonymized": { "type": "boolean" },
+        "checksum_verified": { "type": "boolean" },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "strategy": { "enum": ["pinned-base", "repo2docker", "author-image", "besteffort"] },
+        "image": { "type": "string" },
+        "env_provenance": { "enum": ["author-specified", "harness-default", "repo2docker-built"] }
+      }
+    },
+    "detect": { "type": "object" },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "runner": { "type": "string" },
+          "target": { "type": "string" },
+          "status": { "enum": ["pass", "fail", "partial", "skipped", "error", "timeout"] },
+          "tier_reached": { "type": ["string", "null"] },
+          "exit_code": { "type": ["integer", "null"] },
+          "duration_s": { "type": "number" },
+          "claims": { "type": "array", "items": { "type": "string" } },
+          "not_verified": { "type": "array", "items": { "type": "string" } },
+          "expected_met": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "unity": { "type": ["object", "null"] },
+    "llm": { "type": "object" },
+    "badges": {
+      "type": "object",
+      "properties": {
+        "acm": {
+          "type": "object",
+          "properties": {
+            "available": { "enum": ["granted", "candidate", "not-met"] },
+            "functional": { "enum": ["candidate", "not-met", "not-evaluated"] },
+            "results_reproduced": { "enum": ["not-evaluated"] }
+          }
+        },
+        "fair": { "type": "object" }
+      }
+    },
+    "not_verified": { "type": "array", "items": { "type": "string" } },
+    "verdict": {
+      "type": "object",
+      "properties": {
+        "overall": { "type": "string" },
+        "human_review_required": { "type": "boolean" }
+      }
+    }
+  }
+}

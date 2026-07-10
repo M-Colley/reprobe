@@ -1,0 +1,32 @@
+# ============================================================================
+#  runners.yaml  —  which runners exist and are enabled, and their default
+#  runtime image (a key into pins.yaml:base_images). The orchestrator core
+#  never changes when you add a runner; you add a row here + a plugin package.
+# ============================================================================
+
+runners:
+  - id: python
+    plugin: "reprobe.runners.python_script:PythonScriptRunner"
+    default_image: python        # -> pins.yaml base_images.python
+    enabled: true
+
+  - id: jupyter
+    plugin: "reprobe.runners.jupyter:JupyterRunner"
+    default_image: python
+    enabled: true
+
+  - id: r
+    plugin: "reprobe.runners.r_script:RScriptRunner"
+    default_image: r
+    enabled: true
+
+  - id: rmarkdown
+    plugin: "reprobe.runners.rmarkdown:RMarkdownRunner"
+    default_image: r
+    enabled: true
+
+  - id: unity
+    plugin: "reprobe.runners.unity:UnityRunner"
+    default_image: null          # T0 structural runs host-side; no container
+    enabled: true
+    tier: structural             # structural | compile | build  (T1/T2 need a Unity seat)
