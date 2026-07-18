@@ -95,6 +95,22 @@ def image_present(image: str) -> bool:
         return False
 
 
+def pull_image(image: str, timeout: int = 600) -> bool:
+    """Pull a TRUSTED image (declared in the chair's own pins.yaml). Author
+    code images are never auto-pulled — run_container requires them present."""
+    if not image:
+        return False
+    try:
+        _validate_image(image)
+    except SandboxViolation:
+        return False
+    try:
+        r = subprocess.run(["docker", "pull", image], capture_output=True, timeout=timeout)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def image_digest(image: str) -> Optional[str]:
     """Resolve the immutable digest of the image actually on disk, so a report
     pins exact bytes even though pins.yaml carries a mutable tag. Prefers the
@@ -238,8 +254,8 @@ def run_container(
 
     if not image_present(spec.image):
         msg = (
-            f"image-not-present: {spec.image}. Build base images with "
-            f"`bash images/build-images.sh` (or `docker pull` the fallback), then retry."
+            f"image-not-present: {spec.image}. `docker pull {spec.image}` "
+            f"(base images are published) or build with `bash images/build-images.sh`, then retry."
         )
         log_path.write_text(msg + "\n", encoding="utf-8")
         return RawRunOutput(exit_code=None, duration_s=0.0, image=spec.image,

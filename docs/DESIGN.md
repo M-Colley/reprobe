@@ -337,7 +337,7 @@ badges_claimed: [available, functional]    # author's claim; harness verifies
 
 ### 9.2 Badge mapping (`config/badges.yaml`, declarative)
 
-- **ACM Artifact Available** (only strictly-required badge): granted **deterministically, no code execution** iff fetch succeeded + the source is archivally pinned (version DOI / commit SHA / SWHID — **not** a concept DOI or moving tag) + checksum verified where the platform provides one.
+- **ACM Artifact Available** (only strictly-required badge): granted **deterministically, no code execution** iff fetch succeeded + the source is archivally pinned (version DOI / SWHID — **not** a bare commit SHA, concept DOI, or moving tag; a commit SHA is reproducibly pinned but not archival, so it yields a *candidate*) + checksum verified where the platform provides one.
 - **ACM Artifact Evaluated – Functional**: marked **candidate** (not auto-granted) when declared/primary steps `status=pass` and ≥1 `expected_output` is produced. Value-add; a human confirms.
 - **ACM Results Reproduced**: **not auto-granted** (requires comparing produced vs published results); the harness surfaces produced artifacts to aid the human.
 - **FAIR**: scored from fetch metadata (persistent ID, open license, standard formats, manifest presence).
@@ -351,7 +351,7 @@ Stance, stated plainly in `docs/badges.md`: **the harness grants Available, prop
 - **GitHub Actions:** `deploy/github-action/action.yml` installs reprobe on the runner host from the action's own checkout and drives the host Docker daemon (sibling sandboxed containers); authors drop it in their repo for self-checks, the chair runs it as a batch matrix. `.github/workflows/test.yml` runs the deterministic unit suite on Python 3.11/3.13. A `build-base-images.yml` workflow that rebuilds + pushes `reprobe-base-*` to GHCR is planned (Phase 2); until then base images are built manually with `images/build-images.sh`.
 
 ```yaml
-- uses: autoui/reprobe-action@v1
+- uses: m-colley/reprobe/deploy/github-action@main
   with: { submission: "${{ inputs.url }}", tiers: "structural,compile", llm: "true" }
   env:  { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }   # UNITY_* only if the org supplies its own seat
 ```

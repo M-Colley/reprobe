@@ -2,6 +2,21 @@
 
 ## 0.1.1 — fix wave (post-review hardening)
 
+- **Version stamped:** `__version__`/pyproject bumped to 0.1.1 (reports embed
+  `harness_version`; it previously still said 0.1.0).
+- **`doctor --smoke` exit code is now honest:** a failed smoke test fails the
+  command (it previously exited 0). The pins-declared smoke image is pulled
+  automatically when absent, so the smoke works on a fresh machine; author-code
+  images are still never auto-pulled.
+- **GitHub Action pulls the pinned base images** (read from the action's own
+  `pins.yaml`) before `reprobe doctor` — on a stock runner doctor previously
+  always failed.
+- **image-not-present guidance:** doctor and the sandbox error now suggest
+  `docker pull <published image>` first; building locally is the alternative.
+- **DESIGN.md drift fixes:** §9.2 wrongly listed a bare commit SHA as an
+  archival pin (code/config/README correctly treat it as candidate-only); the
+  Action usage example still pointed at the old `autoui` namespace.
+
 - **Python 3.13 is the default runtime** (was 3.11): `base-py` env, controller
   image, `fetch.fallback_python_image`, and the GitHub Action.
 - **Harness now requires Python ≥ 3.11** (`requires-python`, was `>=3.10`): drops

@@ -29,7 +29,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 from . import __version__
 from .config import load_config
-from .docker_exec import docker_available, image_present, run_container
+from .docker_exec import docker_available, image_present, pull_image, run_container
 from .models import ContainerSpec
 from .orchestrator import Orchestrator, submission_id
 
@@ -171,7 +171,7 @@ def doctor(
         present = image_present(img) if dav else False
         ok &= present
         t.add_row(f"base image [{key}]", "ok" if present else "FAIL",
-                  f"{img} {'present' if present else '(build with images/build-images.sh)'}")
+                  f"{img} {'present' if present else f'(docker pull {img} — or build with images/build-images.sh)'}")
 
     from .llm import from_config as llm_from_config
     client = llm_from_config(cfg.llm)
@@ -197,13 +197,23 @@ def doctor(
 
     if smoke:
         if not dav:
-            console.print("[yellow]smoke skipped: docker unavailable[/yellow]")
+            ok = False
+            console.print("[yellow]smoke FAIL: docker unavailable[/yellow]")
         else:
             img = cfg.pins.get("fetch", {}).get("smoke_image", "hello-world")
+            # The smoke image comes from the chair's own pins.yaml (trusted
+            # config, tiny by convention) — pulling it here keeps `doctor
+            # --smoke` working on a fresh machine. Author-code images are
+            # never auto-pulled; that policy lives in docker_exec.
+            if not image_present(img):
+                console.print(f"[bold]sandbox smoke[/bold]: pulling {img}…")
+                pull_image(img, timeout=300)
             console.print(f"[bold]sandbox smoke[/bold]: running {img} under full sandbox flags…")
             spec = ContainerSpec(image=img, command=[], network="none")
             raw = run_container(spec, cfg.limits_for("python"), Path("work") / "_smoke.log")
-            status = "ok passed" if raw.exit_code == 0 else f"FAIL exit={raw.exit_code} ({raw.error or 'see log'})"
+            passed = raw.exit_code == 0
+            ok &= passed
+            status = "ok passed" if passed else f"FAIL exit={raw.exit_code} ({raw.error or 'see log'})"
             console.print(f"  {status}  ({raw.duration_s}s)")
             if raw.argv_redacted:
                 console.print(f"  [dim]{' '.join(raw.argv_redacted)}[/dim]")

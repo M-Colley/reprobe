@@ -5,4 +5,4 @@ untrusted author code runs only inside locked-down ephemeral containers.
 See docs/DESIGN.md for the full architecture.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
