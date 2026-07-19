@@ -22,6 +22,23 @@ _ENTRY_PY_RE = re.compile(r"^(main|run|analysis|analyze|pipeline|reproduce|train
 _ENTRY_R_RE = re.compile(r"^(main|run|analy|reproduce)", re.I)
 _SCRIPT_DIRS = {"scripts", "script", "code", "src", "analysis", "analyses", "bin", "r"}
 
+# Non-code artifact categories (the AutoUI/CHI submission form's Video, Audio,
+# Datasets, Other). Classification is advisory: it feeds artifact_types and the
+# report inventory so a media/data-only deposit reads as what it is rather than
+# "(none)" — it never schedules a run step and never affects badge decisions.
+# Ubiquitous repo noise (.md, .txt, .json, .yml, images) is deliberately absent.
+_NONCODE_TYPES = {
+    "video": {"mp4", "mov", "avi", "mkv", "webm", "m4v", "mpg", "mpeg"},
+    "audio": {"wav", "mp3", "flac", "ogg", "oga", "m4a", "aac", "opus"},
+    "dataset": {"csv", "tsv", "parquet", "feather", "arrow", "xlsx", "xls",
+                "sav", "dta", "rds", "rdata", "h5", "hdf5", "nc",
+                "sqlite", "sqlite3", "jsonl", "ndjson"},
+    "document": {"pdf", "doc", "docx", "ppt", "pptx", "tex"},
+    "3d-model": {"stl", "step", "stp", "obj", "fbx", "blend", "3mf",
+                 "iges", "igs", "ply", "gltf", "glb"},
+}
+_EXT_TO_NONCODE = {ext: t for t, exts in _NONCODE_TYPES.items() for ext in exts}
+
 
 def _iter_files(root: Path):
     for p in root.rglob("*"):
@@ -80,6 +97,18 @@ def scan(src_dir: str | Path) -> DetectResult:
     r_scripts = [p for p in files if p.suffix.lower() == ".r"]
     py_files = [p for p in files if p.suffix == ".py"]
     unity = _unity_projects(root)
+
+    # Non-code inventory. Unity project trees are excluded: their Assets are
+    # engine content (audio clips, models), not standalone research artifacts.
+    unity_prefixes = [p.relative_to(root).parts for p in unity]
+    inventory: dict[str, int] = {}
+    for p in files:
+        parts = p.relative_to(root).parts
+        if any(parts[:len(u)] == u for u in unity_prefixes):
+            continue
+        cat = _EXT_TO_NONCODE.get(p.suffix.lower().lstrip("."))
+        if cat:
+            inventory[cat] = inventory.get(cat, 0) + 1
 
     notebooks.sort(key=lambda p: _order_key(p, root, readme))
     rmds.sort(key=lambda p: _order_key(p, root, readme))
@@ -150,10 +179,16 @@ def scan(src_dir: str | Path) -> DetectResult:
     if len(steps) > 12:
         notes.append(f"{len(steps)} steps detected; ordering is best-effort")
     if not steps:
-        notes.append("no runnable analyses detected by heuristic")
+        if inventory:
+            inv = ", ".join(f"{n} {t}" for t, n in sorted(inventory.items()))
+            notes.append(f"no runnable analyses detected; deposit contains non-code artifacts "
+                         f"({inv}) — the Available badge does not require execution")
+        else:
+            notes.append("no runnable analyses detected by heuristic")
 
     return DetectResult(
-        artifact_types=sorted(set(types)),
+        artifact_types=sorted(set(types) | set(inventory)),
+        inventory=inventory,
         steps=steps,
         run_plan_source="heuristic",
         flags=sorted(set(flags)),

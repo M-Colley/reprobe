@@ -1,0 +1,131 @@
+{
+  "examples/example-python": {
+    "artifact_types": [
+      "dataset",
+      "python"
+    ],
+    "inventory": {
+      "dataset": 1
+    },
+    "run_plan_source": "manifest",
+    "manifest": "autoui-repro.yml",
+    "steps": [
+      "01_analyze.py"
+    ],
+    "flags": [],
+    "strategy": "pinned-base",
+    "install_commands": [],
+    "step_statuses": [
+      "partial"
+    ],
+    "available": "candidate",
+    "functional": "not-met",
+    "verdict": "runs-with-warnings"
+  },
+  "tests/fixtures/broken-python": {
+    "artifact_types": [
+      "python"
+    ],
+    "inventory": {},
+    "run_plan_source": "manifest",
+    "manifest": "autoui-repro.yml",
+    "steps": [
+      "broken.py"
+    ],
+    "flags": [],
+    "strategy": "pinned-base",
+    "install_commands": [],
+    "step_statuses": [
+      "partial"
+    ],
+    "available": "candidate",
+    "functional": "not-met",
+    "verdict": "runs-with-warnings"
+  },
+  "tests/fixtures/notebook-r-mix": {
+    "artifact_types": [
+      "jupyter",
+      "r"
+    ],
+    "inventory": {},
+    "run_plan_source": "heuristic",
+    "manifest": null,
+    "steps": [
+      "01_preprocess.ipynb"
+    ],
+    "flags": [],
+    "strategy": "pinned-base",
+    "install_commands": [
+      "Rscript -e 'if (requireNamespace(\"renv\", quietly=TRUE)) renv::restore(prompt=FALSE) else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'",
+      "Rscript -e 'print(installed.packages()[, c(\"Package\", \"Version\")])'"
+    ],
+    "step_statuses": [
+      "pass"
+    ],
+    "available": "candidate",
+    "functional": "candidate",
+    "verdict": "runs"
+  },
+  "tests/fixtures/conda-env": {
+    "artifact_types": [
+      "jupyter"
+    ],
+    "inventory": {},
+    "run_plan_source": "heuristic",
+    "manifest": null,
+    "steps": [
+      "01_analyze.ipynb"
+    ],
+    "flags": [
+      "needs-repo2docker"
+    ],
+    "strategy": "besteffort",
+    "install_commands": [],
+    "step_statuses": [
+      "pass"
+    ],
+    "available": "candidate",
+    "functional": "candidate",
+    "verdict": "runs"
+  },
+  "tests/fixtures/lowercase-r": {
+    "artifact_types": [
+      "r"
+    ],
+    "inventory": {},
+    "run_plan_source": "heuristic",
+    "manifest": null,
+    "steps": [
+      "analysis.r"
+    ],
+    "flags": [],
+    "strategy": "pinned-base",
+    "install_commands": [],
+    "step_statuses": [
+      "pass"
+    ],
+    "available": "candidate",
+    "functional": "candidate",
+    "verdict": "runs"
+  },
+  "tests/fixtures/bad-manifest": {
+    "artifact_types": [
+      "custom"
+    ],
+    "inventory": {},
+    "run_plan_source": "manifest",
+    "manifest": "autoui-repro.yml",
+    "steps": [
+      "game/"
+    ],
+    "flags": [],
+    "strategy": "pinned-base",
+    "install_commands": [],
+    "step_statuses": [
+      "skipped"
+    ],
+    "available": "candidate",
+    "functional": "not-evaluated",
+    "verdict": "structural-only"
+  }
+}

@@ -33,11 +33,12 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 </div>
 <input id="q" type="search" placeholder="filter rows…">
 <table id="t"><thead><tr>
- <th>#</th><th>Submission</th><th>Source</th><th>Available</th><th>Functional</th><th>Verdict</th><th>Review</th><th>Flags</th></tr></thead><tbody>
+ <th>#</th><th>Submission</th><th>Source</th><th>Types</th><th>Available</th><th>Functional</th><th>Verdict</th><th>Review</th><th>Flags</th></tr></thead><tbody>
 {% for r in rows %}
  <tr><td>{{ loop.index }}</td>
  <td><a href="{{ r.report_html }}">{{ r.submission_id }}</a><br><code>{{ r.input }}</code></td>
  <td>{{ r.resolved_type }}</td>
+ <td>{{ r.types }}</td>
  <td class="{{ r.available_cls }}">{{ r.available }}</td>
  <td class="{{ r.functional_cls }}">{{ r.functional }}</td>
  <td class="{{ r.verdict_cls }}">{{ r.verdict }}</td>
@@ -63,6 +64,30 @@ _VERDICT_CLS = {"runs": "granted", "runs-with-failures": "fail", "fetch-failed":
                 "infra-error": "fail", "nothing-executed": "noteval", "not-run": "noteval"}
 
 
+def triage_flags(rep: dict[str, Any]) -> list[str]:
+    """The exceptional states a chair must look at, not routine ones. Shared
+    by the dashboard Flags column and the batch badges.csv export."""
+    acm = (rep.get("badges", {}).get("acm") or {})
+    src = rep.get("source", {}) or {}
+    overall = (rep.get("verdict", {}) or {}).get("overall") or "—"
+    flags = []
+    if src.get("warnings"):
+        flags.append("warnings")
+    if src.get("anonymized"):
+        flags.append("anonymized")
+    if any("checksums not verified" in str(n) for n in acm.get("notes") or []):
+        flags.append("no-checksum")
+    if overall == "fetch-failed" or src.get("error"):
+        flags.append("fetch-failed")
+    if acm.get("functional") == "not-met":
+        flags.append("not-met")
+    if any((s or {}).get("status") == "timeout" for s in rep.get("steps") or []):
+        flags.append("timeout")
+    if overall in ("infra-error", "nothing-executed"):
+        flags.append(overall)
+    return flags
+
+
 def render(reports: list[dict[str, Any]]) -> str:
     rows = []
     for rep in reports:
@@ -70,24 +95,12 @@ def render(reports: list[dict[str, Any]]) -> str:
         src = rep.get("source", {}) or {}
         verdict = rep.get("verdict", {}) or {}
         overall = verdict.get("overall") or "—"
-        # flag the exceptional states a chair must look at, not routine ones
-        flags = []
-        if src.get("warnings"):
-            flags.append("warnings")
-        if src.get("anonymized"):
-            flags.append("anonymized")
-        if overall == "fetch-failed" or src.get("error"):
-            flags.append("fetch-failed")
-        if acm.get("functional") == "not-met":
-            flags.append("not-met")
-        if any((s or {}).get("status") == "timeout" for s in rep.get("steps") or []):
-            flags.append("timeout")
-        if overall in ("infra-error", "nothing-executed"):
-            flags.append(overall)
+        flags = triage_flags(rep)
         rows.append({
             "submission_id": rep.get("submission_id"),
             "input": src.get("input"),
             "resolved_type": src.get("resolved_type") or "—",
+            "types": ", ".join((rep.get("detect", {}) or {}).get("artifact_types") or []) or "—",
             "available": acm.get("available") or "—", "available_cls": _CLS.get(acm.get("available"), ""),
             "functional": acm.get("functional") or "—", "functional_cls": _CLS.get(acm.get("functional"), ""),
             "verdict": overall, "verdict_cls": _VERDICT_CLS.get(overall, ""),

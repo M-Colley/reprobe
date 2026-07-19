@@ -25,7 +25,8 @@ anything. `reprobe --no-llm` is fully functional and deterministic.
 
 ```bash
 pip install -e .            # Python 3.11+; needs Docker available for runs
-reprobe doctor             # self-check: config, Docker, base images, Ollama
+reprobe pull               # fetch the pinned base images (published, no login needed)
+reprobe doctor --smoke     # self-check: config, Docker, base images, Ollama, sandbox
 ```
 
 The pinned Python/R analysis environments are published images —
@@ -46,8 +47,8 @@ reprobe run https://doi.org/10.5281/zenodo.123456
 # Detection only — no code executed (shows the run plan reprobe would use)
 reprobe detect ./examples/example-python
 
-# A whole review season -> sortable dashboard + badges.json
-reprobe batch submissions.csv
+# A whole review season -> sortable dashboard + badges.json + badges.csv
+reprobe batch submissions.csv      # add --resume to continue an interrupted season
 
 # Available badge only, never execute code:
 reprobe run <url> --no-run
@@ -80,9 +81,13 @@ CODECHECK `codecheck.yml` is also read). See
 
 MVP + breadth: fetch (git / Zenodo / figshare / Dryad / OSF / Dataverse /
 Software Heritage / anonymous.4open.science / local / resolvable DOIs),
-detection, sandboxed Python/R/Jupyter/Rmd execution with CLI args + a
-split-by-language dependency-install phase, Unity T0 structural, badges, reports,
-batch dashboard, and the advisory LLM. Base images build via
+detection (runnable code **and** non-code artifacts: video / audio / dataset /
+document / 3D — the AutoUI submission-form categories), sandboxed
+Python/R/Jupyter/Rmd execution with CLI args + a split-by-language
+dependency-install phase, Unity T0 structural, badges, reports with a
+copy-pasteable author-feedback block, batch dashboard (+ `--resume`,
+`badges.csv`), a golden-report regression (`reprobe doctor --golden`), and the
+advisory LLM. Base images build via
 [`images/build-images.sh`](images/build-images.sh) and publish to
 `ghcr.io/m-colley/reprobe-base-{py,r}:2026.1`. Remaining: repo2docker fallback
 and Unity compile/build tiers — scoped in [docs/DESIGN.md §11](docs/DESIGN.md).

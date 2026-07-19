@@ -39,3 +39,21 @@ def test_report_json_roundtrip():
     r = _report()
     data = json.loads(json.dumps(r.model_dump(mode="json")))
     assert data["submission_id"] == "sub-1"
+
+
+def test_markdown_feedback_for_authors_block():
+    md = markdown.render(_report())
+    assert "## Feedback for authors" in md
+    # candidate/candidate report: both status sentences must be present
+    assert "not yet deposited under an archival persistent identifier" in md
+    assert "a human" in md and "Functional" in md
+
+
+def test_dashboard_types_column_and_no_checksum_flag():
+    rep = _report().model_dump(mode="json")
+    rep["detect"] = {"artifact_types": ["python", "video"]}
+    rep["badges"]["acm"]["notes"] = ["archival pin present but checksums not verified"]
+    out = dashboard.render([rep])
+    assert "python, video" in out
+    assert "no-checksum" in out
+    assert dashboard.triage_flags(rep) == ["no-checksum"]

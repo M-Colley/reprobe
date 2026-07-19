@@ -46,7 +46,9 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  <div class="muted" style="margin-top:6px">FAIR — findable: {{ r.badges.fair.findable }} · accessible: {{ r.badges.fair.accessible }} · interoperable: {{ r.badges.fair.interoperable }} · reusable: {{ r.badges.fair.reusable }}</div>
 </div>
 
-{% if r.detect.notes %}<div class="card"><b>Detection</b><br>
+{% if r.detect.notes or r.detect.artifact_types or r.detect.inventory %}<div class="card"><b>Detection</b><br>
+ {% if r.detect.artifact_types %}<div>types: {{ r.detect.artifact_types|join(', ') }}</div>{% endif %}
+ {% if r.detect.inventory %}<div class="muted">non-code files: {% for t, n in r.detect.inventory|dictsort %}{{ t }} ×{{ n }}{% if not loop.last %} · {% endif %}{% endfor %}</div>{% endif %}
  {% for n in r.detect.notes %}<div class="muted">ℹ️ {{ n }}</div>{% endfor %}
 </div>{% endif %}
 

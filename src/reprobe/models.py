@@ -117,6 +117,7 @@ class FetchResult(BaseModel):
 
 class DetectResult(BaseModel):
     artifact_types: list[str] = Field(default_factory=list)
+    inventory: dict[str, int] = Field(default_factory=dict)   # non-code files by category
     steps: list[RunStep] = Field(default_factory=list)
     manifest_path: Optional[str] = None
     run_plan_source: Literal["manifest", "llm", "heuristic"] = "heuristic"

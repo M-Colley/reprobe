@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.2.0 — chair quality-of-life wave
+
+- **`reprobe pull`:** one-command new-machine bootstrap — pulls the pinned
+  base images + smoke image from pins.yaml (controller stays build-only). The
+  GitHub Action now uses it, and sets `REPROBE_CONFIG_DIR` to its own checkout
+  (a non-editable pip install carries no `config/`, so doctor/run on a stock
+  runner previously could not resolve pins.yaml).
+- **Non-code artifact classification:** detection now inventories video /
+  audio / dataset / document / 3D-model files (the AutoUI submission-form
+  categories). A media-only deposit reads as what it is instead of
+  "artifact types: (none)"; `artifact_types`, reports, the detect CLI, and a
+  new dashboard **Types** column carry it. Advisory only — never affects badge
+  decisions, never schedules a step; Unity project trees are excluded (engine
+  assets are not research artifacts).
+- **`reprobe batch --resume`:** reuses finished per-submission reports and
+  retries only `fetch-failed` / `infra-error` ones — an interrupted season no
+  longer restarts from zero.
+- **`badges.csv`:** flat per-submission export (badges, FAIR, verdict, types,
+  triage flags) next to `badges.json`, for spreadsheet reconciliation.
+- **Feedback for authors:** every `report.md` now includes a copy-pasteable
+  block after the badge section, restating only machine-checked facts.
+- **Golden-report regression:** `reprobe doctor --golden` replays the bundled
+  fixtures through the dry-run pipeline and diffs a machine-independent slice
+  against `tests/golden/expected.json` (regenerate intentionally via
+  `python -m reprobe.golden --update`); enforced in CI by the test suite. This
+  ships the DESIGN §11 Phase-5 item.
+- **Doctor digest advisories:** non-failing warnings when
+  `base_images.micromamba_base` / `llm.ollama_image` are tag-only (pins.yaml
+  asks for `@sha256:` digests after first pull).
+- **Dashboard `no-checksum` triage flag** now actually emitted (the runbook
+  documented it; the code never set it); flag logic shared with `badges.csv`.
+
 ## 0.1.1 — fix wave (post-review hardening)
 
 - **Version stamped:** `__version__`/pyproject bumped to 0.1.1 (reports embed

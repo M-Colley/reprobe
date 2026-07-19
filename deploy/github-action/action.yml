@@ -27,13 +27,15 @@ runs:
       # Install from the action's own checkout (repo root is two levels up),
       # NEVER from the caller's workspace — that may hold an untrusted submission.
       run: pip install "$GITHUB_ACTION_PATH/../.."
-    - name: Pull pinned base images
+    - name: Point reprobe at the action's config
+      shell: bash
+      # A non-editable pip install carries no config/; resolve it from the
+      # action's own checkout — never from the caller's (untrusted) workspace.
+      run: echo "REPROBE_CONFIG_DIR=$GITHUB_ACTION_PATH/../../config" >> "$GITHUB_ENV"
+    - name: Pull pinned images
       shell: bash
       # Stock runners have no reprobe images; doctor hard-fails without them.
-      # Read the tags from the action's own pins.yaml so this never drifts.
-      run: |
-        python -c "import yaml,sys; b=yaml.safe_load(open(sys.argv[1]))['base_images']; print(b['python']); print(b['r'])" \
-          "$GITHUB_ACTION_PATH/../../config/pins.yaml" | xargs -rn1 docker pull
+      run: reprobe pull
     - name: Doctor
       shell: bash
       run: reprobe doctor

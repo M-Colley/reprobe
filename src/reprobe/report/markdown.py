@@ -42,9 +42,17 @@ def render(r: Report) -> str:
         L.append(f"  - ⚠️ {w}")
     L.append("")
 
-    det_notes = (r.detect or {}).get("notes") or []
-    if det_notes:
+    det = r.detect or {}
+    det_notes = det.get("notes") or []
+    inventory = det.get("inventory") or {}
+    types = det.get("artifact_types") or []
+    if det_notes or inventory or types:
         L.append("## Detection")
+        if types:
+            L.append(f"- **Artifact types:** {', '.join(types)}")
+        if inventory:
+            L.append("- **Non-code files:** "
+                     + " · ".join(f"{t} ×{n}" for t, n in sorted(inventory.items())))
         for n in det_notes:
             L.append(f"- ℹ️ {n}")
         L.append("")
@@ -77,6 +85,35 @@ def render(r: Report) -> str:
     fair = (r.badges.get("fair") or {})
     L.append(f"- **FAIR:** findable={fair.get('findable')} · accessible={fair.get('accessible')} · "
              f"interoperable={fair.get('interoperable')} · reusable={fair.get('reusable')}")
+    L.append("")
+
+    # Copy-pasteable block for the chair's reply to the authors: every line
+    # restates a machine-checked fact from above — no new claims.
+    L.append("## Feedback for authors")
+    fb: list[str] = []
+    avail_line = {
+        "granted": "The artifact is archivally deposited and was retrieved and verified — the ACM "
+                   "*Artifact Available* criteria are met.",
+        "candidate": "The artifact could be retrieved, but is not yet deposited under an archival "
+                     "persistent identifier — the notes below say exactly what is still needed for "
+                     "the *Available* badge.",
+    }.get(acm.get("available"))
+    if avail_line:
+        fb.append(avail_line)
+    func_line = {
+        "candidate": "All declared analysis steps ran to completion in the harness sandbox; a human "
+                     "reviewer will confirm the *Functional* badge.",
+        "not-met": "The automated run did not complete as declared — see the step table in the full "
+                   "report for what failed.",
+    }.get(acm.get("functional"))
+    if func_line:
+        fb.append(func_line)
+    fb += [str(n) for n in acm.get("notes") or []]
+    fb += [str(w) for w in src.get("warnings") or []]
+    for line in fb:
+        L.append(f"- {line}")
+    if not fb:
+        L.append("- Nothing actionable — see the full report above.")
     L.append("")
 
     L.append("## Steps")

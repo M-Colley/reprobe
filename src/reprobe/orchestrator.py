@@ -116,6 +116,7 @@ class Orchestrator:
         detect_res, manifest_meta = detect_artifacts(srcdir, use_llm=use_llm, llm_client=llm_client)
         report.detect = {
             "artifact_types": detect_res.artifact_types,
+            "inventory": detect_res.inventory,
             "manifest": detect_res.manifest_path,
             "run_plan_source": detect_res.run_plan_source,
             "llm_confidence": detect_res.llm_confidence,

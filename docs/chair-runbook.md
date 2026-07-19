@@ -20,6 +20,9 @@ check**. Everything else is fixed.
    ```
    You must run this manually — no CI rebuilds images yet. `pip install
    conda-lock` first for reproducible bases.
+   On a machine that only *consumes* already-published images (a fresh laptop,
+   a helper's PC), skip the build: `reprobe pull` fetches the pinned base
+   images and the smoke image in one command.
 3. **Refresh the Unity editor tag map** — **skip until Phase 3 ships**; the
    `reprobe unity-refresh` command does not exist yet and `unity.known_tags`
    stays empty:
@@ -28,21 +31,30 @@ check**. Everything else is fixed.
    ```
 4. **Confirm it still works**:
    ```bash
-   reprobe doctor --smoke             # config + Docker + base images + Ollama + a sandbox smoke test
+   reprobe doctor --smoke --golden    # config + Docker + base images + Ollama + sandbox smoke + golden regression
    python -m pytest -q                # the deterministic test suite (detection, badges, sandbox flags)
    ```
-   (Golden-report regression against bundled good/broken fixtures is the Phase-5
-   addition to `doctor` — see docs/DESIGN.md §11.)
+   `--golden` replays the bundled good/broken fixtures through the dry-run
+   pipeline and diffs the result against `tests/golden/expected.json` — the
+   one check that catches a pins/badges edit silently changing pipeline
+   behavior. After an *intentional* change, regenerate the goldens with
+   `python -m reprobe.golden --update` and commit the diff.
 
 ## During the review window
 
 - **One submission:** `reprobe run <url>` → read `work/<id>/out/report.html`.
 - **A batch:** put one URL per line (or a `url` column) in `submissions.csv`:
   ```bash
-  reprobe batch submissions.csv      # -> out/dashboard.html + out/badges.json
+  reprobe batch submissions.csv      # -> out/dashboard.html + out/badges.json + out/badges.csv
   ```
   Sort the dashboard by verdict; triage anything flagged `no-checksum`,
-  `anonymized`, or `warnings` (the full set the dashboard emits today).
+  `anonymized`, or `warnings`. `badges.csv` is the flat per-submission export
+  for reconciling against the PCS/EasyChair spreadsheet.
+- **Interrupted batch?** Re-run with `--resume`: finished reports are reused
+  as-is; only `fetch-failed` / `infra-error` submissions are retried.
+- **Author reply:** every `report.md` ends its badge section with a
+  copy-pasteable **Feedback for authors** block — paste it into your decision
+  email instead of composing from scratch.
 - **Anonymized (double-blind) submissions:** `anonymous.4open.science` links work
   directly but carry no archival pin — the report says so. Remind authors that
   the **Available** badge needs a durable Zenodo/OSF deposit before publication.

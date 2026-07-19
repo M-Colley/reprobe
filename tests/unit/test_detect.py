@@ -197,3 +197,48 @@ def test_resolved_versions_recorded_in_install_log(tmp_path):
     det = DetectResult(artifact_types=["python"])
     p = plan_env(det, {}, _cfg(), tmp_path)
     assert any(c.startswith("pip freeze") for c in p.install_commands)
+
+
+# --------------------------------------------------------------------------- #
+# signatures: non-code artifact classification (video/audio/dataset/...)
+# --------------------------------------------------------------------------- #
+def test_noncode_only_deposit_classified(tmp_path):
+    (tmp_path / "condition_a.mp4").write_bytes(b"\x00")
+    (tmp_path / "interview.wav").write_bytes(b"\x00")
+    (tmp_path / "responses.csv").write_text("a,b\n1,2\n")
+    (tmp_path / "protocol.pdf").write_bytes(b"%PDF")
+    (tmp_path / "mount.stl").write_bytes(b"\x00")
+    res = signatures.scan(tmp_path)
+    assert res.steps == []
+    assert res.artifact_types == ["3d-model", "audio", "dataset", "document", "video"]
+    assert res.inventory == {"video": 1, "audio": 1, "dataset": 1,
+                             "document": 1, "3d-model": 1}
+    assert any("non-code artifacts" in n for n in res.notes)
+
+
+def test_repo_noise_is_not_classified(tmp_path):
+    (tmp_path / "run.py").write_text("print(1)\n")
+    (tmp_path / "README.md").write_text("docs, not a document artifact")
+    (tmp_path / "config.json").write_text("{}")
+    res = signatures.scan(tmp_path)
+    assert res.inventory == {}
+    assert res.artifact_types == ["python"]
+
+
+def test_unity_assets_excluded_from_inventory(tmp_path):
+    assets = tmp_path / "Assets"
+    assets.mkdir()
+    (assets / "clip.wav").write_bytes(b"\x00")
+    ps = tmp_path / "ProjectSettings"
+    ps.mkdir()
+    (ps / "ProjectVersion.txt").write_text("m_EditorVersion: 6000.0.23f1\n")
+    res = signatures.scan(tmp_path)
+    assert "unity" in res.artifact_types
+    assert res.inventory == {}
+
+
+def test_manifest_detection_merges_scan_inventory():
+    res, _meta = detect(EXAMPLE, use_llm=False)
+    assert res.run_plan_source == "manifest"
+    assert "dataset" in res.artifact_types
+    assert res.inventory.get("dataset") == 1

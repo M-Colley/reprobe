@@ -87,6 +87,9 @@ def detect(
 
     console.print(f"[bold]source[/bold]: {fr.resolved_type} · pin {fr.pin.kind}:{fr.pin.value[:50]}")
     console.print(f"[bold]artifact types[/bold]: {', '.join(res.artifact_types) or '(none)'}")
+    if res.inventory:
+        console.print("[bold]non-code files[/bold]: "
+                      + " · ".join(f"{t} ×{n}" for t, n in sorted(res.inventory.items())))
     console.print(f"[bold]run plan source[/bold]: {res.run_plan_source}")
     t = Table("order", "runner", "target", "expected outputs")
     for i, s in enumerate(res.steps, 1):
@@ -97,6 +100,42 @@ def detect(
 
 
 @app.command()
+def pull(
+    config_dir: Optional[str] = typer.Option(None, help="override config/ directory"),
+):
+    """Pull the pinned base images + smoke image — one-command bootstrap on a
+    new machine. The CI controller image is intentionally excluded (build it
+    with `bash images/build-images.sh controller`; it is not published)."""
+    cfg = load_config(config_dir)
+    if not docker_available():
+        console.print("[red]docker is not available[/red] — install/start Docker first "
+                      "(`reprobe doctor` checks the full environment)")
+        raise typer.Exit(1)
+
+    images: list[str] = []
+    for key in ("python", "r"):
+        img = cfg.base_image(key)
+        if img and img not in images:
+            images.append(img)
+    smoke = cfg.pins.get("fetch", {}).get("smoke_image", "hello-world")
+    if smoke and smoke not in images:
+        images.append(smoke)
+
+    ok = True
+    t = Table("image", "status")
+    for img in images:
+        if image_present(img):
+            t.add_row(img, "ok (already present)")
+            continue
+        console.print(f"pulling {img}…")
+        pulled = pull_image(img)
+        ok &= pulled
+        t.add_row(img, "ok (pulled)" if pulled else "FAIL (not found, private, or network error)")
+    console.print(t)
+    raise typer.Exit(0 if ok else 1)
+
+
+@app.command()
 def batch(
     csv_path: str = typer.Argument(..., help="CSV with a 'url' column (or one URL per line)"),
     workroot: str = typer.Option("work"),
@@ -104,6 +143,8 @@ def batch(
     config_dir: Optional[str] = typer.Option(None),
     no_run: bool = typer.Option(False, "--no-run"),
     no_llm: bool = typer.Option(False, "--no-llm"),
+    resume: bool = typer.Option(False, "--resume", help="reuse existing per-submission reports; "
+                                "only fetch-failed/infra-error submissions are retried"),
 ):
     """Run a whole review season and emit a sortable dashboard."""
     import shutil
@@ -120,14 +161,18 @@ def batch(
     for ref in refs:
         console.print(f"[cyan]>[/cyan] {ref}")
         sid = submission_id(ref)
-        try:
-            rep = orch.run(ref, do_run=not no_run, use_llm=not no_llm, sid=sid)
-        except Exception as e:  # one bad submission must never abort the season
-            console.print(f"[red]  harness error[/red]: {type(e).__name__}: {e}")
-            rep = Report(submission_id=sid, harness_version=f"reprobe {_v}",
-                         timestamp="", source={"input": ref, "error": f"{type(e).__name__}: {e}"},
-                         verdict={"overall": "infra-error", "human_review_required": True,
-                                  "note": "harness crashed on this submission — no statement about the artifact"})
+        rep = _resumed_report(Path(workroot) / sid / "out" / "report.json") if resume else None
+        if rep is not None:
+            console.print("[dim]  resumed from existing report[/dim]")
+        else:
+            try:
+                rep = orch.run(ref, do_run=not no_run, use_llm=not no_llm, sid=sid)
+            except Exception as e:  # one bad submission must never abort the season
+                console.print(f"[red]  harness error[/red]: {type(e).__name__}: {e}")
+                rep = Report(submission_id=sid, harness_version=f"reprobe {_v}",
+                             timestamp="", source={"input": ref, "error": f"{type(e).__name__}: {e}"},
+                             verdict={"overall": "infra-error", "human_review_required": True,
+                                      "note": "harness crashed on this submission — no statement about the artifact"})
         reports.append(rep.model_dump(mode="json"))
         # dashboard hrefs are <sid>/report.html — make out/ a self-contained bundle
         src_report = Path(workroot) / sid / "out" / "report.html"
@@ -138,6 +183,7 @@ def batch(
     (outdir / "dashboard.html").write_text(dash.render(reports), encoding="utf-8")
     (outdir / "badges.json").write_text(json.dumps(
         [{"submission_id": r["submission_id"], "badges": r["badges"]} for r in reports], indent=2), encoding="utf-8")
+    (outdir / "badges.csv").write_text(_badges_csv(reports), encoding="utf-8")
     console.print(f"[green]ok[/green] dashboard: {outdir / 'dashboard.html'}  ({len(reports)} submissions)")
 
 
@@ -145,6 +191,8 @@ def batch(
 def doctor(
     config_dir: Optional[str] = typer.Option(None),
     smoke: bool = typer.Option(False, "--smoke", help="run a sandbox smoke test (hello-world)"),
+    golden: bool = typer.Option(False, "--golden", help="regression-check the pipeline against "
+                                "the bundled golden fixtures (repo checkout only)"),
 ):
     """Self-check: config, Docker, base images, Ollama, sandbox flags."""
     import shutil as _shutil
@@ -164,6 +212,18 @@ def doctor(
     dav = docker_available()
     ok &= dav
     t.add_row("docker", "ok" if dav else "FAIL", "daemon reachable" if dav else "not available")
+
+    # Advisory only (never fails doctor): pins.yaml asks for @sha256 digests on
+    # the upstream images it cannot rebuild, so year-old reports re-run exactly.
+    mm = (cfg.pins.get("base_images") or {}).get("micromamba_base") or ""
+    if mm and "@sha256:" not in mm:
+        t.add_row("pin digest", "--", "micromamba_base is tag-only — add its @sha256: digest "
+                                      "to pins.yaml after first pull")
+    if cfg.llm.get("enabled"):
+        oi = cfg.llm.get("ollama_image") or ""
+        if oi and "@sha256:" not in oi:
+            t.add_row("pin digest", "--", "llm.ollama_image is tag-only — add its @sha256: digest "
+                                          "to pins.yaml after first pull")
 
     # Missing base images mean nothing can run — fail loudly, don't just advise.
     for key in ("python", "r"):
@@ -218,6 +278,18 @@ def doctor(
             if raw.argv_redacted:
                 console.print(f"  [dim]{' '.join(raw.argv_redacted)}[/dim]")
 
+    if golden:
+        from .golden import GOLDEN_REL, compare as golden_compare, find_repo_root
+        root = find_repo_root()
+        if root is None or not (root / GOLDEN_REL).is_file():
+            console.print("[yellow]golden skipped: fixtures / tests/golden/expected.json not found "
+                          "— run from a repo checkout[/yellow]")
+        else:
+            console.print(f"[bold]golden regression[/bold]: {len(json.loads((root / GOLDEN_REL).read_text(encoding='utf-8')))} fixtures through the dry-run pipeline…")
+            for name, good, detail in golden_compare(root, config=cfg):
+                ok &= good
+                console.print(f"  {'ok' if good else 'FAIL'} {name}" + ("" if good else f" — {detail}"))
+
     raise typer.Exit(0 if ok else 1)
 
 
@@ -235,6 +307,49 @@ def version():
 
 
 # ---------------------------------------------------------------------- #
+def _resumed_report(report_json: Path):
+    """The existing report for --resume, or None to (re-)run. Fetch-failed and
+    infra-error verdicts return None so transient failures are retried; an
+    unreadable file also returns None (never abort the season on a bad cache)."""
+    from .models import Report
+
+    if not report_json.is_file():
+        return None
+    try:
+        data = json.loads(report_json.read_text(encoding="utf-8"))
+        if (data.get("verdict") or {}).get("overall") in ("fetch-failed", "infra-error"):
+            return None
+        return Report.model_validate(data)
+    except Exception:
+        return None
+
+
+def _badges_csv(reports: list[dict]) -> str:
+    """Flat per-submission summary for spreadsheet reconciliation (PCS etc.)."""
+    import io
+
+    from .report.dashboard import triage_flags
+
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(["submission_id", "input", "verdict", "human_review_required",
+                "available", "functional", "results_reproduced",
+                "fair_findable", "fair_accessible", "fair_interoperable", "fair_reusable",
+                "artifact_types", "flags"])
+    for r in reports:
+        acm = (r.get("badges") or {}).get("acm") or {}
+        fair = (r.get("badges") or {}).get("fair") or {}
+        verdict = r.get("verdict") or {}
+        w.writerow([r.get("submission_id"), (r.get("source") or {}).get("input"),
+                    verdict.get("overall"), verdict.get("human_review_required"),
+                    acm.get("available"), acm.get("functional"), acm.get("results_reproduced"),
+                    fair.get("findable"), fair.get("accessible"),
+                    fair.get("interoperable"), fair.get("reusable"),
+                    ";".join((r.get("detect") or {}).get("artifact_types") or []),
+                    ";".join(triage_flags(r))])
+    return buf.getvalue()
+
+
 def _read_refs(csv_path: str) -> list[str]:
     p = Path(csv_path)
     text = p.read_text(encoding="utf-8")

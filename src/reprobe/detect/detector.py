@@ -32,8 +32,11 @@ def detect(
                 if not s.expected_outputs and exp:
                     s.expected_outputs = list(exp)
             # the deterministic repo scan still informs environment planning
-            # (e.g. Dockerfile -> needs-repo2docker), so keep its flags
+            # (e.g. Dockerfile -> needs-repo2docker), so keep its flags — and
+            # its non-code inventory, which a manifest doesn't declare
             m_result.flags = sorted(set(m_result.flags) | set(heuristic.flags))
+            m_result.inventory = heuristic.inventory
+            m_result.artifact_types = sorted(set(m_result.artifact_types) | set(heuristic.inventory))
             return m_result, meta
         # codecheck or partial manifest: use heuristic steps + lifted expected outputs
         exp = meta.get("expected_outputs", [])
