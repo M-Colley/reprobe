@@ -23,6 +23,23 @@ anything. `reprobe --no-llm` is fully functional and deterministic.
 
 ## Install
 
+> [!IMPORTANT]
+> **Docker must be able to run — this is a hard prerequisite.** `reprobe`
+> executes every analysis inside Docker, so a working Docker Engine is
+> mandatory (`reprobe doctor` verifies it; only the code-free commands
+> `reprobe detect` and `reprobe run --no-run` work without it).
+>
+> - **Windows** — install Docker Desktop, which needs **either** the **WSL 2
+>   backend** (recommended: enable *"Use the WSL 2 based engine"* in Docker
+>   Desktop → Settings) **or**, if WSL 2 is unavailable to you, the Hyper-V
+>   backend. Both rely on hardware virtualization, so on a **managed or
+>   locked-down machine you will need administrator / IT permission** to
+>   install Docker Desktop and turn virtualization on. Without WSL 2 **or** that
+>   permission, Docker will not start and no runs are possible.
+> - **Linux** — the daemon must be running and your user must be allowed to use
+>   it: either be in the `docker` group, or use rootless Docker.
+> - **macOS** — Docker Desktop (or an equivalent daemon) must be running.
+
 ```bash
 pip install -e .            # Python 3.11+; needs Docker available for runs
 reprobe pull               # fetch the pinned base images (published, no login needed)
@@ -74,7 +91,7 @@ step reports both what it *verified* and what it explicitly did **not**.
 
 Drop an `autoui-repro.yml` in your repo to remove all guesswork (existing
 CODECHECK `codecheck.yml` is also read). See
-[schemas/autoui-repro.schema.json](schemas/autoui-repro.schema.json) and
+[src/reprobe/schemas/autoui-repro.schema.json](src/reprobe/schemas/autoui-repro.schema.json) and
 [examples/example-python](examples/example-python).
 
 ## Status

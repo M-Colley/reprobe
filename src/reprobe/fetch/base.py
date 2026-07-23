@@ -66,6 +66,13 @@ def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600) -> 
     env = dict(os.environ)
     env["GIT_LFS_SKIP_SMUDGE"] = "1"        # don't pull large LFS blobs during fetch
     env["GIT_TERMINAL_PROMPT"] = "0"        # never hang on a credential prompt
+    # Restrict git to network transports we actually fetch over. This blocks the
+    # `ext::`/`fd::` remote-helper transports (arbitrary host command execution)
+    # and `file::` (local exfiltration) even if a crafted ref reaches `git clone`
+    # — clone runs on the TRUSTED host, outside every container sandbox, so an
+    # unfenced transport here is a full sandbox escape. Defence in depth with the
+    # ref validation in git_host.py.
+    env["GIT_ALLOW_PROTOCOL"] = "http:https:git:ssh"
     try:
         return subprocess.run(["git", *args], cwd=cwd, env=env,
                               capture_output=True, text=True, timeout=timeout)
@@ -74,6 +81,36 @@ def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600) -> 
     except subprocess.TimeoutExpired:
         raise FetchError(f"git {args[0]} timed out after {timeout}s "
                          f"(large repo or slow network); re-run or clone manually")
+
+
+# ---------------------------------------------------------------------------
+# Resource bounds. A malicious deposit (a huge file or a decompression bomb) is
+# handled on the TRUSTED host, outside the container caps, so it could exhaust
+# host disk/memory and abort a whole batch season. These are generous ceilings
+# that still bound a bomb (which is TB–PB scale); a chair can lower them here.
+# ---------------------------------------------------------------------------
+_MAX_DOWNLOAD_BYTES = 20 * 1024**3       # per streamed file
+_MAX_EXTRACT_BYTES = 50 * 1024**3        # total declared-uncompressed per archive
+_MAX_ARCHIVE_MEMBERS = 500_000
+
+
+def guard_zip(z: "zipfile.ZipFile") -> None:
+    """Refuse a zip whose member count or declared uncompressed size is bomb-shaped,
+    BEFORE extracting it. Raises FetchError."""
+    infos = z.infolist()
+    if len(infos) > _MAX_ARCHIVE_MEMBERS:
+        raise FetchError(f"archive has too many members ({len(infos)} > {_MAX_ARCHIVE_MEMBERS})")
+    total = sum(i.file_size for i in infos)
+    if total > _MAX_EXTRACT_BYTES:
+        raise FetchError(f"archive uncompressed size {total} exceeds {_MAX_EXTRACT_BYTES}-byte cap (decompression bomb?)")
+
+
+def _guard_tar_members(members: list[tarfile.TarInfo]) -> None:
+    if len(members) > _MAX_ARCHIVE_MEMBERS:
+        raise ValueError(f"archive has too many members ({len(members)} > {_MAX_ARCHIVE_MEMBERS})")
+    total = sum(m.size for m in members)
+    if total > _MAX_EXTRACT_BYTES:
+        raise ValueError(f"archive uncompressed size {total} exceeds {_MAX_EXTRACT_BYTES}-byte cap (decompression bomb?)")
 
 
 # ---------------------------------------------------------------------------
@@ -118,12 +155,13 @@ def _check_tar_member(m: tarfile.TarInfo) -> None:
 
 
 def _extract_tar(t: tarfile.TarFile, dest: Path) -> None:
+    members = t.getmembers()
+    _guard_tar_members(members)             # reject bombs before writing anything
     try:
-        t.extractall(dest, filter="data")   # sanitizes members; present on 3.12+ and 3.11.4+
+        t.extractall(dest, members=members, filter="data")   # sanitizes; 3.12+ and 3.11.4+
         return
     except TypeError:
         pass                                # 3.11.0–3.11.3: no filter= kwarg, validate by hand
-    members = t.getmembers()
     for m in members:
         _check_tar_member(m)
     t.extractall(dest, members=members)
@@ -137,6 +175,7 @@ def maybe_unzip(dest: Path, warnings: list[str]) -> None:
     try:
         if len(zips) == 1 and not tars:
             with zipfile.ZipFile(zips[0]) as z:
+                guard_zip(z)                # reject a decompression bomb first
                 z.extractall(dest)          # zipfile sanitizes member paths itself
         elif len(tars) == 1 and not zips:
             with tarfile.open(tars[0]) as t:
@@ -152,19 +191,35 @@ def maybe_unzip(dest: Path, warnings: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 def download(url: str, dest: Path, *, expected_md5: str | None = None,
-             params: dict | None = None, timeout: int = 300) -> tuple[bool, str]:
-    """Stream a file to dest; verify md5 if provided. Returns (ok, note)."""
+             params: dict | None = None, timeout: int = 300,
+             max_bytes: int = _MAX_DOWNLOAD_BYTES) -> tuple[bool, str]:
+    """Stream a file to dest; verify md5 if provided. Returns (ok, note).
+
+    Aborts (and removes the partial file) if the response exceeds ``max_bytes`` —
+    an untrusted platform could otherwise stream unbounded bytes onto the host."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     h = hashlib.md5()
+    total = 0
+    over = False
     try:
         with _SESSION.get(url, params=params, stream=True, timeout=timeout) as r:
             r.raise_for_status()
+            clen = r.headers.get("Content-Length")
+            if clen and clen.isdigit() and int(clen) > max_bytes:
+                return False, f"refusing oversized download ({int(clen)} bytes > {max_bytes}-byte cap)"
             with dest.open("wb") as fh:
                 for chunk in r.iter_content(65536):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        over = True
+                        break
                     fh.write(chunk)
                     h.update(chunk)
     except Exception as e:
         return False, f"download failed: {e}"
+    if over:
+        dest.unlink(missing_ok=True)
+        return False, f"download exceeded {max_bytes}-byte cap (possible archive bomb)"
     if expected_md5:
         if h.hexdigest() != expected_md5.replace("md5:", ""):
             return False, "checksum mismatch"

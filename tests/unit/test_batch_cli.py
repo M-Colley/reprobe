@@ -73,3 +73,43 @@ def test_batch_resume_retries_fetch_failed(tmp_path):
     assert res.exit_code == 0, res.output
     assert "resumed" not in res.output          # retried, not reused
     assert "MARKER" not in rep_path.read_text(encoding="utf-8")
+
+
+# --- _read_refs robustness + CSV formula-injection guard ---------------------
+
+from reprobe.cli import _badges_csv, _csv_safe, _read_refs
+
+
+def test_read_refs_strips_bom(tmp_path):
+    # Excel/PowerShell write a UTF-8 BOM; header + rows must still parse.
+    f = tmp_path / "subs.csv"
+    f.write_bytes(b"\xef\xbb\xbfurl\nhttps://github.com/a/b\n")
+    assert _read_refs(str(f)) == ["https://github.com/a/b"]
+
+
+def test_read_refs_empty_file_no_crash(tmp_path):
+    f = tmp_path / "empty.csv"
+    f.write_text("", encoding="utf-8")
+    assert _read_refs(str(f)) == []          # must not IndexError / abort the season
+
+
+def test_read_refs_plain_list_skips_comments(tmp_path):
+    f = tmp_path / "list.csv"
+    f.write_text("# a comment\nhttps://github.com/a/b\n\n", encoding="utf-8")
+    assert _read_refs(str(f)) == ["https://github.com/a/b"]
+
+
+def test_csv_safe_neutralizes_formulas():
+    for danger in ("=cmd()", "+1", "-2", "@x", "\tx", "\rx"):
+        assert _csv_safe(danger).startswith("'")
+    assert _csv_safe("https://github.com/a/b") == "https://github.com/a/b"
+    assert _csv_safe(None) == "" and _csv_safe(True) == "True"
+
+
+def test_badges_csv_quotes_formula_input():
+    rep = {"submission_id": "s1", "source": {"input": "=HYPERLINK(evil)"},
+           "verdict": {"overall": "runs"}, "badges": {"acm": {}, "fair": {}}, "detect": {}}
+    out = _badges_csv([rep])
+    # the malicious input cell must be prefixed so a spreadsheet treats it as text
+    assert "'=HYPERLINK(evil)" in out
+    assert ",=HYPERLINK(evil)" not in out

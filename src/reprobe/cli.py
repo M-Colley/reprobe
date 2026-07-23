@@ -109,7 +109,9 @@ def pull(
     cfg = load_config(config_dir)
     if not docker_available():
         console.print("[red]docker is not available[/red] — install/start Docker first "
-                      "(`reprobe doctor` checks the full environment)")
+                      "(Windows: Docker Desktop needs WSL 2 or admin-enabled Hyper-V; Linux: "
+                      "start the daemon and join the 'docker' group). "
+                      "`reprobe doctor` checks the full environment")
         raise typer.Exit(1)
 
     images: list[str] = []
@@ -211,7 +213,10 @@ def doctor(
 
     dav = docker_available()
     ok &= dav
-    t.add_row("docker", "ok" if dav else "FAIL", "daemon reachable" if dav else "not available")
+    t.add_row("docker", "ok" if dav else "FAIL",
+              "daemon reachable" if dav else "not available — start Docker (Windows: Docker "
+              "Desktop needs WSL 2 or admin-enabled Hyper-V; Linux: start the daemon and join "
+              "the 'docker' group)")
 
     # Advisory only (never fails doctor): pins.yaml asks for @sha256 digests on
     # the upstream images it cannot rebuild, so year-old reports re-run exactly.
@@ -324,6 +329,17 @@ def _resumed_report(report_json: Path):
         return None
 
 
+def _csv_safe(v) -> str:
+    """Neutralize spreadsheet formula injection: a cell beginning with = + - @
+    (or a tab/CR) is executed as a formula when a chair opens the CSV in
+    Excel/Sheets. The submission id and input URL are author-influenced, so
+    prefix any such cell with a single quote to force it to plain text."""
+    s = "" if v is None else str(v)
+    if s[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + s
+    return s
+
+
 def _badges_csv(reports: list[dict]) -> str:
     """Flat per-submission summary for spreadsheet reconciliation (PCS etc.)."""
     import io
@@ -340,27 +356,33 @@ def _badges_csv(reports: list[dict]) -> str:
         acm = (r.get("badges") or {}).get("acm") or {}
         fair = (r.get("badges") or {}).get("fair") or {}
         verdict = r.get("verdict") or {}
-        w.writerow([r.get("submission_id"), (r.get("source") or {}).get("input"),
+        w.writerow([_csv_safe(c) for c in (
+                    r.get("submission_id"), (r.get("source") or {}).get("input"),
                     verdict.get("overall"), verdict.get("human_review_required"),
                     acm.get("available"), acm.get("functional"), acm.get("results_reproduced"),
                     fair.get("findable"), fair.get("accessible"),
                     fair.get("interoperable"), fair.get("reusable"),
                     ";".join((r.get("detect") or {}).get("artifact_types") or []),
-                    ";".join(triage_flags(r))])
+                    ";".join(triage_flags(r)))])
     return buf.getvalue()
 
 
 def _read_refs(csv_path: str) -> list[str]:
     p = Path(csv_path)
-    text = p.read_text(encoding="utf-8")
+    # utf-8-sig strips a leading BOM (Excel / PowerShell CSV exports carry one),
+    # which would otherwise break header detection and the 'url' column lookup.
+    text = p.read_text(encoding="utf-8-sig")
+    lines = text.splitlines()
+    if not lines:                       # empty file must not abort the whole season
+        return []
     refs: list[str] = []
-    if "," in text.splitlines()[0] or text.lower().startswith("url"):
-        for row in csv.DictReader(text.splitlines()):
+    if "," in lines[0] or lines[0].lower().startswith("url"):
+        for row in csv.DictReader(lines):
             url = row.get("url") or row.get("URL") or next(iter(row.values()), None)
             if url and url.strip():
                 refs.append(url.strip())
     else:
-        refs = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+        refs = [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
     return refs
 
 

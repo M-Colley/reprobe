@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — security & robustness hardening
+
+Findings from a full code review; the trust boundary is the fetch/detect stages
+that handle untrusted submitter input on the host, *before* any container exists.
+
+- **Git-clone host RCE closed (critical).** A crafted repo ref could select
+  git's `ext::` remote-helper transport and run a command on the trusted
+  orchestrator host. `run_git` now sets `GIT_ALLOW_PROTOCOL=http:https:git:ssh`
+  (blocking `ext::`/`fd::`/`file::`), the git fetcher rejects refs that look like
+  an option (`-…`) or carry a `::` transport marker or a non-network scheme, and
+  the `clone` argv gets an explicit `--` end-of-options guard. Hostile-input
+  tests added.
+- **Host-DoS bounds on fetch.** `download()` enforces a byte cap (and rejects an
+  oversized `Content-Length`); archive extraction rejects decompression bombs
+  (declared-uncompressed-size and member-count caps) for both zip and tar; the
+  anonymous-GitHub fetcher streams to disk instead of buffering the whole
+  response in RAM.
+- **Dataverse SSRF narrowed.** Dispatch now matches the actual host, not the
+  substring `dataverse` appearing anywhere in the ref (which let an internal
+  address route through the download path).
+- **Untrusted-tree scan hardened.** Detection walks the fetched repo with
+  `followlinks=False` (no symlink loops/escapes) and a file-count cap, so a
+  hostile deposit can't hang the harness.
+- **Manifest schema now ships in the wheel.** The JSON Schema moved under
+  `reprobe/schemas/` and loads via `importlib.resources`; a non-editable install
+  previously skipped schema validation of untrusted manifests silently.
+- **Smaller hardening:** advisory-LLM `summarize()` now fences the report like
+  the other roles; `badges.csv` neutralizes spreadsheet formula injection;
+  `_read_refs` strips a UTF-8 BOM and no longer crashes on an empty CSV; the
+  manifest `dependencies` filename is shell-quoted before the install phase; the
+  Markdown report neutralizes raw HTML in untrusted free-text; log tails are read
+  from a bounded window instead of loading the whole (uncapped) log into memory;
+  digest pinning records every base image used in a mixed python+R run.
+
 ## 0.2.0 — chair quality-of-life wave
 
 - **`reprobe pull`:** one-command new-machine bootstrap — pulls the pinned

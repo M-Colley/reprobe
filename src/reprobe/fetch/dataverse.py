@@ -28,7 +28,14 @@ class DataverseFetcher:
 
     def can_handle(self, ref: str) -> bool:
         r = ref.lower()
-        known = "dataverse" in r or any(h in r for h in self.extra_hosts)
+        # Match on the actual HOST, not the substring appearing anywhere in the
+        # ref: otherwise `http://169.254.169.254/dataset?...dataverse` would route
+        # an internal address through the Dataverse download path (SSRF).
+        try:
+            host = (urlparse(ref).netloc or "").lower()
+        except ValueError:
+            host = ""
+        known = "dataverse" in host or any(h in host for h in self.extra_hosts)
         return known and ("persistentid=" in r or "/dataset" in r)
 
     def fetch(self, ref: str, dest: Path) -> FetchResult:

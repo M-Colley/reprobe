@@ -227,3 +227,26 @@ def test_disabled_row_is_not_imported():
     rows = [{"id": "julia", "plugin": "no_such_module_xyz:JuliaRunner", "enabled": False}]
     runners = load_runners(enabled_ids={"julia"}, rows=rows)   # no raise, no runner
     assert "julia" not in runners
+
+
+def test_tail_reads_bounded_window(tmp_path):
+    # A huge author-controlled log must be tailed without loading it all into RAM.
+    from reprobe.runners.base import _TAIL_CAP_BYTES, _tail
+    log = tmp_path / "big.log"
+    with log.open("w", encoding="utf-8") as fh:
+        for i in range(200_000):
+            fh.write(f"line {i}\n")
+    assert log.stat().st_size > _TAIL_CAP_BYTES        # confirm we exceeded the window
+    out = _tail(str(log), n=5)
+    lines = out.splitlines()
+    assert len(lines) == 5
+    assert lines[-1] == "line 199999"                  # last real line preserved
+    assert len(out) < _TAIL_CAP_BYTES                  # only a small tail returned
+
+
+def test_tail_missing_or_empty(tmp_path):
+    from reprobe.runners.base import _tail
+    assert _tail(None) == ""
+    assert _tail(str(tmp_path / "nope.log")) == ""
+    empty = tmp_path / "e.log"; empty.write_text("")
+    assert _tail(str(empty)) == ""

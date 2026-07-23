@@ -57,3 +57,12 @@ def test_dashboard_types_column_and_no_checksum_flag():
     assert "python, video" in out
     assert "no-checksum" in out
     assert dashboard.triage_flags(rep) == ["no-checksum"]
+
+
+def test_markdown_neutralizes_untrusted_html():
+    r = _report()
+    r.source["warnings"] = ["<script>alert(1)</script>"]
+    r.not_verified = ["<img src=x onerror=alert(1)>"]
+    md = markdown.render(r)
+    assert "<script>" not in md and "&lt;script&gt;" in md
+    assert "<img" not in md

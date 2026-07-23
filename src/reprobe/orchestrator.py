@@ -134,6 +134,7 @@ class Orchestrator:
 
         # -- (4) RUN (sandboxed) ---------------------------------------- #
         results: list[RunResult] = []
+        used_images: set[str] = set()        # every distinct image that ran a container
         unity_section = None
         ran = False
         if do_run and detect_res.steps:
@@ -174,6 +175,8 @@ class Orchestrator:
                 else:
                     if allow_egress_runtime:
                         spec = spec.model_copy(update={"network": "egress"})
+                    if spec.image:
+                        used_images.add(spec.image)
                     log_path = logdir / f"step{i:02d}-{runner.id}.log"
                     raw = run_container(spec, ctx.limits, log_path,
                                         allow_egress=allow_egress_runtime, dry_run=dry_run,
@@ -183,13 +186,20 @@ class Orchestrator:
                 results.append(res)
             self._collect_artifacts(results, rundir, outdir)
             # Pin the exact image bytes that ran (pins.yaml carries a mutable tag).
-            # Resolve from the real daemon; None if absent/dry-run — never faked.
-            if not dry_run and any(r.executed for r in results):
-                img = report.environment.get("image")
-                digest = _image_digest(img) if img else None
-                if digest:
-                    env_plan.base_image_digest = digest
-                    report.environment["base_image_digest"] = digest
+            # A mixed python+R run uses more than one base, so record a digest per
+            # distinct image actually used — not just the single env image (which
+            # would silently omit the R base). Resolved from the real daemon; an
+            # absent image yields no digest and is skipped — never faked.
+            if not dry_run and used_images:
+                digests = {im: d for im in sorted(used_images) if (d := _image_digest(im))}
+                if digests:
+                    report.environment["base_image_digests"] = digests
+                    primary = report.environment.get("image")
+                    # Keep the scalar base_image_digest for back-compat: prefer the
+                    # primary env image, else any one resolved digest.
+                    chosen = digests.get(primary) or next(iter(digests.values()))
+                    env_plan.base_image_digest = chosen
+                    report.environment["base_image_digest"] = chosen
         report.steps = results
         report.unity = unity_section
 

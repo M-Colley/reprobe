@@ -192,14 +192,29 @@ class BaseRunner:
         )
 
 
+_TAIL_CAP_BYTES = 64 * 1024
+
+
 def _tail(log_path: Optional[str], n: int = 40) -> str:
-    if not log_path or not Path(log_path).exists():
+    """Last ``n`` lines of a log, reading at most the final ~64 KB. The log is
+    the container's uncapped stdout/stderr (author-controlled), so never load the
+    whole file into memory just to slice the tail — a multi-GB log would OOM the
+    trusted orchestrator."""
+    if not log_path:
         return ""
+    p = Path(log_path)
     try:
-        lines = Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
-        return "\n".join(lines[-n:])
+        size = p.stat().st_size
+        with p.open("rb") as fh:
+            if size > _TAIL_CAP_BYTES:
+                fh.seek(size - _TAIL_CAP_BYTES)
+            data = fh.read()
     except OSError:
         return ""
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if size > _TAIL_CAP_BYTES and lines:
+        lines = lines[1:]          # drop the first, probably-partial, line
+    return "\n".join(lines[-n:])
 
 
 def _sha256_file(path: Path) -> str:

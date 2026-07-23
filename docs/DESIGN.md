@@ -90,7 +90,7 @@ reprobe/
 ├── runner-scripts/               # tiny scripts COPIED INTO runtime containers (no install)
 │   ├── run_python.sh run_jupyter.py run_r.sh run_rmarkdown.R unity_compile_check.cs
 │
-├── schemas/                      # autoui-repro.schema.json  report.schema.json
+│   └── schemas/                  # autoui-repro.schema.json  report.schema.json (under src/reprobe/, shipped as package data)
 ├── deploy/
 │   ├── docker-compose.yml        # ollama service + private network + named volumes
 │   └── github-action/action.yml  # composite action wrapping `reprobe run`
@@ -268,7 +268,7 @@ Wrapped by a host-side **hard timeout** that `docker kill`s and records `status=
 
 ## 8. Author manifest convention (final)
 
-Define a minimal, **optional** `autoui-repro.yml` (JSON-Schema-validated at `schemas/autoui-repro.schema.json`), and **also read `codecheck.yml`** if present (mapped onto our fields) so existing CODECHECK submissions work unchanged. Authors are never *required* to write anything — deterministic auto-detect is the fallback; a manifest removes all guesswork and the LLM from the loop.
+Define a minimal, **optional** `autoui-repro.yml` (JSON-Schema-validated at `src/reprobe/schemas/autoui-repro.schema.json`), and **also read `codecheck.yml`** if present (mapped onto our fields) so existing CODECHECK submissions work unchanged. Authors are never *required* to write anything — deterministic auto-detect is the fallback; a manifest removes all guesswork and the LLM from the loop.
 
 ```yaml
 version: 1
@@ -296,7 +296,7 @@ badges_claimed: [available, functional]    # author's claim; harness verifies
 
 ## 9. Output
 
-### 9.1 Report schema (`schemas/report.schema.json`, versioned)
+### 9.1 Report schema (`src/reprobe/schemas/report.schema.json`, versioned)
 
 ```jsonc
 {
