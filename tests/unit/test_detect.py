@@ -242,3 +242,56 @@ def test_manifest_detection_merges_scan_inventory():
     assert res.run_plan_source == "manifest"
     assert "dataset" in res.artifact_types
     assert res.inventory.get("dataset") == 1
+
+
+def test_iter_files_ignores_symlinks(tmp_path):
+    # A symlinked file in an untrusted deposit must not be scanned/executed.
+    (tmp_path / "real.py").write_text("print(1)\n")
+    try:
+        (tmp_path / "link.py").symlink_to(tmp_path / "real.py")
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not creatable on this platform/user")
+    names = {p.name for p in signatures._iter_files(tmp_path)}
+    assert "real.py" in names and "link.py" not in names
+
+
+def test_scan_does_not_follow_symlinked_dirs(tmp_path):
+    # A symlink loop (dir -> parent) must not hang the walk (followlinks=False).
+    (tmp_path / "a.py").write_text("print(1)\n")
+    try:
+        (tmp_path / "loop").symlink_to(tmp_path, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not creatable on this platform/user")
+    res = signatures.scan(tmp_path)   # must terminate
+    assert "python" in res.artifact_types
+
+
+def test_autoui_schema_is_packaged():
+    # Regression for the "schema not shipped -> validation silently skipped" bug.
+    from reprobe.detect.manifest import _load_schema
+    schema = _load_schema()
+    assert isinstance(schema, dict) and schema.get("properties")
+
+
+def test_invalid_manifest_is_caught_by_schema(tmp_path):
+    # With the schema packaged, jsonschema validation must actually run.
+    import pytest
+    pytest.importorskip("jsonschema")
+    from reprobe.detect.manifest import _validate_autoui
+    # version must be integer 1 per schema; a string should fail validation
+    err = _validate_autoui({"version": "not-an-int", "run": {"steps": []}})
+    assert err and "schema violation" in err
+
+
+def test_install_command_quotes_untrusted_dep_filename(tmp_path):
+    # A manifest 'dependencies' filename is untrusted and later runs via bash -c;
+    # it must be shell-quoted so it can't inject a command into the install phase.
+    from reprobe.envbuild.base import _install_commands
+    weird = "a b;c.txt"                       # valid filename, shell-hostile if raw
+    (tmp_path / weird).write_text("numpy\n")
+    cmds, _ = _install_commands({"dependencies": weird}, tmp_path, r_needed=False)
+    pip = next(c for c in cmds if c.startswith("pip install"))
+    assert "'a b;c.txt'" in pip                # shlex-quoted
+    assert "-r a b;c.txt" not in pip           # never the raw injectable form

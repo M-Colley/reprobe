@@ -2,7 +2,8 @@
 (and the LLM) from the pipeline.
 
 Reads ``autoui-repro.yml`` (our minimal convention, JSON-Schema'd in
-schemas/autoui-repro.schema.json) or an existing CODECHECK ``codecheck.yml``,
+src/reprobe/schemas/autoui-repro.schema.json — shipped as package data) or an
+existing CODECHECK ``codecheck.yml``,
 and normalizes either into a DetectResult + environment hints.
 
 A malformed manifest must never abort the run: ``load()`` validates the file
@@ -14,6 +15,7 @@ otherwise) and on any error returns an empty DetectResult carrying a
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,7 +28,26 @@ _CODECHECK_NAMES = ("codecheck.yml", "codecheck.yaml")
 
 _KIND_BY_SUFFIX = {".ipynb": "jupyter", ".py": "python", ".r": "r", ".rmd": "rmarkdown"}
 _VALID_KINDS = {"python", "jupyter", "r", "rmarkdown", "unity", "custom"}
-_SCHEMA_PATH = Path(__file__).resolve().parents[3] / "schemas" / "autoui-repro.schema.json"
+
+
+@lru_cache(maxsize=1)
+def _load_schema() -> Optional[dict[str, Any]]:
+    """The packaged autoui-repro JSON Schema, or None if unavailable.
+
+    Loaded via importlib.resources so it works in a non-editable wheel install
+    (the schema ships as package data — see pyproject package-data). Falls back
+    to the repo-root layout for the rare case it is run from an un-built tree."""
+    try:
+        from importlib.resources import files
+        res = files("reprobe").joinpath("schemas", "autoui-repro.schema.json")
+        if res.is_file():
+            return json.loads(res.read_text(encoding="utf-8"))
+    except (ImportError, ModuleNotFoundError, FileNotFoundError, OSError, ValueError):
+        pass
+    legacy = Path(__file__).resolve().parents[3] / "schemas" / "autoui-repro.schema.json"
+    if legacy.is_file():
+        return json.loads(legacy.read_text(encoding="utf-8"))
+    return None
 
 
 def find_manifest(src_dir: str | Path) -> Optional[tuple[Path, str]]:
@@ -97,8 +118,8 @@ def _validate_autoui(data: dict[str, Any]) -> Optional[str]:
         import jsonschema
     except ImportError:
         jsonschema = None
-    if jsonschema is not None and _SCHEMA_PATH.is_file():
-        schema = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = _load_schema() if jsonschema is not None else None
+    if schema is not None:
         try:
             jsonschema.validate(data, schema)
         except jsonschema.ValidationError as e:

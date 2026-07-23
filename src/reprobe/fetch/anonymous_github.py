@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import re
 import zipfile
-from io import BytesIO
 from pathlib import Path
 
 from ..models import FetchResult, Pin
-from .base import FetchError, get
+from .base import FetchError, download, guard_zip
 
 _ID_RE = re.compile(r"anonymous\.4open\.science/(?:r|api/repo)/([A-Za-z0-9_-]+)", re.I)
 
@@ -30,13 +29,20 @@ class AnonymousGithubFetcher:
         repo_id = m.group(1)
         dest.mkdir(parents=True, exist_ok=True)
         url = f"https://anonymous.4open.science/api/repo/{repo_id}/zip"
+        # Stream to disk with a byte cap instead of buffering the whole response
+        # in RAM (r.content) — a large/hostile snapshot could otherwise OOM the host.
+        zip_path = dest / "_anon_repo.zip"
+        ok, note = download(url, zip_path, timeout=120)
+        if not ok:
+            raise FetchError(f"anonymous github download failed: {note}")
         try:
-            r = get(url, timeout=120)
-            r.raise_for_status()
-            with zipfile.ZipFile(BytesIO(r.content)) as z:
+            with zipfile.ZipFile(zip_path) as z:
+                guard_zip(z)                # reject a decompression bomb
                 z.extractall(dest)
         except Exception as e:
-            raise FetchError(f"anonymous github download failed: {e}")
+            raise FetchError(f"anonymous github extract failed: {e}")
+        finally:
+            zip_path.unlink(missing_ok=True)
 
         return FetchResult(
             input=ref, resolved_type="anonymous_github", src_dir=str(dest),

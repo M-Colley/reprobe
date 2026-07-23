@@ -5,6 +5,7 @@ this heuristic is ambiguous — it never overrides these facts.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -12,6 +13,10 @@ from ..models import DetectResult, RunStep
 
 _SKIP_DIRS = {".git", ".hg", "node_modules", "__pycache__", ".ipynb_checkpoints",
               "Library", "Temp", "obj", "Build", "Builds", ".venv", "venv", "renv"}
+# The fetched tree is untrusted. Walk it without following symlinks (no loops,
+# no escaping the fetch dir) and stop after a sane cap so a deposit with millions
+# of files can't hang detection before any container is even used.
+_MAX_SCAN_FILES = 200_000
 _NUM_RE = re.compile(r"(\d+)")
 _ENTRY_PY = {"main.py", "run.py", "analysis.py", "analyze.py", "pipeline.py",
              "train.py", "evaluate.py", "reproduce.py", "make_figures.py"}
@@ -41,11 +46,16 @@ _EXT_TO_NONCODE = {ext: t for t, exts in _NONCODE_TYPES.items() for ext in exts}
 
 
 def _iter_files(root: Path):
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
-        rel_parts = p.relative_to(root).parts          # skip tokens are repo-relative
-        if not any(part in _SKIP_DIRS for part in rel_parts):
+    seen = 0
+    for dirpath, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]   # prune, never descend
+        for f in files:
+            p = Path(dirpath) / f
+            if p.is_symlink():                               # don't inventory/run symlinked files
+                continue
+            seen += 1
+            if seen > _MAX_SCAN_FILES:
+                return
             yield p
 
 
@@ -75,12 +85,13 @@ def _entry_shallow(p: Path, root: Path) -> bool:
 
 def _unity_projects(root: Path) -> list[Path]:
     projects = []
-    for pv in root.rglob("ProjectSettings/ProjectVersion.txt"):
-        if any(part in _SKIP_DIRS for part in pv.relative_to(root).parts):
-            continue
-        proj = pv.parent.parent
-        if (proj / "Assets").is_dir():
-            projects.append(proj)
+    for dirpath, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        d = Path(dirpath)
+        if d.name == "ProjectSettings" and "ProjectVersion.txt" in files:
+            proj = d.parent
+            if (proj / "Assets").is_dir():
+                projects.append(proj)
     return projects
 
 
@@ -117,6 +128,9 @@ def scan(src_dir: str | Path) -> DetectResult:
     types: list[str] = []
     notes: list[str] = []
     flags: list[str] = []
+
+    if len(files) >= _MAX_SCAN_FILES:
+        notes.append(f"file scan stopped at {_MAX_SCAN_FILES} files; detection is best-effort on this deposit")
 
     if notebooks:
         types.append("jupyter")

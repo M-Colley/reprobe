@@ -39,7 +39,10 @@ unity = "reprobe.runners.unity:UnityRunner"
 where = ["src"]
 
 [tool.setuptools.package-data]
-reprobe = ["py.typed"]
+# schemas/*.json MUST ship in the wheel: the manifest validator loads
+# autoui-repro.schema.json via importlib.resources, so a non-editable install
+# that omitted it would silently skip schema validation of untrusted manifests.
+reprobe = ["py.typed", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

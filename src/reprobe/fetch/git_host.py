@@ -43,6 +43,28 @@ def normalize_browser_url(ref: str, hosts: tuple[str, ...] = _HOSTS) -> tuple[st
     return f"{base}/{'/'.join(segs[:2])}", want
 
 
+def _reject_unsafe_clone_url(url: str) -> None:
+    """Refuse a clone URL that could be read as a git option or a dangerous
+    transport. `git clone` runs on the trusted host (outside any sandbox), so a
+    ref like ``ext::sh -c '…' #x.git`` — accepted by can_handle because it ends
+    in ``.git`` — would otherwise reach git's ext remote-helper and execute a
+    command on the host. Only vetted network URL shapes are allowed through."""
+    if url.startswith("-"):
+        raise FetchError(f"refusing git ref that looks like an option: {url!r}")
+    if "::" in url:
+        raise FetchError(f"refusing git ref with a transport marker '::' (e.g. ext::/fd::): {url!r}")
+    if not (url.lower().startswith(("http://", "https://", "git://", "ssh://")) or url.startswith("git@")):
+        raise FetchError(
+            f"refusing git ref {url!r}: only http(s)://, git://, ssh:// or git@host:path URLs are cloned")
+
+
+def _reject_unsafe_ref(want_ref: str) -> None:
+    """A checkout ref must never look like an option (argument injection into
+    ``git checkout``); legitimate branch/tag/commit refs never start with '-'."""
+    if want_ref.startswith("-"):
+        raise FetchError(f"refusing git checkout ref that looks like an option: {want_ref!r}")
+
+
 def _ref_from_segments(segs: list[str]) -> str | None:
     if not segs:
         return None
@@ -77,8 +99,14 @@ class GitHostFetcher:
         url, browser_ref = normalize_browser_url(url, self.hosts)
         want_ref = want_ref or browser_ref
 
+        # Validate BEFORE touching git: the ref is untrusted submitter input.
+        _reject_unsafe_clone_url(url)
+        if want_ref:
+            _reject_unsafe_ref(want_ref)
+
         dest.mkdir(parents=True, exist_ok=True)
-        clone = run_git(["clone", "--quiet", url, str(dest)])
+        # `--` ends option parsing so a URL/dest can never be read as a flag.
+        clone = run_git(["clone", "--quiet", "--", url, str(dest)])
         if clone.returncode != 0:
             raise FetchError(f"git clone failed: {clone.stderr.strip()[:300]}")
 

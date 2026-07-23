@@ -22,7 +22,11 @@ check**. Everything else is fixed.
    conda-lock` first for reproducible bases.
    On a machine that only *consumes* already-published images (a fresh laptop,
    a helper's PC), skip the build: `reprobe pull` fetches the pinned base
-   images and the smoke image in one command.
+   images and the smoke image in one command. That machine still needs a
+   working Docker (on Windows: Docker Desktop with the **WSL 2 backend**, or
+   **admin/IT permission** to enable Hyper-V virtualization — see the Install
+   prerequisites in [README.md](../README.md#install)); `reprobe doctor` tells
+   you if it is missing.
 3. **Refresh the Unity editor tag map** — **skip until Phase 3 ships**; the
    `reprobe unity-refresh` command does not exist yet and `unity.known_tags`
    stays empty:

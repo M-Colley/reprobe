@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from ..models import Report
 
 _BADGE = {"granted": "✅ granted", "candidate": "🟡 candidate (human review)",
           "not-met": "❌ not met", "not-evaluated": "— not evaluated"}
+
+
+def _ml(s: Any) -> str:
+    """Neutralize raw HTML in an untrusted free-text value (error text, warnings,
+    notes, LLM output) so a crafted author string cannot inject an HTML tag if
+    the Markdown is later viewed through a permissive renderer. Values the caller
+    wraps in `inline code` already render literally and are left as-is."""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def render(r: Report) -> str:
@@ -22,9 +31,9 @@ def render(r: Report) -> str:
     L.append(f"- **Input:** `{src.get('input')}`")
     if src.get("error"):
         L.append(f"- ⚠️ **Fetch failed** — no code was run and nothing about the artifact "
-                 f"was checked: {src['error']}")
+                 f"was checked: {_ml(src['error'])}")
         for w in src.get("warnings", []) or []:
-            L.append(f"  - ⚠️ {w}")
+            L.append(f"  - ⚠️ {_ml(w)}")
         L.append("")
         L.append("## Verdict")
         L.append(f"**{r.verdict.get('overall')}** · human review required: "
@@ -32,14 +41,14 @@ def render(r: Report) -> str:
         L.append("")
         L.append("## What was NOT checked")
         for x in sorted(set(r.not_verified)):
-            L.append(f"- {x}")
+            L.append(f"- {_ml(x)}")
         L.append("")
         return "\n".join(L)
     L.append(f"- **Resolved:** {src.get('resolved_type')} · pin `{(src.get('pin') or {}).get('kind')}:"
              f"{(src.get('pin') or {}).get('value','')[:60]}`")
     L.append(f"- **Checksum verified:** {src.get('checksum_verified')} · **Anonymized:** {src.get('anonymized')}")
     for w in src.get("warnings", []) or []:
-        L.append(f"  - ⚠️ {w}")
+        L.append(f"  - ⚠️ {_ml(w)}")
     L.append("")
 
     det = r.detect or {}
@@ -54,7 +63,7 @@ def render(r: Report) -> str:
             L.append("- **Non-code files:** "
                      + " · ".join(f"{t} ×{n}" for t, n in sorted(inventory.items())))
         for n in det_notes:
-            L.append(f"- ℹ️ {n}")
+            L.append(f"- ℹ️ {_ml(n)}")
         L.append("")
 
     env = r.environment
@@ -65,7 +74,7 @@ def render(r: Report) -> str:
         if env.get(key):
             L.append(f"- **{label}:** `{env[key]}`")
     for w in env.get("warnings", []) or []:
-        L.append(f"  - ⚠️ {w}")
+        L.append(f"  - ⚠️ {_ml(w)}")
     L.append("")
 
     prov = getattr(r, "provenance", None)
@@ -81,7 +90,7 @@ def render(r: Report) -> str:
     L.append(f"- **ACM Artifacts Evaluated – Functional:** {_BADGE.get(acm.get('functional'), acm.get('functional'))}")
     L.append(f"- **ACM Results Reproduced:** {_BADGE.get(acm.get('results_reproduced'), acm.get('results_reproduced'))}")
     for n in acm.get("notes", []) or []:
-        L.append(f"  - ℹ️ {n}")
+        L.append(f"  - ℹ️ {_ml(n)}")
     fair = (r.badges.get("fair") or {})
     L.append(f"- **FAIR:** findable={fair.get('findable')} · accessible={fair.get('accessible')} · "
              f"interoperable={fair.get('interoperable')} · reusable={fair.get('reusable')}")
@@ -111,7 +120,7 @@ def render(r: Report) -> str:
     fb += [str(n) for n in acm.get("notes") or []]
     fb += [str(w) for w in src.get("warnings") or []]
     for line in fb:
-        L.append(f"- {line}")
+        L.append(f"- {_ml(line)}")
     if not fb:
         L.append("- Nothing actionable — see the full report above.")
     L.append("")
@@ -127,7 +136,7 @@ def render(r: Report) -> str:
         L.append(f"- runner: `{s.runner}` · exit: {s.exit_code} · {s.duration_s}s")
         if s.diagnostics.get("harness_error"):
             L.append(f"- ⚠️ **harness error** — no statement about the artifact: "
-                     f"{s.diagnostics['harness_error']}")
+                     f"{_ml(s.diagnostics['harness_error'])}")
         if s.claims:
             L.append("- **Verified claims:**")
             for c in s.claims:
@@ -141,9 +150,9 @@ def render(r: Report) -> str:
         adv = s.diagnostics.get("llm_advisory")
         if adv:
             L.append(f"- **LLM diagnosis** _(advisory, {r.llm.get('model', 'local LLM (model not recorded)')})_: "
-                     f"{adv.get('likely_cause', '')}")
+                     f"{_ml(adv.get('likely_cause', ''))}")
             for fix in adv.get("suggested_fixes", []):
-                L.append(f"  - 💡 {fix}")
+                L.append(f"  - 💡 {_ml(fix)}")
         if s.diagnostics.get("log_tail"):
             tail = str(s.diagnostics["log_tail"]).splitlines()[-15:]
             fence = _fence("\n".join(tail))   # author stdout must not close the fence
@@ -157,12 +166,12 @@ def render(r: Report) -> str:
     if r.unity:
         L.append("## Unity")
         for k, v in r.unity.items():
-            L.append(f"- {k}: {v}")
+            L.append(f"- {_ml(k)}: {_ml(v)}")
         L.append("")
 
     if r.llm.get("summary"):
         L.append("## Summary (LLM-advisory)")
-        L.append(f"> {r.llm['summary']}")
+        L.append(f"> {_ml(r.llm['summary'])}")
         L.append(f"*— generated by {r.llm.get('model', 'local LLM (model not recorded)')}; "
                  "advisory only, not a verified fact._")
         L.append("")
@@ -170,13 +179,13 @@ def render(r: Report) -> str:
     L.append("## What was NOT checked")
     nv = sorted({x for s in r.steps for x in s.not_verified} | set(r.not_verified))
     for x in nv:
-        L.append(f"- {x}")
+        L.append(f"- {_ml(x)}")
     L.append("")
 
     L.append("## Verdict")
     L.append(f"**{r.verdict.get('overall')}** · human review required: {r.verdict.get('human_review_required')}")
     if r.verdict.get("note"):
-        L.append(f"- ℹ️ {r.verdict['note']}")
+        L.append(f"- ℹ️ {_ml(r.verdict['note'])}")
     L.append("")
     return "\n".join(L)
 
