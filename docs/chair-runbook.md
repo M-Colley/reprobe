@@ -54,8 +54,10 @@ check**. Everything else is fixed.
   the author must vendor it or deposit it.
 - **Datasets in git-LFS** are not pulled by default. If the report warns
   `git-lfs present; … skip-smudge`, re-run that submission with `--allow-lfs`
-  (hardened: refuses a repo whose `.lfsconfig` declares a custom transfer agent
-  or an internal `lfs.url`, and caps the total payload).
+  (hardened: the repo's committed `.lfsconfig` is neutralized, the origin host is
+  re-checked public, and the total payload is capped). Only pass `--allow-lfs` for
+  a repo whose git host you trust — git-lfs still fetches from that host's LFS
+  endpoint.
 - **A batch:** put one URL per line (or a `url` column) in `submissions.csv`:
   ```bash
   reprobe batch submissions.csv      # -> out/dashboard.html + out/badges.json + out/badges.csv

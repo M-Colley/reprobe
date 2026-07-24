@@ -17,31 +17,6 @@ from .base import _MAX_LFS_TOTAL_BYTES, Fetcher, FetchError, assert_safe_url, ru
 _HOSTS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org")
 
 
-def _lfs_config_reason(dest: Path) -> str | None:
-    """Why an opt-in LFS pull must be refused for this repo, or None if safe.
-
-    A committed ``.lfsconfig`` is untrusted: git-lfs will EXECUTE a custom
-    transfer agent it declares (host RCE — the same class the GIT_ALLOW_PROTOCOL
-    fix closed for clone) and will fetch from any ``lfs.url`` it sets (SSRF).
-    Refuse custom/standalone transfer agents outright; require any lfs.url host
-    to be public."""
-    cfg = dest / ".lfsconfig"
-    if not cfg.is_file():
-        return None
-    try:
-        text = cfg.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return "is unreadable"
-    if "customtransfer" in text.lower() or "standalonetransferagent" in text.lower():
-        return "declares a custom/standalone LFS transfer agent (would run author code on the host)"
-    for m in re.finditer(r"(?im)^\s*url\s*=\s*(\S+)", text):
-        try:
-            assert_safe_url(m.group(1))
-        except FetchError:
-            return f"points lfs.url at a non-public/unsupported host: {m.group(1)!r}"
-    return None
-
-
 def _lfs_declared_bytes(dest: Path) -> tuple[int, int]:
     """(total_bytes, file_count) declared by the repo's LFS pointer files.
     git-lfs bypasses download()'s streaming cap, so bound the payload using the
@@ -68,13 +43,36 @@ def _lfs_declared_bytes(dest: Path) -> tuple[int, int]:
 
 
 def _pull_lfs(dest: Path, warnings: list[str]) -> None:
-    """Opt-in, hardened git-lfs smudge on the trusted host: refuse a dangerous
-    ``.lfsconfig``, cap the aggregate payload, then pull via ``run_git`` (so
-    GIT_ALLOW_PROTOCOL / GIT_CONFIG_NOSYSTEM / no-credential-prompt all hold)."""
-    reason = _lfs_config_reason(dest)
-    if reason:
-        warnings.append(f"git-lfs NOT pulled: repo .lfsconfig {reason}")
-        return
+    """Opt-in, hardened git-lfs smudge on the trusted host.
+
+    The committed ``.lfsconfig`` is UNTRUSTED, and git-lfs honors many endpoint-
+    and exec-setting keys from it (``lfs.url``/``lfs.pushurl``,
+    ``remote.<n>.lfsurl``, ``customtransfer``/``standalonetransferagent``, and on
+    old git-lfs ``credential.helper``/``core.*``). Rather than denylist keys, we
+    NEUTRALIZE the whole file and let git-lfs derive the endpoint from the
+    already-validated origin clone URL — then cap the payload and pull via
+    ``run_git`` (so GIT_ALLOW_PROTOCOL / GIT_CONFIG_NOSYSTEM / no-credential-prompt
+    all hold). Residual: git-lfs still contacts the origin LFS server's batch API,
+    whose object hrefs it trusts; only run --allow-lfs on repos whose git host you
+    trust."""
+    cfg = dest / ".lfsconfig"
+    if cfg.is_file():
+        try:
+            cfg.rename(cfg.with_name(".lfsconfig.reprobe-disabled"))
+            warnings.append("git-lfs: ignored the repo's committed .lfsconfig "
+                            "(untrusted LFS endpoint/agent config)")
+        except OSError:
+            warnings.append("git-lfs NOT pulled: could not neutralize the repo .lfsconfig")
+            return
+    # Defense in depth: the endpoint git-lfs will use derives from the origin
+    # clone URL; refuse an http(s) origin that resolves to a non-public host.
+    origin = run_git(["config", "--get", "remote.origin.url"], cwd=dest).stdout.strip()
+    if origin.lower().startswith(("http://", "https://")):
+        try:
+            assert_safe_url(origin)
+        except FetchError:
+            warnings.append(f"git-lfs NOT pulled: origin resolves to a non-public host ({origin})")
+            return
     total, count = _lfs_declared_bytes(dest)
     if count == 0:
         warnings.append("git-lfs present but no LFS-tracked files were found to pull")

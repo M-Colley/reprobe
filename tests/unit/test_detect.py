@@ -372,6 +372,15 @@ def test_cran_command_unpinned_warns_nonreproducible(tmp_path):
     assert any("not reproducible" in w for w in p.warnings)
 
 
+def test_r_ipynb_recursion_bomb_does_not_crash_scan(tmp_path):
+    # A deeply-nested .ipynb JSON (a RecursionError bomb, ~100 KB — far under the
+    # read cap) must never crash detection before any container runs.
+    depth = 60000
+    (tmp_path / "bomb.ipynb").write_text("[" * depth + "]" * depth)
+    res = signatures.scan(tmp_path)                # must not raise
+    assert res.r_packages == []
+
+
 def test_cran_command_is_single_quote_injection_safe():
     from reprobe.envbuild.base import _cran_install_command
     cmd = _cran_install_command(["dplyr"], "https://packagemanager.posit.co/cran/2026-07-01")

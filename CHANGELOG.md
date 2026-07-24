@@ -21,17 +21,25 @@ keeping the author analysis offline — the network stays in the sanctioned phas
 - **Author-declared datasets downloaded.** The manifest `data[]` array
   (`{path, source, checksum}`) is now consumed: each http(s) `source` is fetched
   into the run tree before the offline analysis, reusing `download()`'s byte cap,
-  path containment, and checksum honesty, behind a new **SSRF guard** (http(s)
-  only; loopback / link-local / `169.254.169.254` / RFC1918 hosts refused). Author
-  data does not strengthen the Available badge.
+  path containment, and checksum honesty, behind a hardened **SSRF guard** — the
+  host must resolve to a public IP (loopback / link-local / `169.254.169.254` /
+  RFC1918 and IPv4-mapped-IPv6 wrappers all refused), redirects are followed
+  manually and re-checked per hop, and the validated IP is **pinned** for the
+  connect so a name can't DNS-rebind to an internal address between check and use.
+  Author data does not strengthen the Available badge.
 - **Opt-in, hardened git-LFS (`--allow-lfs`).** Off by default (skip-smudge
   stays). When enabled, LFS data is pulled on the host through `run_git` (so
-  `GIT_ALLOW_PROTOCOL` still fences transports; `GIT_CONFIG_NOSYSTEM=1` now also
-  set), but only after refusing any `.lfsconfig` that declares a custom/standalone
-  transfer agent (host RCE) or points `lfs.url` at a non-public host (SSRF), and
-  only if the aggregate declared LFS payload is within a byte cap (git-lfs
-  bypasses `download()`'s per-file cap). LFS objects are content-addressed, so
-  pulled data is reproducibly pinned by the commit.
+  `GIT_ALLOW_PROTOCOL` fences transports; `GIT_CONFIG_NOSYSTEM=1` now also set).
+  The committed `.lfsconfig` is **neutralized** (renamed) before the pull rather
+  than key-denylisted — git-lfs honors many endpoint/exec keys from it
+  (`lfs.url`, `remote.*.lfsurl`, `lfs.pushurl`, custom transfer agents, and on old
+  git-lfs `credential.helper`/`core.*`), so removing it and letting git-lfs derive
+  the endpoint from the already-validated origin URL closes all of them at once.
+  The origin host is re-checked public, and the aggregate declared LFS payload is
+  byte-capped (git-lfs bypasses `download()`'s per-file cap). LFS objects are
+  content-addressed, so pulled data is reproducibly pinned by the commit.
+  (Residual: git-lfs still trusts the origin server's batch-API object hrefs —
+  run `--allow-lfs` only on repos whose git host you trust.)
 
 ## Unreleased — security & robustness hardening
 

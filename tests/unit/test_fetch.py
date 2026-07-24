@@ -533,34 +533,62 @@ def test_run_git_ignores_system_config(monkeypatch):
 
 # --- opt-in git-lfs smudge hardening (host RCE / SSRF / DoS surface) ----------
 
-def test_lfsconfig_refuses_custom_transfer_agent(tmp_path):
-    (tmp_path / ".lfsconfig").write_text(
-        "[lfs]\n  standalonetransferagent = evil\n"
-        "[lfs \"customtransfer.evil\"]\n  path = /bin/sh\n")
-    reason = git_host._lfs_config_reason(tmp_path)
-    assert reason and "transfer agent" in reason
-
-
-def test_lfsconfig_refuses_internal_lfs_url(tmp_path):
-    (tmp_path / ".lfsconfig").write_text("[lfs]\n  url = http://169.254.169.254/lfs\n")
-    reason = git_host._lfs_config_reason(tmp_path)
-    assert reason and "lfs.url" in reason
-
-
-def test_lfsconfig_public_url_and_absent_are_safe(tmp_path):
-    assert git_host._lfs_config_reason(tmp_path) is None            # no .lfsconfig
-    (tmp_path / ".lfsconfig").write_text("[lfs]\n  url = https://93.184.216.34/lfs\n")
-    assert git_host._lfs_config_reason(tmp_path) is None
-
-
 def _lfs_pointer(size: int) -> str:
     return f"version https://git-lfs.github.com/spec/v1\noid sha256:{'a' * 64}\nsize {size}\n"
+
+
+def _origin(url):
+    """A run_git stub factory that reports remote.origin.url = url."""
+    def fake_git(args, cwd=None, timeout=600):
+        if args[:3] == ["config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(args, 0, stdout=f"{url}\n", stderr="")
+        if args[:2] == ["lfs", "ls-files"]:
+            return subprocess.CompletedProcess(args, 0, stdout="d.bin\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+    return fake_git
+
+
+def test_lfs_neutralizes_committed_lfsconfig(tmp_path, monkeypatch):
+    # ANY committed .lfsconfig — endpoint keys (remote.origin.lfsurl, lfs.pushurl),
+    # transfer agents, credential helpers — is renamed away before the pull, so
+    # git-lfs uses the origin-derived endpoint and honors none of it.
+    (tmp_path / ".lfsconfig").write_text(
+        '[remote "origin"]\n  lfsurl = http://169.254.169.254/x\n'
+        "[lfs]\n  standalonetransferagent = evil\n")
+    (tmp_path / "d.bin").write_text(_lfs_pointer(10))
+    calls = []
+    fg = _origin("https://93.184.216.34/r.git")
+    monkeypatch.setattr(git_host, "run_git", lambda *a, **k: calls.append(list(a[0])) or fg(*a, **k))
+    warns: list[str] = []
+    git_host._pull_lfs(tmp_path, warns)
+    assert not (tmp_path / ".lfsconfig").is_file()
+    assert (tmp_path / ".lfsconfig.reprobe-disabled").is_file()
+    assert ["lfs", "pull"] in calls
+    assert any("ignored the repo's committed .lfsconfig" in w for w in warns)
+
+
+def test_lfs_refuses_internal_origin(tmp_path, monkeypatch):
+    (tmp_path / "d.bin").write_text(_lfs_pointer(10))
+
+    def fake_git(args, cwd=None, timeout=600):
+        if args[:3] == ["config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(args, 0, stdout="http://10.0.0.5/r.git\n", stderr="")
+        if args[:2] == ["lfs", "pull"]:
+            pytest.fail("must not pull when origin resolves to an internal host")
+        return subprocess.CompletedProcess(args, 0, stdout="d.bin\n", stderr="")
+
+    monkeypatch.setattr(git_host, "run_git", fake_git)
+    warns: list[str] = []
+    git_host._pull_lfs(tmp_path, warns)
+    assert any("non-public host" in w for w in warns)
 
 
 def test_lfs_pull_refused_when_payload_exceeds_cap(tmp_path, monkeypatch):
     (tmp_path / "big.bin").write_text(_lfs_pointer(999_999_999_999))
 
     def fake_git(args, cwd=None, timeout=600):
+        if args[:3] == ["config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")   # no origin -> skip
         if args[:2] == ["lfs", "ls-files"]:
             return subprocess.CompletedProcess(args, 0, stdout="big.bin\n", stderr="")
         pytest.fail(f"pull must not run once the cap is exceeded (got {args})")
@@ -575,14 +603,8 @@ def test_lfs_pull_refused_when_payload_exceeds_cap(tmp_path, monkeypatch):
 def test_lfs_pull_success_within_cap(tmp_path, monkeypatch):
     (tmp_path / "d.bin").write_text(_lfs_pointer(10))
     calls = []
-
-    def fake_git(args, cwd=None, timeout=600):
-        calls.append(list(args))
-        if args[:2] == ["lfs", "ls-files"]:
-            return subprocess.CompletedProcess(args, 0, stdout="d.bin\n", stderr="")
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(git_host, "run_git", fake_git)
+    fg = _origin("https://93.184.216.34/r.git")
+    monkeypatch.setattr(git_host, "run_git", lambda *a, **k: calls.append(list(a[0])) or fg(*a, **k))
     warns: list[str] = []
     git_host._pull_lfs(tmp_path, warns)
     assert ["lfs", "pull"] in calls

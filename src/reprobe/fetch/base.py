@@ -5,6 +5,7 @@ moving tag)."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import ipaddress
 import os
@@ -155,6 +156,48 @@ def assert_safe_url(url: str) -> str:
     return host
 
 
+def _resolve_public(host: str, port: int):
+    """Resolve ``host`` to its TCP addrinfos and require EVERY result to be a
+    public IP. Returns the addrinfo list (to pin); raises FetchError otherwise.
+    One resolution, so validation and the pinned connect can't disagree."""
+    if not host:
+        raise FetchError("empty host")
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as e:
+        raise FetchError(f"cannot resolve host {host!r}: {e}")
+    if not infos:
+        raise FetchError(f"host {host!r} did not resolve")
+    for ai in infos:
+        ip = ipaddress.ip_address(ai[4][0])
+        mapped = getattr(ip, "ipv4_mapped", None) or getattr(ip, "sixtofour", None)
+        if mapped is not None:
+            ip = mapped
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            raise FetchError(f"refusing URL to a non-public/internal host: {host}")
+    return infos
+
+
+@contextlib.contextmanager
+def _pinned_dns(host: str, infos):
+    """Force ``socket.getaddrinfo(host, ...)`` to return the already-validated
+    ``infos`` for the duration, so the name can't be re-resolved to a different
+    (internal) address between validation and connect — closing DNS-rebinding.
+    Fetch is single-threaded, so a process-global swap for one connect is safe;
+    the hostname stays in the URL, so TLS SNI / cert verification are unaffected."""
+    real = socket.getaddrinfo
+
+    def patched(h, port, family=0, type=0, proto=0, flags=0):
+        return infos if h == host else real(h, port, family, type, proto, flags)
+
+    socket.getaddrinfo = patched
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real
+
+
 def guard_zip(z: "zipfile.ZipFile") -> None:
     """Refuse a zip whose member count or declared uncompressed size is bomb-shaped,
     BEFORE extracting it. Raises FetchError."""
@@ -253,15 +296,21 @@ def maybe_unzip(dest: Path, warnings: list[str]) -> None:
 
 def _open_stream(url: str, params: dict | None, timeout: int, restrict_public: bool):
     """Open a streaming GET. With ``restrict_public`` (untrusted author URL),
-    follow redirects MANUALLY and re-run the SSRF host check on every hop, so a
-    validated public host cannot 302 to an internal/metadata address (TOCTOU).
-    Otherwise use the session's normal redirect handling (trusted platform)."""
+    follow redirects MANUALLY and, on every hop, resolve+validate the host to a
+    public IP and PIN it for the connect — so a validated public host can neither
+    302 to an internal address nor DNS-rebind to one. Otherwise use the session's
+    normal redirect handling (trusted platform)."""
     if not restrict_public:
         return _SESSION.get(url, params=params, stream=True, timeout=timeout)
     cur = url
     for _ in range(6):
-        assert_safe_url(cur)                    # raises FetchError on a non-public hop
-        r = _SESSION.get(cur, params=params, stream=True, timeout=timeout, allow_redirects=False)
+        p = urlparse(cur)
+        if p.scheme not in ("http", "https"):
+            raise FetchError(f"refusing non-http(s) URL: {cur!r}")
+        port = p.port or (443 if p.scheme == "https" else 80)
+        infos = _resolve_public(p.hostname or "", port)   # raises on non-public
+        with _pinned_dns(p.hostname or "", infos):
+            r = _SESSION.get(cur, params=params, stream=True, timeout=timeout, allow_redirects=False)
         params = None                           # query params apply to the first hop only
         if getattr(r, "is_redirect", False) or getattr(r, "is_permanent_redirect", False):
             loc = r.headers.get("Location")
