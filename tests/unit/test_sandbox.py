@@ -45,6 +45,23 @@ def test_network_none_unless_egress_allowed():
     assert "--network none" not in " ".join(_argv(network="egress", allow_egress=True))
 
 
+def test_install_phase_tmpfs_is_executable():
+    # The dependency-install phase relaxes /tmp to EXECUTABLE so source packages
+    # can run ./configure and compile. Docker's --tmpfs is noexec by default, so
+    # `exec` must be explicit — merely dropping noexec is not enough.
+    cfg = load_config()
+    relaxed = {**cfg.limits_for("python"), "tmpfs_noexec": False}
+    argv = build_argv(
+        ContainerSpec(image="img", command=["x"],
+                      mounts=[Mount(source="/h/run", target="/work", read_only=False)]),
+        relaxed, container_name="t", allow_egress=True, work_root="/h/run")
+    joined = " ".join(argv)
+    assert "--tmpfs /tmp:rw,exec,nosuid" in joined
+    assert "noexec" not in joined
+    # the hardened RUN default stays noexec
+    assert "--tmpfs /tmp:rw,noexec,nosuid" in " ".join(_argv())
+
+
 # --------------------------------------------------------------------------- #
 # Hostile specs — every one of these must be rejected, not sandboxed-and-run.
 # --------------------------------------------------------------------------- #

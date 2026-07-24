@@ -65,7 +65,14 @@ def _cran_install_command(packages: list[str], cran_repo: str) -> str:
         "miss <- setdiff(need, avail); "
         'if (length(ok)) install.packages(ok, repos=repo, lib=Sys.getenv("R_LIBS_USER")); '
         'if (length(miss)) message("reprobe: R packages not on CRAN (not installed): ", '
-        'paste(miss, collapse=", ")) '
+        'paste(miss, collapse=", ")); '
+        # A CRAN-available package that is still missing afterwards FAILED to
+        # build — surface it as a non-zero exit so the install phase is reported
+        # failed (never silently "ok") and the run's step failures are read as
+        # environmental.
+        "failed <- setdiff(ok, rownames(installed.packages())); "
+        'if (length(failed)) { message("reprobe: CRAN packages FAILED to install: ", '
+        'paste(failed, collapse=", ")); quit(status=1) } '
         "}"
     )
     return "Rscript -e '" + r_code + "'"

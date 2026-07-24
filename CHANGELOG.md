@@ -18,6 +18,14 @@ keeping the author analysis offline — the network stays in the sanctioned phas
   reproducibility. Discovered names are validated to `[A-Za-z][A-Za-z0-9.]*` and
   the whole `install.packages()` call rides inside one single-quoted `-e`
   argument, so a hostile `library()` name cannot inject shell or R code.
+  Two fixes make this actually build compiled packages: the dependency-install
+  `/tmp` is now mounted **`exec`** (Docker's `--tmpfs` is `noexec` by default, so
+  every source package's `./configure` previously failed with "exists but is not
+  executable"), and the base-r image gains a **compiler toolchain**
+  (`c-/cxx-/fortran-compiler`) so `Rcpp*`/`gmp`/`later`-style packages compile —
+  rebuild it with `bash images/build-images.sh`. The CRAN step now also **exits
+  non-zero when a CRAN-available package fails to build**, so the install phase is
+  reported failed instead of a silent `ok`.
 - **Author-declared datasets downloaded.** The manifest `data[]` array
   (`{path, source, checksum}`) is now consumed: each http(s) `source` is fetched
   into the run tree before the offline analysis, reusing `download()`'s byte cap,

@@ -38,7 +38,7 @@ r:
   # Package Manager snapshot freezes package versions so a run reproduces
   # year-over-year (like the pinned base images). Empty -> live CRAN mirror
   # (cloud.r-project.org), which the report flags as non-reproducible.
-  cran_snapshot: "https://packagemanager.posit.co/cran/2026-07-01"
+  cran_snapshot: "https://packagemanager.posit.co/cran/2026-07-23"
 
 tools:
   repo2docker: "jupyter-repo2docker==2024.07.0"   # opt-in fallback builder only
