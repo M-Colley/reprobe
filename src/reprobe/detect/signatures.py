@@ -64,7 +64,9 @@ def _r_ipynb_source(p: Path) -> str:
     import json
     try:
         data = json.loads(_read_head(p, 5_000_000))
-    except (ValueError, OSError):
+    except (ValueError, OSError, RecursionError):
+        # untrusted deposit: malformed, unreadable, OR deeply-nested JSON (a
+        # RecursionError bomb far under the byte cap) must never crash detection.
         return ""
     if not isinstance(data, dict):
         return ""
