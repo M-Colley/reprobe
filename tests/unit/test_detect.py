@@ -372,6 +372,31 @@ def test_cran_command_unpinned_warns_nonreproducible(tmp_path):
     assert any("not reproducible" in w for w in p.warnings)
 
 
+def test_r_packages_detected_from_setup_install_list(tmp_path):
+    # setup.R-style: the full dep set is declared in install.packages(c(...)),
+    # NOT via library() calls — reprobe must pick these up (they include on-demand
+    # deps like FSA/Hmisc that no library() call reveals).
+    (tmp_path / "setup.R").write_text(
+        'pkgs <- c(\n'
+        '  "colleyRstats",  # checkAssumptionsForAnova(), reportART()\n'
+        '  "FSA",           # dunn test helper\n'
+        '  "Hmisc"\n'
+        ')\n'
+        'missing <- pkgs[!pkgs %in% rownames(installed.packages())]\n'
+        'install.packages(missing, repos = "https://cloud.r-project.org")\n')
+    res = signatures.scan(tmp_path)
+    assert {"colleyRstats", "FSA", "Hmisc"} <= set(res.r_packages)
+    assert not any("http" in p or "cloud" in p for p in res.r_packages)   # URL not a package
+
+
+def test_c_vector_not_harvested_without_install_packages(tmp_path):
+    # a plain c(...) of string literals in code that doesn't install packages
+    # must NOT be mistaken for a package list (no false positives from data).
+    (tmp_path / "analysis.R").write_text('cols <- c("Days", "Time"); print(cols)\n')
+    res = signatures.scan(tmp_path)
+    assert "Days" not in res.r_packages and "Time" not in res.r_packages
+
+
 def test_r_ipynb_recursion_bomb_does_not_crash_scan(tmp_path):
     # A deeply-nested .ipynb JSON (a RecursionError bomb, ~100 KB — far under the
     # read cap) must never crash detection before any container runs.

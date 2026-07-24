@@ -297,7 +297,11 @@ class Orchestrator:
             groups["r" if c.strip().startswith("Rscript") else "python"].append(c)
 
         relaxed = {**self.config.limits_for("python"),
-                   "read_only_rootfs": False, "tmpfs_noexec": False, "tmpfs_size": "2g"}
+                   "read_only_rootfs": False, "tmpfs_noexec": False, "tmpfs_size": "4g",
+                   # compiling a large source dependency tree can exceed the 30-min
+                   # author-code cap; give the harness-controlled install phase (no
+                   # author code runs here) more wall-clock and build space.
+                   "timeout_s": 3600}
         prep = ("set -e; mkdir -p /work/.reprobe_deps /work/.reprobe_Rlib; export HOME=/work; "
                 "export R_LIBS_USER=/work/.reprobe_Rlib; export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; ")
 
