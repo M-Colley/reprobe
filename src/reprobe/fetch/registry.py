@@ -71,7 +71,7 @@ def _resolve_doi(ref: str) -> str | None:
         return None
 
 
-def fetch(ref: str, dest: str | Path) -> FetchResult:
+def fetch(ref: str, dest: str | Path, *, allow_lfs: bool = False) -> FetchResult:
     dest = Path(dest)
     fetcher = select(ref)
     use_ref = ref
@@ -90,4 +90,8 @@ def fetch(ref: str, dest: str | Path) -> FetchResult:
             f"installs can be added in config/pins.yaml (fetch.extra_git_hosts / "
             f"fetch.dataverse_hosts)."
         )
+    # allow_lfs is a git-only, opt-in switch (default off keeps skip-smudge); only
+    # the git fetcher accepts it — other fetchers keep the 2-arg contract.
+    if isinstance(fetcher, GitHostFetcher):
+        return fetcher.fetch(use_ref, dest, allow_lfs=allow_lfs)
     return fetcher.fetch(use_ref, dest)

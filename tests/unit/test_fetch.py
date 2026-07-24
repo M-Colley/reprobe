@@ -424,6 +424,29 @@ def test_download_under_cap_ok(tmp_path, monkeypatch):
     assert ok and (tmp_path / "f.bin").read_bytes() == b"hello"
 
 
+class _Redirect:
+    is_redirect = True
+    is_permanent_redirect = False
+
+    def __init__(self, location):
+        self.headers = {"Location": location}
+
+    def close(self):
+        pass
+
+
+def test_download_restrict_public_refuses_redirect_to_internal(tmp_path, monkeypatch):
+    """A validated public host that 302s to an internal address must be refused
+    (SSRF TOCTOU): restrict_public re-checks every redirect hop."""
+    class S:
+        def get(self, url, **k):
+            return _Redirect("http://169.254.169.254/latest/meta-data/")   # -> internal
+    monkeypatch.setattr(base, "_SESSION", S())
+    ok, note = base.download("https://93.184.216.34/x", tmp_path / "f.bin", restrict_public=True)
+    assert not ok and "internal" in note.lower()
+    assert not (tmp_path / "f.bin").exists()
+
+
 def test_maybe_unzip_rejects_zip_bomb(tmp_path, monkeypatch):
     import zipfile
     monkeypatch.setattr(base, "_MAX_EXTRACT_BYTES", 10)
@@ -463,3 +486,121 @@ def test_dataverse_rejects_ssrf_host():
     assert not f.can_handle("http://169.254.169.254/dataset?persistentId=doi:10.1/x&note=dataverse")
     # a real Dataverse host is still handled
     assert f.can_handle("https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/AB")
+
+
+# --- SSRF guard for author-declared download / LFS URLs (IP literals: no DNS) --
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "10.0.0.5", "192.168.1.1",
+                                  "169.254.169.254", "172.16.0.1", "0.0.0.0", "::1",
+                                  # IPv4-mapped / 6to4 wrappers must not hide an internal v4
+                                  "::ffff:169.254.169.254", "::ffff:10.0.0.1"])
+def test_is_public_host_rejects_internal_ips(host):
+    assert base.is_public_host(host) is False
+
+
+@pytest.mark.parametrize("host", ["93.184.216.34", "8.8.8.8",
+                                  "2606:2800:220:1:248:1893:25c8:1946"])
+def test_is_public_host_allows_public_ips(host):
+    assert base.is_public_host(host) is True
+
+
+def test_is_public_host_empty_is_false():
+    assert base.is_public_host("") is False
+
+
+def test_assert_safe_url_enforces_scheme_and_host():
+    assert base.assert_safe_url("https://93.184.216.34/data.csv") == "93.184.216.34"
+    for bad in ("ftp://example.com/x", "file:///etc/passwd",
+                "http://169.254.169.254/latest/meta-data/", "http://127.0.0.1/x"):
+        with pytest.raises(FetchError):
+            base.assert_safe_url(bad)
+
+
+def test_run_git_ignores_system_config(monkeypatch):
+    """run_git must set GIT_CONFIG_NOSYSTEM so a host /etc/gitconfig can't inject
+    a credential helper or transport, and keep skip-smudge on by default."""
+    captured = {}
+
+    def capture(argv, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(base.subprocess, "run", capture)
+    run_git(["rev-parse", "HEAD"])
+    assert captured["env"].get("GIT_CONFIG_NOSYSTEM") == "1"
+    assert captured["env"].get("GIT_LFS_SKIP_SMUDGE") == "1"
+
+
+# --- opt-in git-lfs smudge hardening (host RCE / SSRF / DoS surface) ----------
+
+def test_lfsconfig_refuses_custom_transfer_agent(tmp_path):
+    (tmp_path / ".lfsconfig").write_text(
+        "[lfs]\n  standalonetransferagent = evil\n"
+        "[lfs \"customtransfer.evil\"]\n  path = /bin/sh\n")
+    reason = git_host._lfs_config_reason(tmp_path)
+    assert reason and "transfer agent" in reason
+
+
+def test_lfsconfig_refuses_internal_lfs_url(tmp_path):
+    (tmp_path / ".lfsconfig").write_text("[lfs]\n  url = http://169.254.169.254/lfs\n")
+    reason = git_host._lfs_config_reason(tmp_path)
+    assert reason and "lfs.url" in reason
+
+
+def test_lfsconfig_public_url_and_absent_are_safe(tmp_path):
+    assert git_host._lfs_config_reason(tmp_path) is None            # no .lfsconfig
+    (tmp_path / ".lfsconfig").write_text("[lfs]\n  url = https://93.184.216.34/lfs\n")
+    assert git_host._lfs_config_reason(tmp_path) is None
+
+
+def _lfs_pointer(size: int) -> str:
+    return f"version https://git-lfs.github.com/spec/v1\noid sha256:{'a' * 64}\nsize {size}\n"
+
+
+def test_lfs_pull_refused_when_payload_exceeds_cap(tmp_path, monkeypatch):
+    (tmp_path / "big.bin").write_text(_lfs_pointer(999_999_999_999))
+
+    def fake_git(args, cwd=None, timeout=600):
+        if args[:2] == ["lfs", "ls-files"]:
+            return subprocess.CompletedProcess(args, 0, stdout="big.bin\n", stderr="")
+        pytest.fail(f"pull must not run once the cap is exceeded (got {args})")
+
+    monkeypatch.setattr(git_host, "run_git", fake_git)
+    monkeypatch.setattr(git_host, "_MAX_LFS_TOTAL_BYTES", 1000)
+    warns: list[str] = []
+    git_host._pull_lfs(tmp_path, warns)
+    assert any("exceeds" in w and "cap" in w for w in warns)
+
+
+def test_lfs_pull_success_within_cap(tmp_path, monkeypatch):
+    (tmp_path / "d.bin").write_text(_lfs_pointer(10))
+    calls = []
+
+    def fake_git(args, cwd=None, timeout=600):
+        calls.append(list(args))
+        if args[:2] == ["lfs", "ls-files"]:
+            return subprocess.CompletedProcess(args, 0, stdout="d.bin\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_host, "run_git", fake_git)
+    warns: list[str] = []
+    git_host._pull_lfs(tmp_path, warns)
+    assert ["lfs", "pull"] in calls
+    assert any("pulled 1 file" in w for w in warns)
+
+
+def test_fetch_default_keeps_skip_smudge(tmp_path, monkeypatch):
+    """Without --allow-lfs, an LFS repo keeps the skip-smudge warning and never
+    pulls (default-safe)."""
+    def fake_git(args, cwd=None, timeout=600):
+        if args[0] == "rev-parse":
+            return subprocess.CompletedProcess(args, 0, stdout="deadbeef\n", stderr="")
+        if args[:2] == ["lfs", "version"]:
+            return subprocess.CompletedProcess(args, 0, stdout="git-lfs/3", stderr="")
+        if args[0] == "lfs":
+            pytest.fail("no LFS pull may run without allow_lfs")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_host, "run_git", fake_git)
+    res = GitHostFetcher().fetch("https://github.com/user/repo", tmp_path / "src")
+    assert any("skip-smudge" in w for w in res.warnings)

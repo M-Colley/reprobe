@@ -34,6 +34,43 @@ _RENV_RESTORE = ("Rscript -e 'if (requireNamespace(\"renv\", quietly=TRUE)) renv
                  "else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'")
 
 
+def _cran_packages(env: dict[str, Any], detected: list[str]) -> list[str]:
+    """Union of author-declared (manifest environment.r_packages) and statically
+    detected R packages, validated to a safe charset and stripped of base/
+    recommended packages that ship with every R."""
+    from ..detect.signatures import _R_BASE_PKGS, _R_PKG_NAME_RE
+    declared = env.get("r_packages") or []
+    names = {str(p).strip() for p in list(declared) + list(detected or [])}
+    return sorted(n for n in names if n and _R_PKG_NAME_RE.match(n) and n not in _R_BASE_PKGS)
+
+
+def _cran_install_command(packages: list[str], cran_repo: str) -> str:
+    """An `Rscript -e '...'` that installs only the packages that are (a) not
+    already present in the image/library AND (b) available on the pinned CRAN
+    snapshot, into R_LIBS_USER; anything not on CRAN is reported, never faked.
+
+    Package names are pre-validated to ``[A-Za-z][A-Za-z0-9.]*`` (no quote/space/
+    shell metacharacter), so embedding them in the double-quoted R vector inside
+    the single-quoted `-e` argument cannot inject shell or R code."""
+    repo = cran_repo or "https://cloud.r-project.org"
+    vec = ", ".join(f'"{p}"' for p in packages)
+    r_code = (
+        "pkgs <- c(" + vec + "); "
+        'repo <- "' + repo + '"; '
+        "have <- rownames(installed.packages()); "
+        "need <- setdiff(pkgs, have); "
+        "if (length(need)) { "
+        "avail <- tryCatch(rownames(available.packages(repos=repo)), error=function(e) character(0)); "
+        "ok <- intersect(need, avail); "
+        "miss <- setdiff(need, avail); "
+        'if (length(ok)) install.packages(ok, repos=repo, lib=Sys.getenv("R_LIBS_USER")); '
+        'if (length(miss)) message("reprobe: R packages not on CRAN (not installed): ", '
+        'paste(miss, collapse=", ")) '
+        "}"
+    )
+    return "Rscript -e '" + r_code + "'"
+
+
 def plan(
     detect_result: DetectResult,
     manifest_meta: dict[str, Any],
@@ -58,7 +95,10 @@ def plan(
     image_key = "python" if py_needed or not r_needed else "r"
     image = config.base_image(image_key) or config.pins.get("fetch", {}).get("fallback_python_image", "")
 
-    install, dep_warnings = _install_commands(env, src, r_needed)
+    install, dep_warnings = _install_commands(
+        env, src, r_needed,
+        detected_r_packages=detect_result.r_packages,
+        cran_repo=config.cran_repo)
 
     flags = detect_result.flags
     if ("needs-repo2docker" in flags or builder == "repo2docker") and allow_repo2docker:
@@ -102,7 +142,9 @@ def plan(
                    install_commands=install, warnings=warnings + dep_warnings)
 
 
-def _install_commands(env: dict[str, Any], src: Path, r_needed: bool) -> tuple[list[str], list[str]]:
+def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
+                      detected_r_packages: list[str] | tuple[str, ...] = (),
+                      cran_repo: str = "") -> tuple[list[str], list[str]]:
     """Returns (commands, warnings). Any declared or detected dependency file
     the pinned-base builder does NOT install must surface as a warning — the
     report says what was not installed (never over-claim)."""
@@ -146,6 +188,22 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool) -> tuple[l
                     warnings.append(f"conda file '{cand}' is not installed by the pinned-base builder; its packages "
                                     "were NOT installed — re-run with --allow-repo2docker for a faithful environment")
                     break
+    # CRAN packages the base image lacks: author-declared (manifest r_packages)
+    # + statically detected library()/require()/pkg:: usages. The install itself
+    # picks only the CRAN-available, not-already-present subset (see
+    # _cran_install_command) and runs in the sanctioned egress phase; the author
+    # analysis still runs offline.
+    cran_pkgs = _cran_packages(env, list(detected_r_packages))
+    if cran_pkgs:
+        if r_needed:
+            cmds.append(_cran_install_command(cran_pkgs, cran_repo))
+            if not cran_repo:
+                warnings.append("no r.cran_snapshot pinned in pins.yaml; detected R packages install "
+                                "from a live CRAN mirror (versions not reproducible across time)")
+        else:
+            warnings.append(f"R packages {cran_pkgs} were declared/detected but no R steps were found; "
+                            "they were NOT installed")
+
     # record resolved versions in the install log so two runs are comparable
     if any(c.startswith("pip install") for c in cmds):
         cmds.append("pip freeze --path=/work/.reprobe_deps")

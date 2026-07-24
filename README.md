@@ -74,7 +74,17 @@ reprobe batch submissions.csv      # add --resume to continue an interrupted sea
 
 # Available badge only, never execute code:
 reprobe run <url> --no-run
+
+# Pull git-lfs data during fetch (opt-in, hardened; default keeps skip-smudge):
+reprobe run <url> --allow-lfs
 ```
+
+Missing R packages are handled automatically: reprobe detects the CRAN packages a
+repo needs (`library()`/`require()`/`pkg::` and `DESCRIPTION`) and installs the
+CRAN-available ones — pinned to a dated snapshot (`r.cran_snapshot` in
+`config/pins.yaml`) — during the sandboxed **install phase**, so the author
+analysis still runs with `--network none`. Packages not on CRAN are reported, not
+faked.
 
 Outputs land in `work/<submission>/out/`: `report.json` (machine-readable),
 `report.md`, and a single-file `report.html`.
@@ -97,7 +107,12 @@ step reports both what it *verified* and what it explicitly did **not**.
 Drop an `autoui-repro.yml` in your repo to remove all guesswork (existing
 CODECHECK `codecheck.yml` is also read). See
 [src/reprobe/schemas/autoui-repro.schema.json](src/reprobe/schemas/autoui-repro.schema.json) and
-[examples/example-python](examples/example-python).
+[examples/example-python](examples/example-python). Two knobs worth knowing:
+
+- `environment.r_packages: [pkg1, pkg2]` — pin exactly the CRAN packages to
+  install (reprobe also auto-detects them, so this is only for overriding).
+- `data: [{path, source, checksum}]` — data files reprobe should download (from
+  an http(s) `source`) into the run tree before your analysis runs.
 
 ## Status
 

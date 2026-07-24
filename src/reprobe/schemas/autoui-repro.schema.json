@@ -16,6 +16,7 @@
         "builder": { "enum": ["pinned-base", "repo2docker", "author-image"] },
         "type": { "enum": ["python", "r", "jupyter", "unity", "custom"] },
         "dependencies": { "type": ["string", "null"], "description": "requirements.txt | environment.yml | renv.lock" },
+        "r_packages": { "type": "array", "items": { "type": "string" }, "description": "CRAN package names to install into the sandbox (the CRAN-available subset is installed in the sanctioned egress phase)" },
         "image": { "type": ["string", "null"], "description": "optional pinned image digest to use as-is" }
       }
     },

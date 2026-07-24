@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased — dependency & data provisioning
+
+Real submissions failed for two mundane reasons: a needed R package wasn't in the
+base image, and LFS-tracked datasets were never pulled. Both are now handled while
+keeping the author analysis offline — the network stays in the sanctioned phases.
+
+- **CRAN R packages installed automatically.** Detection statically discovers the
+  R packages a repo needs (`library()`/`require()`/`requireNamespace()`/`pkg::`
+  in `.R`/`.Rmd`/R-kernel notebooks, plus `DESCRIPTION` Imports/Depends), and
+  authors may also list them under `environment.r_packages` in the manifest. The
+  **CRAN-available, not-already-present** subset is installed into `R_LIBS_USER`
+  during the existing egress **install phase**; the author run still executes with
+  `--network none`. Packages not on CRAN (e.g. a private package) are reported,
+  never faked. Versions are pinned to a dated CRAN snapshot
+  (`r.cran_snapshot` in `pins.yaml`, a Posit P3M date) for year-over-year
+  reproducibility. Discovered names are validated to `[A-Za-z][A-Za-z0-9.]*` and
+  the whole `install.packages()` call rides inside one single-quoted `-e`
+  argument, so a hostile `library()` name cannot inject shell or R code.
+- **Author-declared datasets downloaded.** The manifest `data[]` array
+  (`{path, source, checksum}`) is now consumed: each http(s) `source` is fetched
+  into the run tree before the offline analysis, reusing `download()`'s byte cap,
+  path containment, and checksum honesty, behind a new **SSRF guard** (http(s)
+  only; loopback / link-local / `169.254.169.254` / RFC1918 hosts refused). Author
+  data does not strengthen the Available badge.
+- **Opt-in, hardened git-LFS (`--allow-lfs`).** Off by default (skip-smudge
+  stays). When enabled, LFS data is pulled on the host through `run_git` (so
+  `GIT_ALLOW_PROTOCOL` still fences transports; `GIT_CONFIG_NOSYSTEM=1` now also
+  set), but only after refusing any `.lfsconfig` that declares a custom/standalone
+  transfer agent (host RCE) or points `lfs.url` at a non-public host (SSRF), and
+  only if the aggregate declared LFS payload is within a byte cap (git-lfs
+  bypasses `download()`'s per-file cap). LFS objects are content-addressed, so
+  pulled data is reproducibly pinned by the commit.
+
 ## Unreleased — security & robustness hardening
 
 Findings from a full code review; the trust boundary is the fetch/detect stages

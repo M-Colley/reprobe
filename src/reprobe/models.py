@@ -124,6 +124,10 @@ class DetectResult(BaseModel):
     llm_confidence: Optional[float] = None
     flags: list[str] = Field(default_factory=list)   # e.g. "needs-repo2docker"
     notes: list[str] = Field(default_factory=list)
+    # R package names statically discovered in the source (library()/require()/
+    # pkg::/DESCRIPTION). Advisory input to the env planner, which installs the
+    # CRAN-available subset in the sanctioned egress phase — never authority.
+    r_packages: list[str] = Field(default_factory=list)
 
 
 class EnvPlan(BaseModel):

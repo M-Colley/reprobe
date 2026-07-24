@@ -108,3 +108,50 @@ def test_broken_python_fixture_fails_cleanly(tmp_path, monkeypatch):
     assert statuses and statuses <= {"fail", "partial", "error"}
     assert report.verdict["overall"] in ("runs-with-failures", "infra-error")
     assert report.badges["acm"]["functional"] in ("not-met", "not-evaluated")
+
+
+def test_dataset_phase_downloads_public_and_guards_internal(tmp_path, monkeypatch):
+    """Author-declared data[]: a public http(s) URL is downloaded into the run
+    tree; an internal/SSRF host is refused; a non-http(s) source is skipped —
+    all without ever downloading author-controlled bytes to an internal host."""
+    import reprobe.fetch.base as fbase
+    from reprobe.models import Report
+
+    calls = []
+
+    def fake_download(url, dest, *, expected_md5=None, **kw):
+        calls.append(url)
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_text("data")
+        return True, "downloaded (no checksum provided)"
+
+    monkeypatch.setattr(fbase, "download", fake_download)
+
+    o = Orchestrator(workroot=tmp_path)
+    rundir = tmp_path / "run"
+    rundir.mkdir()
+    report = Report(submission_id="x", harness_version="t", timestamp="")
+    report.environment = {}
+    meta = {"data": [
+        {"path": "data/x.csv", "source": "https://93.184.216.34/x.csv"},   # public IP -> ok
+        {"path": "y.csv", "source": "http://169.254.169.254/y"},           # metadata IP -> refused
+        {"path": "z.csv", "source": "doi:10.5281/zenodo.1"},               # non-http(s) -> skipped
+    ]}
+    o._dataset_phase(meta, rundir, report, dry_run=False)
+
+    status = {d["path"]: d["status"] for d in report.environment["datasets"]}
+    assert status["data/x.csv"] == "ok"
+    assert status["y.csv"] == "refused"
+    assert status["z.csv"] == "skipped-unsupported-source"
+    assert (rundir / "data" / "x.csv").read_text() == "data"
+    assert calls == ["https://93.184.216.34/x.csv"]        # only the public URL was fetched
+
+
+def test_dataset_phase_noop_in_dry_run(tmp_path):
+    from reprobe.models import Report
+    o = Orchestrator(workroot=tmp_path)
+    report = Report(submission_id="x", harness_version="t", timestamp="")
+    report.environment = {}
+    meta = {"data": [{"path": "x.csv", "source": "https://93.184.216.34/x.csv"}]}
+    o._dataset_phase(meta, tmp_path, report, dry_run=True)
+    assert "datasets" not in report.environment      # dry-run downloads nothing
