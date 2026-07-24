@@ -24,10 +24,15 @@ anything. `reprobe --no-llm` is fully functional and deterministic.
 ## Install
 
 > [!IMPORTANT]
-> **Docker must be able to run — this is a hard prerequisite.** `reprobe`
-> executes every analysis inside Docker, so a working Docker Engine is
-> mandatory (`reprobe doctor` verifies it; only the code-free commands
+> **Docker must be running — this is a hard prerequisite.** `reprobe`
+> executes every analysis inside Docker, so a working, *running* Docker Engine
+> is mandatory (`reprobe doctor` verifies it; only the code-free commands
 > `reprobe detect` and `reprobe run --no-run` work without it).
+>
+> **Start Docker yourself first.** Docker Desktop does not always launch
+> automatically after login or a reboot — start it manually (open Docker
+> Desktop) and wait for the daemon to be ready (`docker info` succeeds, or
+> `reprobe doctor` shows `docker … ok`) before any `reprobe pull`/`run`/`batch`.
 >
 > - **Windows** — install Docker Desktop, which needs **either** the **WSL 2
 >   backend** (recommended: enable *"Use the WSL 2 based engine"* in Docker
@@ -69,7 +74,17 @@ reprobe batch submissions.csv      # add --resume to continue an interrupted sea
 
 # Available badge only, never execute code:
 reprobe run <url> --no-run
+
+# Pull git-lfs data during fetch (opt-in, hardened; default keeps skip-smudge):
+reprobe run <url> --allow-lfs
 ```
+
+Missing R packages are handled automatically: reprobe detects the CRAN packages a
+repo needs (`library()`/`require()`/`pkg::` and `DESCRIPTION`) and installs the
+CRAN-available ones — pinned to a dated snapshot (`r.cran_snapshot` in
+`config/pins.yaml`) — during the sandboxed **install phase**, so the author
+analysis still runs with `--network none`. Packages not on CRAN are reported, not
+faked.
 
 Outputs land in `work/<submission>/out/`: `report.json` (machine-readable),
 `report.md`, and a single-file `report.html`.
@@ -92,7 +107,12 @@ step reports both what it *verified* and what it explicitly did **not**.
 Drop an `autoui-repro.yml` in your repo to remove all guesswork (existing
 CODECHECK `codecheck.yml` is also read). See
 [src/reprobe/schemas/autoui-repro.schema.json](src/reprobe/schemas/autoui-repro.schema.json) and
-[examples/example-python](examples/example-python).
+[examples/example-python](examples/example-python). Two knobs worth knowing:
+
+- `environment.r_packages: [pkg1, pkg2]` — pin exactly the CRAN packages to
+  install (reprobe also auto-detects them, so this is only for overriding).
+- `data: [{path, source, checksum}]` — data files reprobe should download (from
+  an http(s) `source`) into the run tree before your analysis runs.
 
 ## Status
 

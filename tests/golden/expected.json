@@ -57,6 +57,7 @@
     "strategy": "pinned-base",
     "install_commands": [
       "Rscript -e 'if (requireNamespace(\"renv\", quietly=TRUE)) renv::restore(prompt=FALSE) else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'",
+      "Rscript -e 'pkgs <- c(\"lme4\"); repo <- \"https://packagemanager.posit.co/cran/2026-07-01\"; have <- rownames(installed.packages()); need <- setdiff(pkgs, have); if (length(need)) { avail <- tryCatch(rownames(available.packages(repos=repo)), error=function(e) character(0)); ok <- intersect(need, avail); miss <- setdiff(need, avail); if (length(ok)) install.packages(ok, repos=repo, lib=Sys.getenv(\"R_LIBS_USER\")); if (length(miss)) message(\"reprobe: R packages not on CRAN (not installed): \", paste(miss, collapse=\", \")) }'",
       "Rscript -e 'print(installed.packages()[, c(\"Package\", \"Version\")])'"
     ],
     "step_statuses": [

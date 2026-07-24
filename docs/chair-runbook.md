@@ -47,6 +47,17 @@ check**. Everything else is fixed.
 ## During the review window
 
 - **One submission:** `reprobe run <url>` → read `work/<id>/out/report.html`.
+- **Missing R packages** are installed automatically: reprobe detects the CRAN
+  packages a repo needs and installs the CRAN-available ones (pinned to
+  `r.cran_snapshot` in `pins.yaml`) in the sandboxed install phase. A package
+  that isn't on CRAN (e.g. an author's private package) is reported, not faked —
+  the author must vendor it or deposit it.
+- **Datasets in git-LFS** are not pulled by default. If the report warns
+  `git-lfs present; … skip-smudge`, re-run that submission with `--allow-lfs`
+  (hardened: the repo's committed `.lfsconfig` is neutralized, the origin host is
+  re-checked public, and the total payload is capped). Only pass `--allow-lfs` for
+  a repo whose git host you trust — git-lfs still fetches from that host's LFS
+  endpoint.
 - **A batch:** put one URL per line (or a `url` column) in `submissions.csv`:
   ```bash
   reprobe batch submissions.csv      # -> out/dashboard.html + out/badges.json + out/badges.csv

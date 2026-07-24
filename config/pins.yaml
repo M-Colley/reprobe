@@ -32,6 +32,14 @@ llm:
   # transparency only, never applied"). Advice is never auto-applied either way.
   confidence_threshold: 0.6
 
+r:
+  # Pinned CRAN snapshot for reproducible install.packages() of packages that
+  # authors' R code needs but the base-r image doesn't ship. A dated Posit Public
+  # Package Manager snapshot freezes package versions so a run reproduces
+  # year-over-year (like the pinned base images). Empty -> live CRAN mirror
+  # (cloud.r-project.org), which the report flags as non-reproducible.
+  cran_snapshot: "https://packagemanager.posit.co/cran/2026-07-01"
+
 tools:
   repo2docker: "jupyter-repo2docker==2024.07.0"   # opt-in fallback builder only
 

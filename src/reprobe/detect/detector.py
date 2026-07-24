@@ -37,6 +37,9 @@ def detect(
             m_result.flags = sorted(set(m_result.flags) | set(heuristic.flags))
             m_result.inventory = heuristic.inventory
             m_result.artifact_types = sorted(set(m_result.artifact_types) | set(heuristic.inventory))
+            # the deterministic scan also discovers required R packages, which a
+            # manifest doesn't enumerate — carry them for the env planner
+            m_result.r_packages = heuristic.r_packages
             return m_result, meta
         # codecheck or partial manifest: use heuristic steps + lifted expected outputs
         exp = meta.get("expected_outputs", [])

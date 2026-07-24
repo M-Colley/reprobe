@@ -71,6 +71,7 @@ class Orchestrator:
         use_llm: bool = True,
         allow_repo2docker: bool = False,
         allow_net: Optional[list[str]] = None,
+        allow_lfs: bool = False,
         install: bool = True,
         dry_run: bool = False,
         sid: Optional[str] = None,
@@ -103,7 +104,7 @@ class Orchestrator:
 
         # -- (1) FETCH (network on; code NOT run) ----------------------- #
         try:
-            fetch_res = fetch_ref(ref, srcdir)
+            fetch_res = fetch_ref(ref, srcdir, allow_lfs=allow_lfs)
         except FetchError as e:
             report.source = _failed_source_section(ref, str(e))
             report.not_verified.append(f"fetch failed ({e}); nothing about the artifact was checked")
@@ -141,6 +142,7 @@ class Orchestrator:
             ran = True
             rundir = self._fresh_rundir(work, rundir)
             shutil.copytree(srcdir, rundir)
+            self._dataset_phase(manifest_meta, rundir, report, dry_run=dry_run)
             self._install_phase(env_plan, rundir, logdir, install=install, dry_run=dry_run, report=report)
 
             allow_egress_runtime = bool(allow_net)
@@ -219,6 +221,66 @@ class Orchestrator:
 
         self._write(outdir, report)
         return report
+
+    # ------------------------------------------------------------------ #
+    def _dataset_phase(self, manifest_meta: dict[str, Any], rundir: Path, report: Report, *,
+                       dry_run: bool) -> None:
+        """Download author-declared datasets (manifest ``data[]``) into the run
+        tree before the offline analysis runs. Host-side, but hardened: http(s)
+        only, SSRF-guarded host, byte-capped stream, path-contained, and checksum
+        honesty. Off unless the manifest declares data; skipped in dry-run."""
+        data = (manifest_meta or {}).get("data") or []
+        if not data or dry_run:
+            return
+        import re as _re
+
+        from .fetch.base import (assert_safe_url, checksum_verdict, download,
+                                 new_checksum_stats, record_download, safe_join)
+
+        results: list[dict[str, Any]] = []
+        stats = new_checksum_stats()
+        notes: list[str] = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "").strip()
+            source = str(entry.get("source") or "").strip()
+            checksum = str(entry.get("checksum") or "").strip()
+            if not path or not source:
+                notes.append(f"entry missing path/source: {entry!r}")
+                continue
+            if not source.lower().startswith(("http://", "https://")):
+                # DOI/platform sources are not wired here yet — declare, don't fake.
+                results.append({"path": path, "source": source, "status": "skipped-unsupported-source"})
+                notes.append(f"'{path}': source '{source}' is not an http(s) URL "
+                             "(DOI/platform dataset fetching not yet wired); NOT downloaded")
+                continue
+            try:
+                assert_safe_url(source)
+                target = safe_join(rundir, path)
+            except FetchError as e:
+                results.append({"path": path, "source": source, "status": "refused"})
+                notes.append(f"'{path}': {e}")
+                continue
+            md5 = checksum if (checksum.lower().startswith("md5")
+                               or _re.fullmatch(r"[0-9a-fA-F]{32}", checksum)) else None
+            ok, note = download(source, target, expected_md5=md5, restrict_public=True)
+            record_download(stats, ok, note, had_checksum=bool(md5))
+            results.append({"path": path, "source": source,
+                            "status": "ok" if ok else "failed", "note": note})
+            if not ok:
+                notes.append(f"'{path}' download failed: {note}")
+            elif checksum and md5 is None:
+                notes.append(f"'{path}': checksum '{checksum}' is not md5 and was not verified")
+        checksum_verdict(stats, notes)
+        if results:
+            report.environment["datasets"] = results
+        for n in notes:
+            report.environment.setdefault("notes", []).append(f"dataset: {n}")
+        if any(r["status"] == "ok" for r in results):
+            report.environment.setdefault("notes", []).append(
+                "author-declared datasets were downloaded into the run tree (host-side, byte-capped + "
+                "SSRF-guarded); this data is author-controlled and does NOT strengthen the Available badge")
 
     # ------------------------------------------------------------------ #
     def _install_phase(self, env_plan: EnvPlan, rundir: Path, logdir: Path, *,

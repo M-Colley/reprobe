@@ -5,12 +5,16 @@ moving tag)."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import ipaddress
 import os
+import socket
 import subprocess
 import tarfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional, Protocol, runtime_checkable
+from urllib.parse import urljoin, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -64,8 +68,9 @@ def post(url: str, **kwargs) -> requests.Response:
 
 def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600) -> subprocess.CompletedProcess:
     env = dict(os.environ)
-    env["GIT_LFS_SKIP_SMUDGE"] = "1"        # don't pull large LFS blobs during fetch
+    env["GIT_LFS_SKIP_SMUDGE"] = "1"        # don't pull large LFS blobs during clone/checkout
     env["GIT_TERMINAL_PROMPT"] = "0"        # never hang on a credential prompt
+    env["GIT_CONFIG_NOSYSTEM"] = "1"        # ignore host /etc/gitconfig (no injected helpers/transports)
     # Restrict git to network transports we actually fetch over. This blocks the
     # `ext::`/`fd::` remote-helper transports (arbitrary host command execution)
     # and `file::` (local exfiltration) even if a crafted ref reaches `git clone`
@@ -92,6 +97,105 @@ def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600) -> 
 _MAX_DOWNLOAD_BYTES = 20 * 1024**3       # per streamed file
 _MAX_EXTRACT_BYTES = 50 * 1024**3        # total declared-uncompressed per archive
 _MAX_ARCHIVE_MEMBERS = 500_000
+_MAX_LFS_TOTAL_BYTES = 20 * 1024**3      # aggregate declared LFS payload per repo (git-lfs
+                                         # bypasses download()'s per-file cap; bound it here)
+
+
+# ---------------------------------------------------------------------------
+# SSRF defense for author-influenced download/LFS endpoints. Fetch runs on the
+# TRUSTED host with no container isolation, so an author-declared URL (or an LFS
+# endpoint from a committed .lfsconfig) must never be allowed to reach an
+# internal/link-local/metadata address (169.254.169.254, RFC1918, loopback).
+# Match on the resolved IP(s), not a substring — see dataverse.py for the same
+# host-based (not substring) discipline.
+# ---------------------------------------------------------------------------
+
+def is_public_host(host: str) -> bool:
+    """True only if ``host`` (a hostname or IP literal) resolves entirely to
+    public, routable addresses. Any private/loopback/link-local/reserved/
+    multicast/unspecified address — or a resolution failure — returns False."""
+    if not host:
+        return False
+    host = host.strip("[]")                     # unwrap an IPv6 literal
+    try:
+        candidates = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except (OSError, UnicodeError):
+            return False
+        candidates = []
+        for info in infos:
+            try:
+                candidates.append(ipaddress.ip_address(info[4][0]))
+            except (ValueError, IndexError):
+                continue
+        if not candidates:
+            return False
+    for ip in candidates:
+        # Normalize embedded IPv4 (::ffff:169.254.169.254, 6to4) to its v4 form
+        # so an internal address can't hide behind an IPv6 wrapper.
+        mapped = getattr(ip, "ipv4_mapped", None) or getattr(ip, "sixtofour", None)
+        if mapped is not None:
+            ip = mapped
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
+
+
+def assert_safe_url(url: str) -> str:
+    """Validate an untrusted (author-declared) download URL: http(s) only, host
+    must be public (SSRF guard). Returns the hostname. Raises FetchError."""
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        raise FetchError(f"refusing non-http(s) URL: {url!r}")
+    host = p.hostname or ""
+    if not is_public_host(host):
+        raise FetchError(f"refusing URL to a non-public/internal host: {host or url!r}")
+    return host
+
+
+def _resolve_public(host: str, port: int):
+    """Resolve ``host`` to its TCP addrinfos and require EVERY result to be a
+    public IP. Returns the addrinfo list (to pin); raises FetchError otherwise.
+    One resolution, so validation and the pinned connect can't disagree."""
+    if not host:
+        raise FetchError("empty host")
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as e:
+        raise FetchError(f"cannot resolve host {host!r}: {e}")
+    if not infos:
+        raise FetchError(f"host {host!r} did not resolve")
+    for ai in infos:
+        ip = ipaddress.ip_address(ai[4][0])
+        mapped = getattr(ip, "ipv4_mapped", None) or getattr(ip, "sixtofour", None)
+        if mapped is not None:
+            ip = mapped
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            raise FetchError(f"refusing URL to a non-public/internal host: {host}")
+    return infos
+
+
+@contextlib.contextmanager
+def _pinned_dns(host: str, infos):
+    """Force ``socket.getaddrinfo(host, ...)`` to return the already-validated
+    ``infos`` for the duration, so the name can't be re-resolved to a different
+    (internal) address between validation and connect — closing DNS-rebinding.
+    Fetch is single-threaded, so a process-global swap for one connect is safe;
+    the hostname stays in the URL, so TLS SNI / cert verification are unaffected."""
+    real = socket.getaddrinfo
+
+    def patched(h, port, family=0, type=0, proto=0, flags=0):
+        return infos if h == host else real(h, port, family, type, proto, flags)
+
+    socket.getaddrinfo = patched
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real
 
 
 def guard_zip(z: "zipfile.ZipFile") -> None:
@@ -190,19 +294,51 @@ def maybe_unzip(dest: Path, warnings: list[str]) -> None:
 # never "nothing failed because nothing was checked".
 # ---------------------------------------------------------------------------
 
+def _open_stream(url: str, params: dict | None, timeout: int, restrict_public: bool):
+    """Open a streaming GET. With ``restrict_public`` (untrusted author URL),
+    follow redirects MANUALLY and, on every hop, resolve+validate the host to a
+    public IP and PIN it for the connect — so a validated public host can neither
+    302 to an internal address nor DNS-rebind to one. Otherwise use the session's
+    normal redirect handling (trusted platform)."""
+    if not restrict_public:
+        return _SESSION.get(url, params=params, stream=True, timeout=timeout)
+    cur = url
+    for _ in range(6):
+        p = urlparse(cur)
+        if p.scheme not in ("http", "https"):
+            raise FetchError(f"refusing non-http(s) URL: {cur!r}")
+        port = p.port or (443 if p.scheme == "https" else 80)
+        infos = _resolve_public(p.hostname or "", port)   # raises on non-public
+        with _pinned_dns(p.hostname or "", infos):
+            r = _SESSION.get(cur, params=params, stream=True, timeout=timeout, allow_redirects=False)
+        params = None                           # query params apply to the first hop only
+        if getattr(r, "is_redirect", False) or getattr(r, "is_permanent_redirect", False):
+            loc = r.headers.get("Location")
+            r.close()
+            if not loc:
+                raise FetchError("redirect without a Location header")
+            cur = urljoin(cur, loc)
+            continue
+        return r
+    raise FetchError("too many redirects")
+
+
 def download(url: str, dest: Path, *, expected_md5: str | None = None,
              params: dict | None = None, timeout: int = 300,
-             max_bytes: int = _MAX_DOWNLOAD_BYTES) -> tuple[bool, str]:
+             max_bytes: int = _MAX_DOWNLOAD_BYTES,
+             restrict_public: bool = False) -> tuple[bool, str]:
     """Stream a file to dest; verify md5 if provided. Returns (ok, note).
 
     Aborts (and removes the partial file) if the response exceeds ``max_bytes`` —
-    an untrusted platform could otherwise stream unbounded bytes onto the host."""
+    an untrusted platform could otherwise stream unbounded bytes onto the host.
+    Pass ``restrict_public=True`` for an author-declared URL to SSRF-guard every
+    redirect hop."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     h = hashlib.md5()
     total = 0
     over = False
     try:
-        with _SESSION.get(url, params=params, stream=True, timeout=timeout) as r:
+        with _open_stream(url, params, timeout, restrict_public) as r:
             r.raise_for_status()
             clen = r.headers.get("Content-Length")
             if clen and clen.isdigit() and int(clen) > max_bytes:

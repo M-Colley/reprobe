@@ -295,3 +295,96 @@ def test_install_command_quotes_untrusted_dep_filename(tmp_path):
     pip = next(c for c in cmds if c.startswith("pip install"))
     assert "'a b;c.txt'" in pip                # shlex-quoted
     assert "-r a b;c.txt" not in pip           # never the raw injectable form
+
+
+# --------------------------------------------------------------------------- #
+# R package discovery (static) + CRAN install-command generation
+# --------------------------------------------------------------------------- #
+def test_r_packages_detected_from_calls(tmp_path):
+    (tmp_path / "analysis.R").write_text(
+        "library(dplyr)\nrequire(ggplot2)\nrequireNamespace('data.table')\n"
+        "y <- tidyr::pivot_longer(x)\n")
+    res = signatures.scan(tmp_path)
+    assert set(res.r_packages) >= {"dplyr", "ggplot2", "data.table", "tidyr"}
+
+
+def test_r_packages_exclude_base_and_python(tmp_path):
+    (tmp_path / "s.R").write_text("library(stats)\nlibrary(MASS)\nlibrary(lme4)\n")
+    (tmp_path / "app.py").write_text("import antigravity\n")   # python import must not leak in
+    res = signatures.scan(tmp_path)
+    assert res.r_packages == ["lme4"]         # stats (base) + MASS (recommended) dropped
+
+
+def test_r_packages_from_description(tmp_path):
+    (tmp_path / "DESCRIPTION").write_text(
+        "Package: foo\nImports:\n    dplyr,\n    lme4 (>= 1.1)\nDepends: R (>= 4.0), Matrix\n")
+    res = signatures.scan(tmp_path)
+    assert "dplyr" in res.r_packages and "lme4" in res.r_packages
+    assert "R" not in res.r_packages and "Matrix" not in res.r_packages   # R + recommended dropped
+
+
+def test_r_packages_r_kernel_notebook_only(tmp_path):
+    import json
+    r_nb = {"metadata": {"kernelspec": {"language": "R", "name": "ir"}},
+            "cells": [{"cell_type": "code", "source": ["library(brms)\n"]}]}
+    py_nb = {"metadata": {"kernelspec": {"language": "python", "name": "python3"}},
+             "cells": [{"cell_type": "code", "source": ["library(evil)\n"]}]}
+    (tmp_path / "r.ipynb").write_text(json.dumps(r_nb))
+    (tmp_path / "py.ipynb").write_text(json.dumps(py_nb))
+    res = signatures.scan(tmp_path)
+    assert "brms" in res.r_packages
+    assert "evil" not in res.r_packages       # a python-kernel notebook is never R-scanned
+
+
+def test_cran_command_generated_for_detected_packages(tmp_path):
+    (tmp_path / "analysis.R").write_text("library(brms)\n")
+    det = signatures.scan(tmp_path)
+    p = plan_env(det, {}, _cfg(), tmp_path)
+    cran = next(c for c in p.install_commands if "install.packages" in c)
+    assert cran.startswith("Rscript -e '") and 'c("brms")' in cran
+
+
+def test_cran_command_honors_declared_packages(tmp_path):
+    det = DetectResult(artifact_types=["r"])                     # r step present, none detected
+    p = plan_env(det, {"environment": {"r_packages": ["lme4", "brms"]}}, _cfg(), tmp_path)
+    cran = next(c for c in p.install_commands if "install.packages" in c)
+    assert 'c("brms", "lme4")' in cran                          # sorted + deduped
+
+
+def test_cran_command_gated_on_r_steps(tmp_path):
+    det = DetectResult(artifact_types=["python"], r_packages=["brms"])
+    p = plan_env(det, {}, _cfg(), tmp_path)
+    assert not any("install.packages" in c for c in p.install_commands)
+    assert any("no R steps" in w for w in p.warnings)
+
+
+def test_cran_command_uses_pinned_snapshot(tmp_path):
+    det = DetectResult(artifact_types=["r"], r_packages=["brms"])
+    cfg = Config(config_dir=Path("."),
+                 pins={"base_images": {"r": "r-img"}, "r": {"cran_snapshot": "https://snap/2026"}})
+    p = plan_env(det, {}, cfg, tmp_path)
+    assert any('repo <- "https://snap/2026"' in c for c in p.install_commands)
+
+
+def test_cran_command_unpinned_warns_nonreproducible(tmp_path):
+    det = DetectResult(artifact_types=["r"], r_packages=["brms"])
+    p = plan_env(det, {}, _cfg(), tmp_path)                     # _cfg has no r.cran_snapshot
+    assert any("not reproducible" in w for w in p.warnings)
+
+
+def test_r_ipynb_recursion_bomb_does_not_crash_scan(tmp_path):
+    # A deeply-nested .ipynb JSON (a RecursionError bomb, ~100 KB — far under the
+    # read cap) must never crash detection before any container runs.
+    depth = 60000
+    (tmp_path / "bomb.ipynb").write_text("[" * depth + "]" * depth)
+    res = signatures.scan(tmp_path)                # must not raise
+    assert res.r_packages == []
+
+
+def test_cran_command_is_single_quote_injection_safe():
+    from reprobe.envbuild.base import _cran_install_command
+    cmd = _cran_install_command(["dplyr"], "https://packagemanager.posit.co/cran/2026-07-01")
+    # the whole R program rides inside ONE '...' -e argument; exactly two quotes,
+    # so no discovered name/URL can break out of it into the shell.
+    assert cmd.startswith("Rscript -e '") and cmd.endswith("'")
+    assert cmd.count("'") == 2

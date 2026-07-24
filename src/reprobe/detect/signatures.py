@@ -27,6 +27,100 @@ _ENTRY_PY_RE = re.compile(r"^(main|run|analysis|analyze|pipeline|reproduce|train
 _ENTRY_R_RE = re.compile(r"^(main|run|analy|reproduce)", re.I)
 _SCRIPT_DIRS = {"scripts", "script", "code", "src", "analysis", "analyses", "bin", "r"}
 
+# --------------------------------------------------------------------------- #
+# R dependency discovery (static, no execution). We parse library()/require()/
+# requireNamespace()/pkg:: usages out of R sources + DESCRIPTION Imports/Depends
+# so the env planner can install the CRAN-available subset in the sanctioned
+# egress phase. Names are validated to a strict charset so a discovered token
+# can never carry a shell/R metacharacter into the later `bash -c` install.
+# --------------------------------------------------------------------------- #
+_R_PKG = r"[A-Za-z][A-Za-z0-9.]*[A-Za-z0-9]"          # >=2 chars, no trailing dot
+_R_PKG_NAME_RE = re.compile(rf"^{_R_PKG}$")
+_R_LIB_RE = re.compile(rf"""(?:library|require)\s*\(\s*['"]?({_R_PKG})['"]?""")
+_R_REQNS_RE = re.compile(rf"""requireNamespace\s*\(\s*['"]({_R_PKG})['"]""")
+_R_NS_RE = re.compile(rf"""(?<![\w.])({_R_PKG}):::?""")   # pkg::fn / pkg:::fn
+_R_SCAN_READ_CAP = 1_000_000                          # bytes read per file for scanning
+# base + recommended packages ship with every R; never install from CRAN.
+_R_BASE_PKGS = frozenset({
+    "base", "compiler", "datasets", "grDevices", "graphics", "grid", "methods",
+    "parallel", "splines", "stats", "stats4", "tcltk", "tools", "translations",
+    "utils",
+    "boot", "class", "cluster", "codetools", "foreign", "KernSmooth", "lattice",
+    "MASS", "Matrix", "mgcv", "nlme", "nnet", "rpart", "spatial", "survival",
+})
+
+
+def _read_head(p: Path, cap: int = _R_SCAN_READ_CAP) -> str:
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as fh:
+            return fh.read(cap)
+    except OSError:
+        return ""
+
+
+def _r_ipynb_source(p: Path) -> str:
+    """Concatenated code cells of an R-kernel notebook, else "" (never scan a
+    Python notebook for R packages)."""
+    import json
+    try:
+        data = json.loads(_read_head(p, 5_000_000))
+    except (ValueError, OSError, RecursionError):
+        # untrusted deposit: malformed, unreadable, OR deeply-nested JSON (a
+        # RecursionError bomb far under the byte cap) must never crash detection.
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    meta = data.get("metadata") or {}
+    ks = meta.get("kernelspec") or {}
+    lang = str(ks.get("language", "")).lower()
+    name = str(ks.get("name", "")).lower()
+    li = str((meta.get("language_info") or {}).get("name", "")).lower()
+    if not (lang == "r" or li == "r" or name.startswith("ir")):
+        return ""
+    out: list[str] = []
+    for cell in data.get("cells", []) or []:
+        if isinstance(cell, dict) and cell.get("cell_type") == "code":
+            src = cell.get("source")
+            out.append("".join(src) if isinstance(src, list) else str(src or ""))
+    return "\n".join(out)
+
+
+def _description_packages(text: str) -> set[str]:
+    pkgs: set[str] = set()
+    for field in ("Imports", "Depends"):
+        m = re.search(rf"(?im)^{field}\s*:(.*?)(?=^\S|\Z)", text, re.S)
+        if not m:
+            continue
+        for tok in m.group(1).split(","):
+            name = tok.strip().split("(")[0].strip()
+            name = name.split()[0] if name else ""
+            if name and name != "R":
+                pkgs.add(name)
+    return pkgs
+
+
+def scan_r_packages(files) -> list[str]:
+    """Statically discover required R package names across the deposit's R
+    sources (.R/.Rmd), R-kernel notebooks, and DESCRIPTION. Returns a sorted list
+    with base/recommended packages removed; each name matches _R_PKG_NAME_RE."""
+    found: set[str] = set()
+    for p in files:
+        suf = p.suffix.lower()
+        if p.name == "DESCRIPTION":
+            found |= _description_packages(_read_head(p))
+            continue
+        if suf in (".r", ".rmd"):
+            text = _read_head(p)
+        elif suf == ".ipynb":
+            text = _r_ipynb_source(p)
+        else:
+            continue
+        if not text:
+            continue
+        for rx in (_R_LIB_RE, _R_REQNS_RE, _R_NS_RE):
+            found.update(rx.findall(text))
+    return sorted(n for n in found if _R_PKG_NAME_RE.match(n) and n not in _R_BASE_PKGS)
+
 # Non-code artifact categories (the AutoUI/CHI submission form's Video, Audio,
 # Datasets, Other). Classification is advisory: it feeds artifact_types and the
 # report inventory so a media/data-only deposit reads as what it is rather than
@@ -200,6 +294,10 @@ def scan(src_dir: str | Path) -> DetectResult:
         else:
             notes.append("no runnable analyses detected by heuristic")
 
+    r_pkg_files = [p for p in files
+                   if p.suffix.lower() in (".r", ".rmd", ".ipynb") or p.name == "DESCRIPTION"]
+    r_packages = scan_r_packages(r_pkg_files)
+
     return DetectResult(
         artifact_types=sorted(set(types) | set(inventory)),
         inventory=inventory,
@@ -207,6 +305,7 @@ def scan(src_dir: str | Path) -> DetectResult:
         run_plan_source="heuristic",
         flags=sorted(set(flags)),
         notes=notes,
+        r_packages=r_packages,
     )
 
 

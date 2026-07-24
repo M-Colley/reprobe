@@ -64,6 +64,12 @@ class Config:
         return self.pins.get("fetch", {}) or {}
 
     @property
+    def cran_repo(self) -> str:
+        """Pinned CRAN snapshot for reproducible install.packages(); "" -> code
+        falls back to a live CRAN mirror (flagged non-reproducible)."""
+        return str((self.pins.get("r") or {}).get("cran_snapshot") or "")
+
+    @property
     def llm(self) -> dict[str, Any]:
         return self.pins.get("llm", {}) or {}
 
