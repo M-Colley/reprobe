@@ -24,10 +24,15 @@ anything. `reprobe --no-llm` is fully functional and deterministic.
 ## Install
 
 > [!IMPORTANT]
-> **Docker must be able to run — this is a hard prerequisite.** `reprobe`
-> executes every analysis inside Docker, so a working Docker Engine is
-> mandatory (`reprobe doctor` verifies it; only the code-free commands
+> **Docker must be running — this is a hard prerequisite.** `reprobe`
+> executes every analysis inside Docker, so a working, *running* Docker Engine
+> is mandatory (`reprobe doctor` verifies it; only the code-free commands
 > `reprobe detect` and `reprobe run --no-run` work without it).
+>
+> **Start Docker yourself first.** Docker Desktop does not always launch
+> automatically after login or a reboot — start it manually (open Docker
+> Desktop) and wait for the daemon to be ready (`docker info` succeeds, or
+> `reprobe doctor` shows `docker … ok`) before any `reprobe pull`/`run`/`batch`.
 >
 > - **Windows** — install Docker Desktop, which needs **either** the **WSL 2
 >   backend** (recommended: enable *"Use the WSL 2 based engine"* in Docker
