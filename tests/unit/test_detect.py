@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from reprobe.config import Config
 from reprobe.detect import detect, signatures
 from reprobe.envbuild import plan as plan_env
@@ -406,10 +408,42 @@ def test_r_ipynb_recursion_bomb_does_not_crash_scan(tmp_path):
     assert res.r_packages == []
 
 
-def test_cran_command_is_single_quote_injection_safe():
-    from reprobe.envbuild.base import _cran_install_command
-    cmd = _cran_install_command(["dplyr"], "https://packagemanager.posit.co/cran/2026-07-01")
-    # the whole R program rides inside ONE '...' -e argument; exactly two quotes,
-    # so no discovered name/URL can break out of it into the shell.
-    assert cmd.startswith("Rscript -e '") and cmd.endswith("'")
-    assert cmd.count("'") == 2
+def test_cran_command_is_single_quote_injection_safe(tmp_path):
+    # Drive HOSTILE names through the real path (plan_env -> _cran_packages ->
+    # _cran_install_command): the name validation must drop anything that could
+    # break out of the single-quoted `-e` argument, leaving exactly two quotes.
+    hostile = ["a'; touch /pwned; #", "foo bar", "back`tick`", "semi;colon",
+               "dollar$(id)", "new\nline", "dplyr"]
+    det = DetectResult(artifact_types=["r"])
+    p = plan_env(det, {"environment": {"r_packages": hostile}}, _cfg(), tmp_path)
+    cran = next(c for c in p.install_commands if "install.packages" in c)
+    assert 'c("dplyr")' in cran, cran            # only the legitimate name survives
+    assert cran.startswith("Rscript -e '") and cran.endswith("'")
+    assert cran.count("'") == 2                  # no break-out of the -e argument
+    for bad in ("touch /pwned", "`", "$(", "\n"):
+        assert bad not in cran
+
+
+def test_declared_install_list_ignores_unrelated_vectors(tmp_path):
+    # A setup.R usually holds more than the package list. Only names reachable
+    # from the install.packages() call may be harvested — factor levels like
+    # c("car","boot") are real CRAN names and would otherwise be installed for
+    # nothing, and the rest become bogus "not on CRAN" noise in the report.
+    (tmp_path / "setup.R").write_text(
+        'pkgs <- c("colleyRstats", "FSA")\n'
+        'levels <- c("car", "boot", "Days", "Time")\n'
+        'conds <- c("Male", "Female")\n'
+        'missing <- pkgs[!pkgs %in% rownames(installed.packages())]\n'
+        'install.packages(missing, repos = "https://cloud.r-project.org")\n')
+    res = signatures.scan(tmp_path)
+    assert set(res.r_packages) == {"colleyRstats", "FSA"}
+
+
+@pytest.mark.parametrize("src,expected", [
+    ('install.packages(c("dplyr","lme4"))', {"dplyr", "lme4"}),
+    ('install.packages("brms")', {"brms"}),
+    ('x <- c("Days","Time")', set()),                       # no install call at all
+])
+def test_declared_install_list_forms(tmp_path, src, expected):
+    from reprobe.detect.signatures import _declared_install_packages
+    assert _declared_install_packages(src) == expected

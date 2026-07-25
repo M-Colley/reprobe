@@ -22,12 +22,10 @@ from .fetch import FetchError, configure as configure_fetchers, fetch as fetch_r
 from .llm import from_config as llm_from_config, roles as llm_roles
 from .models import (
     ContainerSpec,
-    DetectResult,
     EnvPlan,
     FetchResult,
     Mount,
     Pin,
-    RawRunOutput,
     Report,
     RunResult,
 )
@@ -103,7 +101,7 @@ class Orchestrator:
         logdir = work / "logs"
         # A fetch must land in a pristine tree, so re-running a submission (or a
         # batch --resume retry) never inherits the previous fetch's files.
-        srcdir = self._fresh_dir(work, work / "src", "src")
+        srcdir = fresh_dir(work, work / "src", "src")
         for d in (srcdir, outdir, logdir):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -162,14 +160,15 @@ class Orchestrator:
         ran = False
         if do_run and detect_res.steps:
             ran = True
-            rundir = self._fresh_rundir(work, rundir)
+            rundir = fresh_dir(work, rundir, "run")
             shutil.copytree(srcdir, rundir)
             self._dataset_phase(manifest_meta, rundir, report, dry_run=dry_run)
             self._install_phase(env_plan, rundir, logdir, install=install, dry_run=dry_run, report=report)
 
             allow_egress_runtime = bool(allow_net)
             if allow_egress_runtime:
-                report.environment.setdefault("notes", []).append(
+                # a badge-confidence downgrade is a warning, not an FYI
+                report.environment.setdefault("warnings", []).append(
                     "RAN WITH RUNTIME EGRESS (--allow-net " + ",".join(allow_net or []) + "); badge "
                     "confidence downgraded. NOTE: per-host allowlisting is not yet enforced — this grants "
                     "full egress for the run phase.")
@@ -254,8 +253,6 @@ class Orchestrator:
         data = (manifest_meta or {}).get("data") or []
         if not data or dry_run:
             return
-        import re as _re
-
         from .fetch.base import (assert_safe_url, checksum_verdict, download,
                                  new_checksum_stats, record_download, safe_join)
 
@@ -285,7 +282,7 @@ class Orchestrator:
                 notes.append(f"'{path}': {e}")
                 continue
             md5 = checksum if (checksum.lower().startswith("md5")
-                               or _re.fullmatch(r"[0-9a-fA-F]{32}", checksum)) else None
+                               or re.fullmatch(r"[0-9a-fA-F]{32}", checksum)) else None
             ok, note = download(source, target, expected_md5=md5, restrict_public=True)
             record_download(stats, ok, note, had_checksum=bool(md5))
             results.append({"path": path, "source": source,
@@ -406,11 +403,6 @@ class Orchestrator:
             prov["llm_confidence_threshold"] = self.config.llm.get("confidence_threshold")
         return prov
 
-    _fresh_dir = staticmethod(fresh_dir)
-
-    @staticmethod
-    def _fresh_rundir(work: Path, rundir: Path) -> Path:
-        return fresh_dir(work, rundir, "run")
 
     def _write(self, outdir: Path, report: Report) -> None:
         (outdir / "report.json").write_text(

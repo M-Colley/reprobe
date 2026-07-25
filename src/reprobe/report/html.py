@@ -57,6 +57,7 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  {% if r.environment.base_image_digest %}<div class="muted">image digest <code>{{ r.environment.base_image_digest }}</code></div>{% endif %}
  {% if r.environment.resolved_deps_digest %}<div class="muted">deps digest <code>{{ r.environment.resolved_deps_digest }}</code></div>{% endif %}
  {% for w in r.environment.warnings %}<div class="muted">⚠️ {{ w }}</div>{% endfor %}
+ {% for n in r.environment.notes %}<div class="muted">ℹ️ {{ n }}</div>{% endfor %}
 </div>
 {% endif %}
 

@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ..models import FetchResult, Pin
-from .base import _MAX_LFS_TOTAL_BYTES, Fetcher, FetchError, assert_safe_url, run_git
+from .base import _MAX_LFS_TOTAL_BYTES, FetchError, assert_safe_url, run_git
 
 _HOSTS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org")
 

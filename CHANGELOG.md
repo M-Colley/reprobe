@@ -8,7 +8,9 @@ keeping the author analysis offline — the network stays in the sanctioned phas
 
 - **CRAN R packages installed automatically.** Detection statically discovers the
   R packages a repo needs (`library()`/`require()`/`requireNamespace()`/`pkg::`
-  in `.R`/`.Rmd`/R-kernel notebooks, plus `DESCRIPTION` Imports/Depends), and
+  in `.R`/`.Rmd`/R-kernel notebooks, plus `DESCRIPTION` Imports/Depends, plus
+  `setup.R`-style `install.packages(c(...))` lists — the only place on-demand
+  dependencies like `FSA`/`Hmisc`/`rstatix` are ever named), and
   authors may also list them under `environment.r_packages` in the manifest. The
   **CRAN-available, not-already-present** subset is installed into `R_LIBS_USER`
   during the existing egress **install phase**; the author run still executes with
@@ -48,6 +50,36 @@ keeping the author analysis offline — the network stays in the sanctioned phas
   content-addressed, so pulled data is reproducibly pinned by the commit.
   (Residual: git-lfs still trusts the origin server's batch-API object hrefs —
   run `--allow-lfs` only on repos whose git host you trust.)
+
+- **Phase disclosures are actually visible.** `environment.notes` — where the
+  dependency-install, dataset-download and runtime-egress disclosures are
+  written — was rendered by neither `report.md` nor `report.html`. The
+  `--allow-net` statement ("badge confidence downgraded … this grants full egress
+  for the run phase") was therefore invisible in the human-readable reports it
+  exists to warn. Both renderers now emit it, and the egress disclosure is a
+  **warning** rather than a note.
+- **Declared install lists are scoped to the install call.** Harvesting every
+  `c(...)` in a file that calls `install.packages` swept up unrelated character
+  vectors: factor levels like `c("car","boot")` are real CRAN names and were
+  installed for nothing, while `c("Male","Female")` became bogus "not on CRAN"
+  noise. Only names reachable from an `install.packages()` argument are taken now
+  — following the assignment chain (`install.packages(missing)` →
+  `missing <- pkgs[…]` → `pkgs <- c(…)`).
+- **The R version listing survives a failed install.** The phase runs under
+  `set -e`, so the CRAN step's non-zero exit aborted the shell before the trailing
+  `installed.packages()` listing could run — losing the record of what *is*
+  installed in exactly the run a chair needs to diagnose. The CRAN script now
+  prints it before quitting.
+- **A submission can be re-run.** Every fetch now starts from a pristine
+  `work/<sid>/src/`. Previously a second run of the same submission failed
+  outright — `git clone` refused the existing directory ("destination path
+  already exists and is not an empty directory"), so the work dir had to be
+  deleted by hand, and `batch --resume` hit the same wall on exactly the
+  `fetch-failed` submissions it exists to retry. The local fetcher had the
+  quieter half: `copytree(dirs_exist_ok=True)` merged the old tree into the new
+  one, so files deleted upstream lingered as ghosts. `src/` now uses the same
+  freshness rule `run/` already had (Windows file-lock fallback to a uniquely
+  named sibling instead of crashing mid-batch); `reprobe detect` too.
 
 ## Unreleased — security & robustness hardening
 

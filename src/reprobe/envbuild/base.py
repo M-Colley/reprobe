@@ -33,6 +33,8 @@ def _needs(kinds: set[str], *want: str) -> bool:
 _RENV_RESTORE = ("Rscript -e 'if (requireNamespace(\"renv\", quietly=TRUE)) renv::restore(prompt=FALSE) "
                  "else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'")
 
+_R_VERSIONS = "Rscript -e 'print(installed.packages()[, c(\"Package\", \"Version\")])'"
+
 
 def _cran_packages(env: dict[str, Any], detected: list[str]) -> list[str]:
     """Union of author-declared (manifest environment.r_packages) and statically
@@ -69,10 +71,14 @@ def _cran_install_command(packages: list[str], cran_repo: str) -> str:
         # A CRAN-available package that is still missing afterwards FAILED to
         # build — surface it as a non-zero exit so the install phase is reported
         # failed (never silently "ok") and the run's step failures are read as
-        # environmental.
+        # environmental. Print the resolved versions BEFORE quitting: the phase
+        # runs under `set -e`, so a non-zero exit here aborts the whole bash -c
+        # and the trailing version-listing command would never run — losing the
+        # record of what IS installed in exactly the run that needs diagnosing.
         "failed <- setdiff(ok, rownames(installed.packages())); "
         'if (length(failed)) { message("reprobe: CRAN packages FAILED to install: ", '
-        'paste(failed, collapse=", ")); quit(status=1) } '
+        'paste(failed, collapse=", ")); '
+        'print(installed.packages()[, c("Package", "Version")]); quit(status=1) } '
         "}"
     )
     return "Rscript -e '" + r_code + "'"
@@ -215,5 +221,5 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
     if any(c.startswith("pip install") for c in cmds):
         cmds.append("pip freeze --path=/work/.reprobe_deps")
     if any(c.startswith("Rscript") for c in cmds):
-        cmds.append("Rscript -e 'print(installed.packages()[, c(\"Package\", \"Version\")])'")
+        cmds.append(_R_VERSIONS)
     return cmds, warnings

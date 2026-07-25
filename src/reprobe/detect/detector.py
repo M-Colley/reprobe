@@ -4,7 +4,7 @@ advisory only when the heuristic is ambiguous (and never as an override)."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from ..models import DetectResult
 from . import manifest as manifest_mod
