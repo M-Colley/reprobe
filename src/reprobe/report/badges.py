@@ -187,7 +187,14 @@ def verdict(steps: list[RunResult], ran: bool) -> dict[str, Any]:
     if not runnable:
         overall = "structural-only"
     elif all(s == "pass" for s in statuses):
-        overall = "runs"
+        # Every step ran clean — but if outputs were declared and NOT ONE was
+        # produced, the run is not clean. Steps carrying only broadcast outputs
+        # are no longer marked "partial" individually (that denied healthy
+        # pipelines the Functional candidate), so without this the pipeline-wide
+        # miss would silently read as a green "runs" with no human review.
+        declared = any(s.expected_met or s.diagnostics.get("expected_missing") for s in runnable)
+        produced = any(s.expected_met for s in runnable)
+        overall = "runs" if (produced or not declared) else "runs-with-warnings"
     elif _artifact_failure(runnable):
         overall = "runs-with-failures"
     elif any(_infra_error(s) for s in runnable):

@@ -80,7 +80,8 @@ def _steps_from_autoui(data: dict[str, Any]) -> list[RunStep]:
     for raw in run.get("steps", []) or []:
         if isinstance(raw, str):
             steps.append(RunStep(target=raw, kind=_kind_for(raw, None),
-                                  runner=_kind_for(raw, None), expected_outputs=expected))
+                                  runner=_kind_for(raw, None), expected_outputs=expected,
+                                  outputs_inherited=bool(expected)))
         elif isinstance(raw, dict):
             if "tool" in raw:                       # e.g. {tool: unity, project: prototype/, tier: compile}
                 target = raw.get("project") or raw.get("path") or "."
@@ -89,10 +90,22 @@ def _steps_from_autoui(data: dict[str, Any]) -> list[RunStep]:
             else:
                 target = raw.get("path") or raw.get("file") or ""
                 kind = _kind_for(target, raw.get("kind"))
+                own = raw.get("expected_outputs")
                 steps.append(RunStep(runner=raw.get("runner", kind), target=target, kind=kind,
                                      argv=[str(a) for a in (raw.get("args") or raw.get("argv") or [])],
-                                     expected_outputs=raw.get("expected_outputs", expected),
+                                     expected_outputs=own if own is not None else expected,
+                                     outputs_inherited=own is None and bool(expected),
                                      description=raw.get("description")))
+    return _own_outputs_if_single(steps)
+
+
+def _own_outputs_if_single(steps: list[RunStep]) -> list[RunStep]:
+    """A one-step plan OWNS the manifest's outputs — there is no peer to produce
+    them, so that step is rightly "partial" when it produces none. Only a
+    multi-step plan needs the broadcast disowned."""
+    if len(steps) <= 1:
+        for s in steps:
+            s.outputs_inherited = False
     return steps
 
 

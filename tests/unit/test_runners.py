@@ -124,6 +124,18 @@ def test_zero_declared_outputs_is_partial(tmp_path):
     assert res.diagnostics["expected_missing"] == ["a.csv"]
 
 
+def test_inherited_outputs_do_not_make_a_prep_step_partial(tmp_path):
+    # A multi-step pipeline broadcasts the manifest's outputs onto EVERY step, so
+    # a prep step that legitimately produces none of the final artifacts must
+    # stay "pass" — marking it "partial" denied the whole pipeline the Functional
+    # candidate. The missing set is still recorded (never over-claim).
+    step = RunStep(target="00_prep.py", kind="python",
+                   expected_outputs=["a.csv"], outputs_inherited=True)
+    res = PythonScriptRunner().interpret(_raw(), _ctx(tmp_path, step))
+    assert res.status == "pass"
+    assert res.diagnostics["expected_missing"] == ["a.csv"]
+
+
 def test_committed_but_unchanged_output_does_not_count(tmp_path):
     # freshness rule: only files (re)created by THIS run may satisfy a declared
     # output — a figure committed to the repo must not inflate the signal.

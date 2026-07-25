@@ -163,8 +163,14 @@ class BaseRunner:
         expected_met = self._expected_met(ctx, produced)
         ok = raw.exit_code == 0
         status = "pass" if ok else "fail"
-        if ok and ctx.step.expected_outputs and not expected_met:
-            status = "partial"            # ran clean but didn't produce what it promised
+        if ok and ctx.step.expected_outputs and not expected_met \
+                and not ctx.step.outputs_inherited:
+            # Ran clean but produced none of the outputs IT declared. Outputs
+            # merely broadcast from the manifest are excluded: in a multi-step
+            # pipeline a prep step is not meant to produce the final artifacts,
+            # and marking it "partial" denied the whole pipeline the Functional
+            # candidate. Completeness is judged pipeline-wide in report/badges.py.
+            status = "partial"
 
         claims, not_verified = [], list(caps.cannot_verify)
         if ok:

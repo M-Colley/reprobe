@@ -31,6 +31,49 @@ def _report(**kw):
     return Report(**base)
 
 
+def test_all_pass_but_nothing_produced_is_not_a_clean_verdict():
+    # With broadcast outputs no longer marking steps "partial", a pipeline where
+    # EVERY step passed yet NO declared output was produced must still demand a
+    # human — otherwise the miss silently reads as a green "runs".
+    steps = [
+        RunResult(runner="python", target="00_prep.py", status="pass",
+                  diagnostics={"expected_missing": ["results/summary.csv"]}),
+        RunResult(runner="python", target="01_analyze.py", status="pass",
+                  diagnostics={"expected_missing": ["results/summary.csv"]}),
+    ]
+    v = badges.verdict(steps, ran=True)
+    assert v["overall"] == "runs-with-warnings"
+    assert v["human_review_required"] is True
+
+    # ...but the same pipeline that DID produce its output is clean.
+    steps[1] = RunResult(runner="python", target="01_analyze.py", status="pass",
+                         expected_met=["results/summary.csv"])
+    v = badges.verdict(steps, ran=True)
+    assert v["overall"] == "runs"
+    assert v["human_review_required"] is False
+
+
+def test_multi_step_pipeline_earns_functional_when_the_final_step_delivers():
+    # The end-to-end shape of the deferred bug: a prep step that produces none of
+    # the broadcast outputs must not deny the pipeline its Functional candidate.
+    detect = DetectResult(artifact_types=["python"], steps=[
+        RunStep(target="00_prep.py", kind="python",
+                expected_outputs=["results/summary.csv"], outputs_inherited=True),
+        RunStep(target="01_analyze.py", kind="python",
+                expected_outputs=["results/summary.csv"], outputs_inherited=True),
+    ])
+    steps = [
+        RunResult(runner="python", target="00_prep.py", status="pass",
+                  diagnostics={"expected_missing": ["results/summary.csv"]}),
+        RunResult(runner="python", target="01_analyze.py", status="pass",
+                  expected_met=["results/summary.csv"]),
+    ]
+    out = _decide(FetchResult(input="u", resolved_type="git", src_dir="/x",
+                              pin=Pin(kind="git_sha", value="abc")), steps, detect=detect)
+    assert out["acm"]["functional"] == "candidate"
+    assert badges.verdict(steps, ran=True)["overall"] == "runs"
+
+
 def test_git_sha_is_not_archival_available_is_candidate():
     f = FetchResult(input="gh", resolved_type="git", src_dir="/x",
                     pin=Pin(kind="git_sha", value="abc123"))
