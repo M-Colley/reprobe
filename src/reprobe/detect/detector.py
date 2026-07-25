@@ -4,7 +4,7 @@ advisory only when the heuristic is ambiguous (and never as an override)."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from ..models import DetectResult
 from . import manifest as manifest_mod
@@ -31,6 +31,7 @@ def detect(
             for s in m_result.steps:
                 if not s.expected_outputs and exp:
                     s.expected_outputs = list(exp)
+                    s.outputs_inherited = len(m_result.steps) > 1
             # the deterministic repo scan still informs environment planning
             # (e.g. Dockerfile -> needs-repo2docker), so keep its flags — and
             # its non-code inventory, which a manifest doesn't declare
@@ -46,6 +47,7 @@ def detect(
         for s in heuristic.steps:
             if not s.expected_outputs and exp:
                 s.expected_outputs = list(exp)
+                s.outputs_inherited = len(heuristic.steps) > 1
         heuristic.manifest_path = m_result.manifest_path
         heuristic.notes = m_result.notes + heuristic.notes
         return heuristic, meta

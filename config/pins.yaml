@@ -6,15 +6,18 @@
 # ============================================================================
 
 year: 2026
-revision: 1                       # base-image tag becomes "<year>.<revision>"
+# Bump on every republish — a tag must never be reused for different bytes, or
+# reports that pin "<year>.<revision>" stop meaning one thing. Revision 2 adds
+# the base-r compiler toolchain + preinstalled stats stack (see CHANGELOG).
+revision: 2                       # base-image tag becomes "<year>.<revision>"
 
 base_images:
   # The immutable build base. Add the @sha256:... digest after first pull:
   #   docker pull mambaorg/micromamba:1.5.10-noble && docker inspect ...
   micromamba_base: "mambaorg/micromamba:1.5.10-noble"
-  python:     "ghcr.io/m-colley/reprobe-base-py:2026.1"   # built by images/build-images.sh
-  r:          "ghcr.io/m-colley/reprobe-base-r:2026.1"
-  controller: "ghcr.io/m-colley/reprobe-controller:2026.1"
+  python:     "ghcr.io/m-colley/reprobe-base-py:2026.2"   # built by images/build-images.sh
+  r:          "ghcr.io/m-colley/reprobe-base-r:2026.2"
+  controller: "ghcr.io/m-colley/reprobe-controller:2026.2"
 
 llm:
   enabled: true
@@ -38,7 +41,7 @@ r:
   # Package Manager snapshot freezes package versions so a run reproduces
   # year-over-year (like the pinned base images). Empty -> live CRAN mirror
   # (cloud.r-project.org), which the report flags as non-reproducible.
-  cran_snapshot: "https://packagemanager.posit.co/cran/2026-07-01"
+  cran_snapshot: "https://packagemanager.posit.co/cran/2026-07-23"
 
 tools:
   repo2docker: "jupyter-repo2docker==2024.07.0"   # opt-in fallback builder only

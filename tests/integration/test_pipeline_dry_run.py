@@ -25,7 +25,7 @@ def spy_run_container(monkeypatch):
 
     def spy(spec, limits, log_path, **kw):
         raw = real(spec, limits, log_path, **kw)
-        calls.append({"spec": spec, "argv": raw.argv_redacted, "kw": kw})
+        calls.append({"spec": spec, "argv": raw.argv_redacted, "kw": kw, "limits": limits})
         return raw
 
     monkeypatch.setattr(orch_mod, "run_container", spy)
@@ -120,7 +120,7 @@ def test_dataset_phase_downloads_public_and_guards_internal(tmp_path, monkeypatc
     calls = []
 
     def fake_download(url, dest, *, expected_md5=None, **kw):
-        calls.append(url)
+        calls.append((url, kw))
         Path(dest).parent.mkdir(parents=True, exist_ok=True)
         Path(dest).write_text("data")
         return True, "downloaded (no checksum provided)"
@@ -144,7 +144,56 @@ def test_dataset_phase_downloads_public_and_guards_internal(tmp_path, monkeypatc
     assert status["y.csv"] == "refused"
     assert status["z.csv"] == "skipped-unsupported-source"
     assert (rundir / "data" / "x.csv").read_text() == "data"
-    assert calls == ["https://93.184.216.34/x.csv"]        # only the public URL was fetched
+    assert [u for u, _ in calls] == ["https://93.184.216.34/x.csv"]   # only the public URL fetched
+    # restrict_public is what turns on per-redirect-hop SSRF re-validation and the
+    # DNS pin; without it a public host could 302 to an internal one.
+    assert all(kw.get("restrict_public") is True for _, kw in calls)
+
+
+def test_install_phase_container_gets_the_relaxed_build_envelope(tmp_path, spy_run_container):
+    """The install phase must reach docker with an EXECUTABLE tmpfs (source
+    packages run ./configure), a writable rootfs, and the long build timeout —
+    asserted on the real orchestrator wiring, not a hand-built limits dict."""
+    RMIX = Path(__file__).resolve().parents[1] / "fixtures" / "notebook-r-mix"
+    _run(tmp_path, RMIX)
+    install = [c for c in spy_run_container if c["spec"].network == "egress"]
+    assert install, "no egress install container was launched"
+    for c in install:
+        argv = " ".join(c["argv"])
+        assert "--tmpfs /tmp:rw,exec,nosuid,size=4g" in argv, argv
+        assert "--read-only" not in c["argv"]
+        assert c["kw"].get("allow_egress") is True
+        # timeout_s is a subprocess timeout, not an argv flag
+        assert c["limits"].get("timeout_s") == 3600
+
+
+def test_rerunning_same_submission_starts_from_a_pristine_src(tmp_path):
+    """Re-running a submission must not inherit the previous fetch. A stale src/
+    made `git clone` fail outright ("destination path already exists"), and the
+    local fetcher (copytree dirs_exist_ok=True) silently merged the old tree in."""
+    o = Orchestrator(workroot=tmp_path)
+    first = o.run(str(EXAMPLE), use_llm=False, dry_run=True)
+    srcdir = tmp_path / first.submission_id / "src"
+    stale = srcdir / "stale_from_previous_run.py"
+    stale.write_text("print('should not survive a re-fetch')\n")
+
+    second = o.run(str(EXAMPLE), use_llm=False, dry_run=True)
+    assert second.submission_id == first.submission_id
+    assert second.verdict["overall"] != "fetch-failed", second.source.get("error")
+    assert not stale.exists(), "stale file survived the re-fetch"
+    assert (srcdir / "01_analyze.py").is_file(), "fresh fetch did not land"
+
+
+def test_fresh_dir_falls_back_when_removal_fails(tmp_path, monkeypatch):
+    # Windows file locks can defeat rmtree; rather than crash mid-batch we fall
+    # back to a uniquely-named sibling.
+    import reprobe.orchestrator as om
+
+    target = tmp_path / "src"
+    target.mkdir()
+    monkeypatch.setattr(om.shutil, "rmtree", lambda *a, **k: None)   # pretend it failed
+    out = om.fresh_dir(tmp_path, target, "src")
+    assert out != target and out.name == "src-1"
 
 
 def test_dataset_phase_noop_in_dry_run(tmp_path):

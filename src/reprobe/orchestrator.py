@@ -22,12 +22,10 @@ from .fetch import FetchError, configure as configure_fetchers, fetch as fetch_r
 from .llm import from_config as llm_from_config, roles as llm_roles
 from .models import (
     ContainerSpec,
-    DetectResult,
     EnvPlan,
     FetchResult,
     Mount,
     Pin,
-    RawRunOutput,
     Report,
     RunResult,
 )
@@ -49,6 +47,26 @@ def submission_id(ref: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def fresh_dir(work: Path, target: Path, stem: str) -> Path:
+    """Remove a previous per-run directory so this run starts from a pristine
+    tree; if Windows file locks defeat rmtree, fall back to a fresh
+    uniquely-named sibling instead of crashing mid-batch.
+
+    Re-running the same submission MUST NOT inherit the last run's files: a stale
+    ``src/`` makes ``git clone`` fail outright ("destination path already exists
+    and is not an empty directory"), and the local fetcher
+    (``copytree(dirs_exist_ok=True)``) would silently merge the old tree into the
+    new one."""
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    if target.exists():
+        for n in range(1, 100):
+            cand = work / f"{stem}-{n}"
+            if not cand.exists():
+                return cand
+    return target
 
 
 class Orchestrator:
@@ -78,10 +96,12 @@ class Orchestrator:
     ) -> Report:
         sid = sid or submission_id(ref)
         work = self.workroot / sid
-        srcdir = work / "src"
         rundir = work / "run"
         outdir = work / "out"
         logdir = work / "logs"
+        # A fetch must land in a pristine tree, so re-running a submission (or a
+        # batch --resume retry) never inherits the previous fetch's files.
+        srcdir = fresh_dir(work, work / "src", "src")
         for d in (srcdir, outdir, logdir):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -140,14 +160,15 @@ class Orchestrator:
         ran = False
         if do_run and detect_res.steps:
             ran = True
-            rundir = self._fresh_rundir(work, rundir)
+            rundir = fresh_dir(work, rundir, "run")
             shutil.copytree(srcdir, rundir)
             self._dataset_phase(manifest_meta, rundir, report, dry_run=dry_run)
             self._install_phase(env_plan, rundir, logdir, install=install, dry_run=dry_run, report=report)
 
             allow_egress_runtime = bool(allow_net)
             if allow_egress_runtime:
-                report.environment.setdefault("notes", []).append(
+                # a badge-confidence downgrade is a warning, not an FYI
+                report.environment.setdefault("warnings", []).append(
                     "RAN WITH RUNTIME EGRESS (--allow-net " + ",".join(allow_net or []) + "); badge "
                     "confidence downgraded. NOTE: per-host allowlisting is not yet enforced — this grants "
                     "full egress for the run phase.")
@@ -232,8 +253,6 @@ class Orchestrator:
         data = (manifest_meta or {}).get("data") or []
         if not data or dry_run:
             return
-        import re as _re
-
         from .fetch.base import (assert_safe_url, checksum_verdict, download,
                                  new_checksum_stats, record_download, safe_join)
 
@@ -263,7 +282,7 @@ class Orchestrator:
                 notes.append(f"'{path}': {e}")
                 continue
             md5 = checksum if (checksum.lower().startswith("md5")
-                               or _re.fullmatch(r"[0-9a-fA-F]{32}", checksum)) else None
+                               or re.fullmatch(r"[0-9a-fA-F]{32}", checksum)) else None
             ok, note = download(source, target, expected_md5=md5, restrict_public=True)
             record_download(stats, ok, note, had_checksum=bool(md5))
             results.append({"path": path, "source": source,
@@ -297,7 +316,11 @@ class Orchestrator:
             groups["r" if c.strip().startswith("Rscript") else "python"].append(c)
 
         relaxed = {**self.config.limits_for("python"),
-                   "read_only_rootfs": False, "tmpfs_noexec": False, "tmpfs_size": "2g"}
+                   "read_only_rootfs": False, "tmpfs_noexec": False, "tmpfs_size": "4g",
+                   # compiling a large source dependency tree can exceed the 30-min
+                   # author-code cap; give the harness-controlled install phase (no
+                   # author code runs here) more wall-clock and build space.
+                   "timeout_s": 3600}
         prep = ("set -e; mkdir -p /work/.reprobe_deps /work/.reprobe_Rlib; export HOME=/work; "
                 "export R_LIBS_USER=/work/.reprobe_Rlib; export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; ")
 
@@ -380,18 +403,6 @@ class Orchestrator:
             prov["llm_confidence_threshold"] = self.config.llm.get("confidence_threshold")
         return prov
 
-    @staticmethod
-    def _fresh_rundir(work: Path, rundir: Path) -> Path:
-        """Remove the previous run copy; if Windows file locks defeat rmtree,
-        fall back to a fresh uniquely-named dir instead of crashing mid-batch."""
-        if rundir.exists():
-            shutil.rmtree(rundir, ignore_errors=True)
-        if rundir.exists():
-            for n in range(1, 100):
-                cand = work / f"run-{n}"
-                if not cand.exists():
-                    return cand
-        return rundir
 
     def _write(self, outdir: Path, report: Report) -> None:
         (outdir / "report.json").write_text(

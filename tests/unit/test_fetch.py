@@ -516,6 +516,79 @@ def test_assert_safe_url_enforces_scheme_and_host():
             base.assert_safe_url(bad)
 
 
+def test_pinned_dns_uses_validated_addrs_and_restores(monkeypatch):
+    """The DNS pin closes the rebind window: inside the context the validated
+    addrinfos are used even if the resolver would now answer with an internal
+    address, other hosts still resolve normally, and the stdlib global is
+    restored afterwards (even on exception)."""
+    import socket as _s
+
+    private = [(2, 1, 6, "", ("10.0.0.5", 80))]      # what a rebind would answer
+    elsewhere = [(2, 1, 6, "", ("1.2.3.4", 80))]
+
+    def rebinding(host, port, *a, **k):              # never touches real DNS
+        return private if host == "evil.example" else elsewhere
+
+    monkeypatch.setattr(_s, "getaddrinfo", rebinding)
+    pinned = [(2, 1, 6, "", ("93.184.216.34", 80))]
+    with base._pinned_dns("evil.example", pinned):
+        assert _s.getaddrinfo("evil.example", 80) == pinned      # pin wins over the rebind
+        assert _s.getaddrinfo("other.example", 80) == elsewhere  # other hosts fall through
+    assert _s.getaddrinfo is rebinding, "getaddrinfo not restored"
+
+    try:
+        with base._pinned_dns("evil.example", pinned):
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    assert _s.getaddrinfo is rebinding, "getaddrinfo not restored after an exception"
+
+
+def test_resolve_public_rejects_mixed_and_unresolvable(monkeypatch):
+    import socket as _s
+
+    # a name resolving to BOTH a public and a private address must be refused
+    monkeypatch.setattr(_s, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 80)),
+                                         (2, 1, 6, "", ("10.0.0.5", 80))])
+    with pytest.raises(FetchError):
+        base._resolve_public("mixed.example", 80)
+
+    def boom(*a, **k):
+        raise OSError("dns down")
+    monkeypatch.setattr(_s, "getaddrinfo", boom)
+    with pytest.raises(FetchError, match="cannot resolve host"):
+        base._resolve_public("nxdomain.example", 80)
+
+
+def test_allow_lfs_reaches_the_git_fetcher(tmp_path, monkeypatch):
+    """The positive --allow-lfs chain (registry.fetch -> GitHostFetcher.fetch ->
+    _pull_lfs) must actually issue the pull; otherwise the flag is a silent
+    no-op and a chair gets pointer files with no error."""
+    from reprobe.fetch import registry as reg
+
+    calls = []
+
+    def fake_git(args, cwd=None, timeout=600):
+        calls.append(list(args))
+        if args[0] == "rev-parse":
+            return subprocess.CompletedProcess(args, 0, stdout="deadbeef\n", stderr="")
+        if args[:2] == ["lfs", "version"]:
+            return subprocess.CompletedProcess(args, 0, stdout="git-lfs/3", stderr="")
+        if args[:2] == ["lfs", "ls-files"]:
+            return subprocess.CompletedProcess(args, 0, stdout="d.bin\n", stderr="")
+        if args[:3] == ["config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(args, 0, stdout="https://93.184.216.34/r.git\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_host, "run_git", fake_git)
+    dest = tmp_path / "src"
+    dest.mkdir()
+    (dest / "d.bin").write_text(_lfs_pointer(10))
+    reg.fetch("https://github.com/user/repo", dest, allow_lfs=True)
+    assert ["lfs", "pull"] in calls, "registry did not forward allow_lfs to the git fetcher"
+
+
 def test_run_git_ignores_system_config(monkeypatch):
     """run_git must set GIT_CONFIG_NOSYSTEM so a host /etc/gitconfig can't inject
     a credential helper or transport, and keep skip-smudge on by default."""

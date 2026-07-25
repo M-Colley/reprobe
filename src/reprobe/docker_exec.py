@@ -180,8 +180,11 @@ def build_argv(spec: ContainerSpec, limits: dict, *, container_name: str, allow_
         argv += ["--read-only"]
     tmpfs_size = limits.get("tmpfs_size", "512m")
     # /tmp is noexec for hardened RUN containers; the dependency-INSTALL phase
-    # relaxes this (tmpfs_noexec=False) because compiling packages executes in /tmp.
-    tmpfs_opts = "rw,noexec,nosuid" if limits.get("tmpfs_noexec", True) else "rw,nosuid"
+    # relaxes this (tmpfs_noexec=False) because compiling packages executes in
+    # /tmp. `exec` must be set EXPLICITLY — Docker's --tmpfs defaults to noexec,
+    # so merely omitting noexec leaves /tmp non-executable and every R/C source
+    # package fails its `configure` step with "exists but is not executable".
+    tmpfs_opts = "rw,noexec,nosuid" if limits.get("tmpfs_noexec", True) else "rw,exec,nosuid"
     argv += ["--tmpfs", f"/tmp:{tmpfs_opts},size={tmpfs_size}"]
 
     # --- resources -------------------------------------------------------

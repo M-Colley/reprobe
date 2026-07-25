@@ -8,7 +8,9 @@ keeping the author analysis offline — the network stays in the sanctioned phas
 
 - **CRAN R packages installed automatically.** Detection statically discovers the
   R packages a repo needs (`library()`/`require()`/`requireNamespace()`/`pkg::`
-  in `.R`/`.Rmd`/R-kernel notebooks, plus `DESCRIPTION` Imports/Depends), and
+  in `.R`/`.Rmd`/R-kernel notebooks, plus `DESCRIPTION` Imports/Depends, plus
+  `setup.R`-style `install.packages(c(...))` lists — the only place on-demand
+  dependencies like `FSA`/`Hmisc`/`rstatix` are ever named), and
   authors may also list them under `environment.r_packages` in the manifest. The
   **CRAN-available, not-already-present** subset is installed into `R_LIBS_USER`
   during the existing egress **install phase**; the author run still executes with
@@ -18,6 +20,14 @@ keeping the author analysis offline — the network stays in the sanctioned phas
   reproducibility. Discovered names are validated to `[A-Za-z][A-Za-z0-9.]*` and
   the whole `install.packages()` call rides inside one single-quoted `-e`
   argument, so a hostile `library()` name cannot inject shell or R code.
+  Two fixes make this actually build compiled packages: the dependency-install
+  `/tmp` is now mounted **`exec`** (Docker's `--tmpfs` is `noexec` by default, so
+  every source package's `./configure` previously failed with "exists but is not
+  executable"), and the base-r image gains a **compiler toolchain**
+  (`c-/cxx-/fortran-compiler`) so `Rcpp*`/`gmp`/`later`-style packages compile —
+  rebuild it with `bash images/build-images.sh`. The CRAN step now also **exits
+  non-zero when a CRAN-available package fails to build**, so the install phase is
+  reported failed instead of a silent `ok`.
 - **Author-declared datasets downloaded.** The manifest `data[]` array
   (`{path, source, checksum}`) is now consumed: each http(s) `source` is fetched
   into the run tree before the offline analysis, reusing `download()`'s byte cap,
@@ -40,6 +50,56 @@ keeping the author analysis offline — the network stays in the sanctioned phas
   content-addressed, so pulled data is reproducibly pinned by the commit.
   (Residual: git-lfs still trusts the origin server's batch-API object hrefs —
   run `--allow-lfs` only on repos whose git host you trust.)
+
+- **Base images republished as `2026.2`, and the lock is real now.** The base-r
+  contents changed twice in this cycle while the tag stayed `2026.1`, so one tag
+  named two different images — which breaks the promise that a stored report
+  re-runs years later, since the digest it recorded no longer exists. `revision`
+  is now `2` and the tags are `2026.2`; `2026.1` is left untouched for reports
+  that already reference it. The runbook's rebuild rule now triggers on an
+  `env.yaml` edit (not just a tag change) and requires bumping `revision` in the
+  same edit. Related: `images/base-*/conda-lock.yml` are now actually **solved
+  and committed** — four places claimed "the committed conda-lock.yml is the
+  reproducibility pin" while no lock existed and both Dockerfiles silently fell
+  back to the unpinned `env.yaml`.
+- **Multi-step pipelines can earn the Functional candidate.** Detection
+  broadcasts the manifest's `expected_outputs` onto every step, and a clean step
+  producing none of them was marked `partial` — so a prep step that was never
+  meant to produce the final artifacts failed `all_pass`, denied the Functional
+  candidate and downgraded the verdict. `RunStep` now records whether its outputs
+  were broadcast, and only step-declared outputs can make a step `partial`; a
+  one-step plan still owns the manifest's outputs. Shipped with the guard that
+  makes it safe: a pipeline where every step passes but **no** declared output is
+  produced stays `runs-with-warnings` instead of becoming a green `runs`.
+- **Phase disclosures are actually visible.** `environment.notes` — where the
+  dependency-install, dataset-download and runtime-egress disclosures are
+  written — was rendered by neither `report.md` nor `report.html`. The
+  `--allow-net` statement ("badge confidence downgraded … this grants full egress
+  for the run phase") was therefore invisible in the human-readable reports it
+  exists to warn. Both renderers now emit it, and the egress disclosure is a
+  **warning** rather than a note.
+- **Declared install lists are scoped to the install call.** Harvesting every
+  `c(...)` in a file that calls `install.packages` swept up unrelated character
+  vectors: factor levels like `c("car","boot")` are real CRAN names and were
+  installed for nothing, while `c("Male","Female")` became bogus "not on CRAN"
+  noise. Only names reachable from an `install.packages()` argument are taken now
+  — following the assignment chain (`install.packages(missing)` →
+  `missing <- pkgs[…]` → `pkgs <- c(…)`).
+- **The R version listing survives a failed install.** The phase runs under
+  `set -e`, so the CRAN step's non-zero exit aborted the shell before the trailing
+  `installed.packages()` listing could run — losing the record of what *is*
+  installed in exactly the run a chair needs to diagnose. The CRAN script now
+  prints it before quitting.
+- **A submission can be re-run.** Every fetch now starts from a pristine
+  `work/<sid>/src/`. Previously a second run of the same submission failed
+  outright — `git clone` refused the existing directory ("destination path
+  already exists and is not an empty directory"), so the work dir had to be
+  deleted by hand, and `batch --resume` hit the same wall on exactly the
+  `fetch-failed` submissions it exists to retry. The local fetcher had the
+  quieter half: `copytree(dirs_exist_ok=True)` merged the old tree into the new
+  one, so files deleted upstream lingered as ghosts. `src/` now uses the same
+  freshness rule `run/` already had (Windows file-lock fallback to a uniquely
+  named sibling instead of crashing mid-batch); `reprobe detect` too.
 
 ## Unreleased — security & robustness hardening
 

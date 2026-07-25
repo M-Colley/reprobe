@@ -75,6 +75,12 @@ def render(r: Report) -> str:
             L.append(f"- **{label}:** `{env[key]}`")
     for w in env.get("warnings", []) or []:
         L.append(f"  - ⚠️ {_ml(w)}")
+    # Phase disclosures (dependency install, dataset download, runtime egress)
+    # live here. They were previously written to the report but rendered by
+    # nothing, hiding the "--allow-net downgrades badge confidence" statement
+    # from the human-readable reports it exists to warn.
+    for n in env.get("notes", []) or []:
+        L.append(f"  - ℹ️ {_ml(n)}")
     L.append("")
 
     prov = getattr(r, "provenance", None)

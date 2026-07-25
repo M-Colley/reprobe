@@ -31,7 +31,7 @@ from . import __version__
 from .config import load_config
 from .docker_exec import docker_available, image_present, pull_image, run_container
 from .models import ContainerSpec
-from .orchestrator import Orchestrator, submission_id
+from .orchestrator import Orchestrator, fresh_dir, submission_id
 
 app = typer.Typer(add_completion=False, help="Reusable artifact-reproducibility harness for AutoUI open data.")
 console = Console()
@@ -77,7 +77,9 @@ def detect(
     from .fetch import fetch as fetch_ref
 
     sid = submission_id(ref)
-    srcdir = Path(workroot) / sid / "src"
+    work = Path(workroot) / sid
+    # same freshness rule as `run`: a re-detect must not inherit the last fetch
+    srcdir = fresh_dir(work, work / "src", "src")
     srcdir.mkdir(parents=True, exist_ok=True)
     fr = fetch_ref(ref, srcdir)
     cfg = load_config(config_dir)

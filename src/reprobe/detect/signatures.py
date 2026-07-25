@@ -85,6 +85,102 @@ def _r_ipynb_source(p: Path) -> str:
     return "\n".join(out)
 
 
+_R_QUOTED_PKG_RE = re.compile(rf"""['"]({_R_PKG})['"]""")
+_R_IDENT_RE = re.compile(r"[A-Za-z._][A-Za-z0-9._]*")
+# names that appear in the install expression itself, never a user variable
+_R_NOT_A_VAR = frozenset({"c", "install.packages", "installed.packages", "rownames",
+                          "setdiff", "unique", "character", "repos", "lib", "dependencies",
+                          "requireNamespace", "suppressWarnings", "Sys.getenv"})
+_R_RESOLVE_DEPTH = 4
+
+
+def _strip_r_comments(text: str) -> str:
+    """Drop `# …` comments (naive, line-based) so package-list `c(...)` vectors
+    whose entries carry trailing comments — a common style — parse cleanly."""
+    return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+
+
+def _balanced(text: str, open_idx: int) -> str:
+    """Text inside the parentheses that open at ``text[open_idx]``."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx + 1:i]
+    return text[open_idx + 1:]
+
+
+def _first_arg(args: str) -> str:
+    """The first top-level argument of an R argument list."""
+    depth, cur = 0, []
+    for ch in args:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            break
+        cur.append(ch)
+    return "".join(cur).strip()
+
+
+def _assignment_rhs(text: str, sym: str) -> str | None:
+    """The right-hand side of ``sym <- …`` / ``sym = …`` (balanced across lines)."""
+    m = re.search(rf"(?m)^\s*{re.escape(sym)}\s*(?:<<-|<-|=)\s*", text)
+    if not m:
+        return None
+    depth, out = 0, []
+    for ch in text[m.end():]:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "\n" and depth <= 0:
+            break
+        out.append(ch)
+    return "".join(out)
+
+
+def _declared_install_packages(text: str) -> set[str]:
+    """Package names an author lists for installation, e.g. a setup.R's
+    ``pkgs <- c("a","b",…); install.packages(pkgs)``. This is a very common way
+    to declare the FULL dependency set that ``library()``/``require()`` calls
+    never reveal — packages loaded on demand inside other packages (FSA, Hmisc,
+    rstatix, …) are named only here.
+
+    Only names reachable from an actual ``install.packages()`` argument are
+    returned: we take its first argument and, when that is a variable, follow the
+    assignment chain (``install.packages(missing)`` -> ``missing <- pkgs[…]`` ->
+    ``pkgs <- c(…)``). Harvesting every ``c(...)`` in the file instead would drag
+    in unrelated character vectors — factor levels like ``c("car","boot")`` are
+    real CRAN names and would be installed for nothing."""
+    if "install.packages" not in text:
+        return set()
+    clean = _strip_r_comments(text)
+    pkgs: set[str] = set()
+    frontier = [_first_arg(_balanced(clean, m.end() - 1))
+                for m in re.finditer(r"(?<![\w.])install\.packages\s*\(", clean)]
+    seen: set[str] = set()
+    for _ in range(_R_RESOLVE_DEPTH):
+        if not frontier:
+            break
+        nxt: list[str] = []
+        for expr in frontier:
+            pkgs.update(_R_QUOTED_PKG_RE.findall(expr))
+            for sym in _R_IDENT_RE.findall(expr):
+                if sym in _R_NOT_A_VAR or sym in seen:
+                    continue
+                seen.add(sym)
+                rhs = _assignment_rhs(clean, sym)
+                if rhs:
+                    nxt.append(rhs)
+        frontier = nxt
+    return pkgs
+
+
 def _description_packages(text: str) -> set[str]:
     pkgs: set[str] = set()
     for field in ("Imports", "Depends"):
@@ -119,6 +215,8 @@ def scan_r_packages(files) -> list[str]:
             continue
         for rx in (_R_LIB_RE, _R_REQNS_RE, _R_NS_RE):
             found.update(rx.findall(text))
+        if suf in (".r", ".rmd"):
+            found |= _declared_install_packages(text)   # setup.R-style install lists
     return sorted(n for n in found if _R_PKG_NAME_RE.match(n) and n not in _R_BASE_PKGS)
 
 # Non-code artifact categories (the AutoUI/CHI submission form's Video, Audio,

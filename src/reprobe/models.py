@@ -75,6 +75,12 @@ class RunStep(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)        # runner-specific options
     argv: list[str] = Field(default_factory=list)            # command-line args passed to the script
     expected_outputs: list[str] = Field(default_factory=list)
+    # True when expected_outputs were BROADCAST from the manifest onto this step
+    # rather than declared by the step itself. In a multi-step pipeline each step
+    # legitimately produces only its share, so a step must not be marked
+    # "partial" for failing to produce a peer's output — completeness is judged
+    # pipeline-wide (see report/badges.py).
+    outputs_inherited: bool = False
     description: Optional[str] = None
     primary: bool = True                # primary steps gate the Functional candidate
 
