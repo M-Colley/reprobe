@@ -633,7 +633,7 @@ def test_lfs_neutralizes_committed_lfsconfig(tmp_path, monkeypatch):
     fg = _origin("https://93.184.216.34/r.git")
     monkeypatch.setattr(git_host, "run_git", lambda *a, **k: calls.append(list(a[0])) or fg(*a, **k))
     warns: list[str] = []
-    git_host._pull_lfs(tmp_path, warns)
+    git_host._pull_lfs(tmp_path, warns, ["d.bin"])
     assert not (tmp_path / ".lfsconfig").is_file()
     assert (tmp_path / ".lfsconfig.reprobe-disabled").is_file()
     assert ["lfs", "pull"] in calls
@@ -652,7 +652,7 @@ def test_lfs_refuses_internal_origin(tmp_path, monkeypatch):
 
     monkeypatch.setattr(git_host, "run_git", fake_git)
     warns: list[str] = []
-    git_host._pull_lfs(tmp_path, warns)
+    git_host._pull_lfs(tmp_path, warns, ["d.bin"])
     assert any("non-public host" in w for w in warns)
 
 
@@ -669,7 +669,7 @@ def test_lfs_pull_refused_when_payload_exceeds_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(git_host, "run_git", fake_git)
     monkeypatch.setattr(git_host, "_MAX_LFS_TOTAL_BYTES", 1000)
     warns: list[str] = []
-    git_host._pull_lfs(tmp_path, warns)
+    git_host._pull_lfs(tmp_path, warns, ["big.bin"])
     assert any("exceeds" in w and "cap" in w for w in warns)
 
 
@@ -679,23 +679,59 @@ def test_lfs_pull_success_within_cap(tmp_path, monkeypatch):
     fg = _origin("https://93.184.216.34/r.git")
     monkeypatch.setattr(git_host, "run_git", lambda *a, **k: calls.append(list(a[0])) or fg(*a, **k))
     warns: list[str] = []
-    git_host._pull_lfs(tmp_path, warns)
+    git_host._pull_lfs(tmp_path, warns, ["d.bin"])
     assert ["lfs", "pull"] in calls
     assert any("pulled 1 file" in w for w in warns)
 
 
-def test_fetch_default_keeps_skip_smudge(tmp_path, monkeypatch):
-    """Without --allow-lfs, an LFS repo keeps the skip-smudge warning and never
-    pulls (default-safe)."""
+def _fetch_with_lfs_listing(monkeypatch, listing, rc=0):
+    """Stub run_git so `git lfs ls-files` reports `listing` (rc!=0 = query failed)."""
     def fake_git(args, cwd=None, timeout=600):
         if args[0] == "rev-parse":
             return subprocess.CompletedProcess(args, 0, stdout="deadbeef\n", stderr="")
-        if args[:2] == ["lfs", "version"]:
-            return subprocess.CompletedProcess(args, 0, stdout="git-lfs/3", stderr="")
-        if args[0] == "lfs":
+        if args[:2] == ["lfs", "ls-files"]:
+            return subprocess.CompletedProcess(args, rc, stdout=listing, stderr="")
+        if args[:2] == ["lfs", "pull"]:
             pytest.fail("no LFS pull may run without allow_lfs")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-
     monkeypatch.setattr(git_host, "run_git", fake_git)
+
+
+def test_fetch_default_keeps_skip_smudge(tmp_path, monkeypatch):
+    """A repo that DOES track files in LFS keeps the skip-smudge warning and
+    never pulls without --allow-lfs (default-safe)."""
+    _fetch_with_lfs_listing(monkeypatch, "data/big.bin\ndata/other.bin\n")
     res = GitHostFetcher().fetch("https://github.com/user/repo", tmp_path / "src")
-    assert any("skip-smudge" in w for w in res.warnings)
+    assert any("skip-smudge" in w and "2 git-lfs-tracked" in w for w in res.warnings)
+
+
+def test_fetch_says_nothing_when_the_repo_has_no_lfs(tmp_path, monkeypatch):
+    """Regression: the gate used to be `git lfs version`, which only proves the
+    CLI exists on the HOST. Every fetch on an LFS-equipped machine then warned
+    that large files were left unsmudged — even for the common case of a repo
+    with no LFS at all, sending reviewers hunting for data that never existed."""
+    _fetch_with_lfs_listing(monkeypatch, "")          # ls-files ok, no tracked files
+    res = GitHostFetcher().fetch("https://github.com/user/repo", tmp_path / "src")
+    assert not any("lfs" in w.lower() for w in res.warnings), res.warnings
+
+
+def test_fetch_warns_when_lfs_status_is_unknowable(tmp_path, monkeypatch):
+    """If ls-files fails but the repo routes files through the lfs filter, say
+    the data was NOT fetched — never report "nothing to fetch"."""
+    src = tmp_path / "src"
+    src.mkdir(parents=True)
+    (src / ".gitattributes").write_text("*.bin filter=lfs diff=lfs merge=lfs -text\n")
+    _fetch_with_lfs_listing(monkeypatch, "", rc=1)    # query failed
+    res = GitHostFetcher().fetch("https://github.com/user/repo", src)
+    assert any("was NOT fetched" in w for w in res.warnings), res.warnings
+
+
+def test_lfs_size_accounting_failure_is_not_reported_as_no_data(tmp_path, monkeypatch):
+    """A tracked file whose pointer size can't be read must NOT read as "there
+    was nothing to pull" — that told a reviewer the data was absent when the
+    accounting had actually failed."""
+    (tmp_path / "d.bin").write_text("not a pointer at all\n")
+    monkeypatch.setattr(git_host, "run_git", _origin("https://93.184.216.34/r.git"))
+    warns: list[str] = []
+    git_host._pull_lfs(tmp_path, warns, ["d.bin"])
+    assert any("readable pointer size" in w and "NOT pulled" in w for w in warns), warns
