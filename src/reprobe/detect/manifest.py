@@ -158,7 +158,7 @@ def _invalid(rel: str, err: str) -> tuple[DetectResult, dict[str, Any]]:
         artifact_types=[], steps=[], manifest_path=rel, run_plan_source="heuristic",
         notes=[f"manifest present but invalid: {err}; falling back to heuristic detection"],
     )
-    return result, {"environment": {}, "expected_outputs": [], "badges_claimed": [], "data": []}
+    return result, {"environment": {}, "expected_outputs": [], "badges_claimed": [], "data": [], "paper": {}}
 
 
 def load(src_dir: str | Path) -> Optional[tuple[DetectResult, dict[str, Any]]]:
@@ -193,6 +193,7 @@ def load(src_dir: str | Path) -> Optional[tuple[DetectResult, dict[str, Any]]]:
                 "expected_outputs": data.get("expected_outputs", []) or [],
                 "badges_claimed": data.get("badges_claimed", []) or [],
                 "data": data.get("data", []) or [],
+                "paper": data.get("paper", {}) or {},
             }
         except Exception as e:  # a manifest must never abort the run
             return _invalid(rel, _shorten(f"{type(e).__name__}: {e}"))
@@ -207,4 +208,4 @@ def load(src_dir: str | Path) -> Optional[tuple[DetectResult, dict[str, Any]]]:
         artifact_types=[], steps=[], manifest_path=rel, run_plan_source="heuristic",
         notes=[f"found {rel} (CODECHECK); lifting expected outputs, detecting run plan heuristically"],
     )
-    return result, {"expected_outputs": expected, "environment": {}, "badges_claimed": [], "data": []}
+    return result, {"expected_outputs": expected, "environment": {}, "badges_claimed": [], "data": [], "paper": {}}

@@ -175,6 +175,36 @@ def render(r: Report) -> str:
             L.append(f"- {_ml(k)}: {_ml(v)}")
         L.append("")
 
+    rc = r.llm.get("results_check") or {}
+    if rc:
+        L.append("## Results vs the paper (LLM-advisory)")
+        L.append(f"- **Paper:** {_ml(rc.get('ref', '—'))} ({_ml(rc.get('source', '—'))})")
+        if rc.get("coverage"):
+            L.append(f"- **Coverage:** {_ml(rc['coverage'])}")
+        if rc.get("status") != "compared":
+            L.append(f"- _not compared: {_ml(rc.get('detail', rc.get('status', 'unknown')))}_")
+        else:
+            counts = rc.get("counts") or {}
+            L.append("- **Claims:** " + " · ".join(f"{v} {k}" for k, v in sorted(counts.items())))
+            if rc.get("overall"):
+                L.append(f"- **Overall:** {_ml(rc['overall'])}")
+            L.append("")
+            L.append("| Claim | Paper | Reproduced | Verdict |")
+            L.append("|---|---|---|---|")
+            _mark = {"match": "✓ match", "mismatch": "✗ MISMATCH",
+                     "unclear": "? unclear", "not-reported": "– not reported"}
+            for c in rc.get("claims", []):
+                L.append(f"| {_ml(c.get('claim', ''))} | {_ml(c.get('paper_value', '—'))} "
+                         f"| {_ml(c.get('produced_value', '—'))} "
+                         f"| {_mark.get(c.get('verdict'), c.get('verdict', '?'))} |")
+        for w in rc.get("warnings", []) or []:
+            L.append(f"  - ⚠️ {_ml(w)}")
+        L.append("")
+        L.append("*Advisory only: this comparison is produced by a local LLM and is NOT a "
+                 "verified fact. It never grants a badge — confirming that results match the "
+                 "paper remains a human judgement.*")
+        L.append("")
+
     if r.llm.get("summary"):
         L.append("## Summary (LLM-advisory)")
         L.append(f"> {_ml(r.llm['summary'])}")

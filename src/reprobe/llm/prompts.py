@@ -60,3 +60,32 @@ the harness):
 Write a short, plain-language paragraph for the Open Data chair summarizing what
 was checked, what ran, and what was explicitly not verified. Do not invent
 results or change any badge. Return JSON: {{"summary": "..."}}."""
+
+COMPARE_RESULTS = """Compare the numeric claims of a paper against the output an
+artifact actually produced when it was re-run.
+
+Coverage of the paper text available to you: {coverage}
+
+PAPER:
+{paper}
+
+OUTPUT PRODUCED BY RE-RUNNING THE ARTIFACT:
+{produced}
+
+For each quantitative claim in the paper that you can check (means, SDs, test
+statistics such as F/t/chi-square, p-values, effect sizes, Ns), find the matching
+number in the produced output and judge it. Rules you must follow:
+- Compare only numbers that BOTH texts state. If the produced output does not
+  report a claim, its verdict is "not-reported" — never guess or infer it.
+- If you cannot tell whether two numbers refer to the same quantity, use
+  "unclear". Being unsure is a correct answer; inventing a match is not.
+- Small differences from rounding or a different random seed are still "match";
+  say so in "why".
+- Do not judge the paper's wording, quality, or conclusions — only its numbers.
+- If the coverage above says ABSTRACT ONLY, restrict yourself to the few
+  headline numbers an abstract states, and say in "overall" that the full
+  results could not be checked.
+
+Return JSON: {{"claims": [{{"claim": "...", "paper_value": "...",
+"produced_value": "...", "verdict": "match|mismatch|unclear|not-reported",
+"why": "..."}}], "overall": "...", "confidence": 0.0-1.0, "is_advisory": true}}."""

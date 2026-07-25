@@ -22,6 +22,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# Text extraction from a paper PDF committed in a repo, for the advisory
+# results-vs-paper comparison. Optional: without it the DOI path still works and
+# the report says the PDF was not read (never that it matched).
+paper = ["pypdf>=4.0"]
 
 [project.scripts]
 reprobe = "reprobe.cli:main"

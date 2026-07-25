@@ -20,6 +20,15 @@
         "image": { "type": ["string", "null"], "description": "optional pinned image digest to use as-is" }
       }
     },
+    "paper": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The paper whose claims this artifact reproduces. Used for an ADVISORY claim-by-claim comparison against what the re-run produces; it never grants a badge.",
+      "properties": {
+        "doi": { "type": "string", "description": "DOI of the paper, e.g. 10.1145/3613904.3641909" },
+        "pdf": { "type": "string", "description": "path to a PDF of the paper committed in this repository (preferred: full text, no network)" }
+      }
+    },
     "data": {
       "type": "array",
       "items": {

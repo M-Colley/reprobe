@@ -78,6 +78,19 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  </table>
 </div>
 
+{% if r.llm.results_check %}{% set rc = r.llm.results_check %}<div class="card"><b>Results vs the paper</b>
+ <div class="muted">{{ rc.ref }} ({{ rc.source }}){% if rc.coverage %} · {{ rc.coverage }}{% endif %}</div>
+ {% if rc.status != 'compared' %}<div class="muted">not compared: {{ rc.detail or rc.status }}</div>
+ {% else %}
+ {% if rc.overall %}<div class="adv">{{ rc.overall }}</div>{% endif %}
+ <table><tr><th>Claim</th><th>Paper</th><th>Reproduced</th><th>Verdict</th></tr>
+ {% for c in rc.claims %}<tr><td>{{ c.claim }}</td><td>{{ c.paper_value or '—' }}</td>
+  <td>{{ c.produced_value or '—' }}</td><td>{{ c.verdict }}</td></tr>{% endfor %}</table>
+ {% endif %}
+ {% for w in rc.warnings %}<div class="muted">⚠️ {{ w }}</div>{% endfor %}
+ <div class="muted">LLM-advisory, not a verified fact — it never grants a badge; confirming that
+ results match the paper remains a human judgement.</div></div>{% endif %}
+
 {% if r.llm.summary %}<div class="card"><b>Summary</b>
  <div class="adv">{{ r.llm.summary }}<div class="muted">— {{ r.llm.model }}; LLM-advisory, not a verified fact</div></div></div>{% endif %}
 

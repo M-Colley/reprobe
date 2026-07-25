@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — results vs the paper (advisory)
+
+Until now a report could say "the code ran and produced its declared outputs"
+but never touched the question a reviewer actually cares about: *do the numbers
+still match the paper?* That stays a human judgement — but the harness can now
+put the comparison in front of the human instead of making them do it cold.
+
+- **New advisory check: produced results vs the paper's claims.** reprobe locates
+  the paper two ways — a **PDF committed in the repo** (best: full text, no
+  network) or a **DOI** taken from the manifest, `CITATION.cff`, the README or
+  the archival pin. A DOI is resolved through OpenAlex to an open-access full
+  text when one is genuinely downloadable, and to the abstract otherwise. A local
+  LLM then compares claim by claim and the report renders a table of
+  paper value vs reproduced value with a verdict of
+  `match` / `mismatch` / `unclear` / `not-reported`.
+- **It never grants a badge.** `results_reproduced` stays `not-evaluated`
+  whatever the model says — the LLM is told it cannot change decisions, and that
+  stays true. A `mismatch` only adds a line to "what was NOT checked" for the
+  human. Every rendering is labelled advisory.
+- **Coverage is stated, never implied.** The report says whether it compared
+  against full text or *ABSTRACT ONLY*, because paywalled venues advertise an
+  open-access PDF that then refuses automated requests (ACM returns 403), and an
+  abstract states "significantly higher", not `F(1,16)=11.12`. Authors who want
+  this check to be worth anything should commit the paper PDF or set
+  `paper.pdf` in the manifest.
+- **Bounded on every untrusted edge.** Only fixed metadata APIs are queried, with
+  the DOI validated against the registered shape first; an advertised OA link
+  must pass the SSRF guard, download under the byte cap, and actually begin with
+  `%PDF` before it is parsed; PDF reading is capped by bytes, pages and
+  characters and never raises. Paper text and the run's own output are both
+  fenced as untrusted before reaching the model.
+- Manifest gains `paper: {doi, pdf}`; PDF text extraction is the optional extra
+  `pip install 'reprobe[paper]'` — without it the report says the PDF was **not
+  read**, never that it matched.
+
 ## Unreleased — dependency & data provisioning
 
 Real submissions failed for two mundane reasons: a needed R package wasn't in the

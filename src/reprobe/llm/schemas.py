@@ -30,3 +30,27 @@ SUMMARY = {
     "required": ["summary"],
     "properties": {"summary": {"type": "string"}},
 }
+
+# Claim-by-claim comparison of the paper against what the run actually printed.
+# "verdict" is deliberately three-valued: "unclear" is the honest answer whenever
+# the produced output does not report the number at all, and is what the model
+# should reach for instead of guessing.
+RESULTS_CHECK = {
+    "type": "object",
+    "required": ["claims"],
+    "properties": {
+        "claims": {"type": "array", "items": {
+            "type": "object",
+            "required": ["claim", "verdict"],
+            "properties": {
+                "claim": {"type": "string"},
+                "paper_value": {"type": "string"},
+                "produced_value": {"type": "string"},
+                "verdict": {"enum": ["match", "mismatch", "unclear", "not-reported"]},
+                "why": {"type": "string"},
+            }}},
+        "overall": {"type": "string"},
+        "confidence": {"type": "number"},
+        "is_advisory": {"type": "boolean"},
+    },
+}

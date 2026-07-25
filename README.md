@@ -113,6 +113,13 @@ CODECHECK `codecheck.yml` is also read). See
   install (reprobe also auto-detects them, so this is only for overriding).
 - `data: [{path, source, checksum}]` — data files reprobe should download (from
   an http(s) `source`) into the run tree before your analysis runs.
+- `paper: {doi, pdf}` — the paper this artifact reproduces. reprobe compares your
+  produced numbers against its claims and shows a reviewer the differences
+  (advisory only — it never grants a badge). **Committing the PDF is worth far
+  more than the DOI:** paywalled venues refuse automated downloads, leaving only
+  the abstract, which states "significantly higher" rather than `F(1,16)=11.12`.
+  Without a manifest reprobe still looks for a PDF in the repo and a DOI in
+  `CITATION.cff` / the README.
 
 ## Status
 

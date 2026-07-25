@@ -234,7 +234,12 @@ class Orchestrator:
         report.not_verified = sorted(
             {x for r in results for x in r.not_verified} | set(report.not_verified))
 
-        # -- (6) LLM SUMMARY (advisory) --------------------------------- #
+        # -- (6) RESULTS CHECK vs THE PAPER (advisory) ------------------- #
+        if llm_client is not None and ran and results:
+            self._results_check(report, results, srcdir, work, manifest_meta,
+                                fetch_res, llm_client)
+
+        # -- (7) LLM SUMMARY (advisory) --------------------------------- #
         if llm_client is not None:
             summary = llm_roles.summarize(llm_client, report.model_dump(mode="json"))
             if summary:
@@ -352,6 +357,94 @@ class Orchestrator:
         if digest:
             env_plan.resolved_deps_digest = digest
             report.environment["resolved_deps_digest"] = digest
+
+    # ------------------------------------------------------------------ #
+    def _produced_text(self, results: list[RunResult], rundir: Path) -> str:
+        """What the re-run actually reported, as text an LLM can compare against
+        the paper: machine-readable outputs first (a declared .csv/.json/.txt is
+        the author saying "these are my numbers"), then the console output, which
+        for many analyses is where the statistics are actually printed."""
+        from .runners.base import _tail
+
+        parts: list[str] = []
+        budget = 12_000
+        for res in results:
+            for rel in res.expected_met or []:
+                p = rundir / rel
+                if p.suffix.lower() not in (".csv", ".tsv", ".json", ".txt", ".md", ".yml", ".yaml"):
+                    continue
+                try:
+                    if p.is_file() and p.stat().st_size <= 200_000:
+                        body = p.read_text(encoding="utf-8", errors="replace")[:4000]
+                        parts.append(f"--- produced file {rel} ---\n{body}")
+                        budget -= len(body)
+                except OSError:
+                    continue
+            if budget <= 0:
+                break
+        for res in results:
+            tail = _tail(res.log_path, 120)
+            if tail.strip():
+                parts.append(f"--- console output of {res.target} ---\n{tail}")
+        return "\n\n".join(parts)[:12_000]
+
+    def _results_check(self, report: Report, results: list[RunResult], srcdir: Path,
+                       work: Path, manifest_meta: dict[str, Any], fetch_res: FetchResult,
+                       llm_client) -> None:
+        """Advisory comparison of the paper's claims against the run's output.
+
+        Never touches a badge: the SYSTEM prompt tells the model it cannot change
+        a decision, and `results_reproduced` stays "not-evaluated" whatever comes
+        back. This exists so the human confirmer sees the comparison instead of
+        having to do it from scratch."""
+        from . import paper as paper_mod
+
+        rundir = work / "run"
+        try:
+            found = paper_mod.locate(srcdir, work, manifest_meta=manifest_meta,
+                                     pin_value=fetch_res.pin.value or "")
+        except Exception as e:                      # never let this break a run
+            report.llm["results_check"] = {"status": "error",
+                                           "detail": f"{type(e).__name__}: {e}"}
+            return
+        if found is None:
+            report.llm["results_check"] = {
+                "status": "no-paper",
+                "detail": "no paper found to compare against (no PDF in the repo and no DOI "
+                          "in the manifest, CITATION.cff, README, or the archival pin)"}
+            return
+
+        section: dict[str, Any] = {"source": found.source, "ref": found.ref,
+                                   "coverage": found.coverage}
+        if found.warnings:
+            section["warnings"] = found.warnings
+        produced = self._produced_text(results, rundir)
+        if not found.text.strip() or not produced.strip():
+            section["status"] = "not-compared"
+            section["detail"] = ("the paper text could not be read" if not found.text.strip()
+                                 else "the run produced no comparable text output")
+            report.llm["results_check"] = section
+            report.not_verified.append(
+                "numerical results were NOT compared to the paper: " + section["detail"])
+            return
+
+        advice = llm_roles.compare_results(llm_client, paper=found.excerpt(),
+                                           produced=produced, coverage=found.coverage)
+        if advice is None:
+            section["status"] = "not-compared"
+            section["detail"] = "the advisory model returned no usable comparison"
+        else:
+            section["status"] = "compared"
+            section.update(advice)
+            counts: dict[str, int] = {}
+            for c in advice["claims"]:
+                counts[c["verdict"]] = counts.get(c["verdict"], 0) + 1
+            section["counts"] = counts
+            if counts.get("mismatch"):
+                report.not_verified.append(
+                    f"{counts['mismatch']} paper claim(s) look inconsistent with the re-run "
+                    "(LLM-advisory — a human must confirm)")
+        report.llm["results_check"] = section
 
     def _diagnose(self, res: RunResult, llm_client, env_plan: EnvPlan, step,
                   logdir: Path | None = None, image_key: str | None = None) -> None:

@@ -53,7 +53,7 @@ def detect(
         return heuristic, meta
 
     # No manifest: optionally ask the LLM for an alternative ordering (advisory).
-    meta: dict[str, Any] = {"environment": {}, "expected_outputs": [], "badges_claimed": [], "data": []}
+    meta: dict[str, Any] = {"environment": {}, "expected_outputs": [], "badges_claimed": [], "data": [], "paper": {}}
     if use_llm and llm_client is not None and signatures.is_ambiguous(heuristic):
         try:
             from ..llm import roles

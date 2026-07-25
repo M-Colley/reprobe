@@ -1,4 +1,4 @@
-"""The three — and only three — bounded LLM roles. Each validates the response
+"""The four — and only four — bounded LLM roles. Each validates the response
 through the guard and returns plain data (or None). None is always a safe,
 fully-functional fallback.
 """
@@ -91,6 +91,48 @@ def diagnose_failure(client: OllamaClient, *, target: str, kind: str, env: str, 
         obj["is_advisory"] = True
         obj = _gate(obj, client)
     return obj
+
+
+_VALID_VERDICTS = {"match", "mismatch", "unclear", "not-reported"}
+
+
+def compare_results(client: OllamaClient, *, paper: str, produced: str,
+                    coverage: str) -> Optional[dict[str, Any]]:
+    """Claim-by-claim comparison of the paper's numbers against what the re-run
+    actually printed. ADVISORY ONLY: it never grants or changes a badge — the
+    harness's stance is that "results match the paper" is a human judgement, and
+    this only puts the comparison in front of that human.
+
+    Both inputs are untrusted (the paper is author-supplied, the produced text is
+    author-code output), so both are fenced."""
+    # Budgets are small on purpose: the client is single-shot with a ~60s read
+    # timeout against a small local model, so an oversized prompt returns nothing
+    # at all. The caller selects the results-bearing passages (paper.excerpt);
+    # truncating a paper blindly would send its intro, which holds no numbers.
+    prompt = prompts.COMPARE_RESULTS.format(
+        coverage=coverage,
+        paper=prompts.fence(paper[:8000]),
+        produced=prompts.fence(produced[:6000]),
+    )
+    obj = client.generate_json(prompt, system=prompts.SYSTEM)
+    obj = _check(obj, ["claims"])
+    if obj is None or not isinstance(obj.get("claims"), list):
+        return None
+    # Keep only well-formed claims with a verdict from the fixed vocabulary; a
+    # model that invents a verdict must not widen the report's meaning.
+    claims = []
+    for c in obj["claims"]:
+        if not isinstance(c, dict) or not c.get("claim"):
+            continue
+        if c.get("verdict") not in _VALID_VERDICTS:
+            c["verdict"] = "unclear"
+        claims.append(c)
+    if not claims:
+        return None
+    obj["claims"] = claims[:40]
+    obj["is_advisory"] = True
+    obj["coverage"] = coverage
+    return _gate(obj, client)
 
 
 def summarize(client: OllamaClient, report: dict[str, Any]) -> Optional[str]:
