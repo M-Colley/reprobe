@@ -13,13 +13,23 @@ check**. Everything else is fixed.
    - `unity.default_image_version` and the editor tag map (step 3).
 2. **Rebuild base images.** Required whenever the `base_images.*` tags in
    `pins.yaml` changed (a bumped tag exists only once you build it — otherwise
-   every run fails with `image-not-present`). Edit `images/base-py/env.yaml`
-   (and `base-r`) only if the science stack must also move, then:
+   every run fails with `image-not-present`) **or whenever you edit
+   `images/base-*/env.yaml`**.
+
+   > [!IMPORTANT]
+   > **Never republish a tag with different bytes.** If you change an
+   > `env.yaml`, bump `revision` and the `base_images.*` tags in the same edit,
+   > so `2026.1` always means one image. Reusing a tag silently gives two people
+   > different environments under one name and breaks the promise that a stored
+   > report re-runs years later — its recorded digest no longer exists.
+
    ```bash
    bash images/build-images.sh        # re-solves conda-lock, rebuilds, tags 2027.x
    ```
    You must run this manually — no CI rebuilds images yet. `pip install
-   conda-lock` first for reproducible bases.
+   conda-lock` first, then **commit the regenerated
+   `images/base-*/conda-lock.yml`** — that lock, not the tag, is what makes the
+   base reproducible from source.
    On a machine that only *consumes* already-published images (a fresh laptop,
    a helper's PC), skip the build: `reprobe pull` fetches the pinned base
    images and the smoke image in one command. That machine still needs a

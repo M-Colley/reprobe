@@ -51,6 +51,26 @@ keeping the author analysis offline — the network stays in the sanctioned phas
   (Residual: git-lfs still trusts the origin server's batch-API object hrefs —
   run `--allow-lfs` only on repos whose git host you trust.)
 
+- **Base images republished as `2026.2`, and the lock is real now.** The base-r
+  contents changed twice in this cycle while the tag stayed `2026.1`, so one tag
+  named two different images — which breaks the promise that a stored report
+  re-runs years later, since the digest it recorded no longer exists. `revision`
+  is now `2` and the tags are `2026.2`; `2026.1` is left untouched for reports
+  that already reference it. The runbook's rebuild rule now triggers on an
+  `env.yaml` edit (not just a tag change) and requires bumping `revision` in the
+  same edit. Related: `images/base-*/conda-lock.yml` are now actually **solved
+  and committed** — four places claimed "the committed conda-lock.yml is the
+  reproducibility pin" while no lock existed and both Dockerfiles silently fell
+  back to the unpinned `env.yaml`.
+- **Multi-step pipelines can earn the Functional candidate.** Detection
+  broadcasts the manifest's `expected_outputs` onto every step, and a clean step
+  producing none of them was marked `partial` — so a prep step that was never
+  meant to produce the final artifacts failed `all_pass`, denied the Functional
+  candidate and downgraded the verdict. `RunStep` now records whether its outputs
+  were broadcast, and only step-declared outputs can make a step `partial`; a
+  one-step plan still owns the manifest's outputs. Shipped with the guard that
+  makes it safe: a pipeline where every step passes but **no** declared output is
+  produced stays `runs-with-warnings` instead of becoming a green `runs`.
 - **Phase disclosures are actually visible.** `environment.notes` — where the
   dependency-install, dataset-download and runtime-egress disclosures are
   written — was rendered by neither `report.md` nor `report.html`. The
