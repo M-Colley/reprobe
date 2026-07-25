@@ -51,6 +51,26 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def fresh_dir(work: Path, target: Path, stem: str) -> Path:
+    """Remove a previous per-run directory so this run starts from a pristine
+    tree; if Windows file locks defeat rmtree, fall back to a fresh
+    uniquely-named sibling instead of crashing mid-batch.
+
+    Re-running the same submission MUST NOT inherit the last run's files: a stale
+    ``src/`` makes ``git clone`` fail outright ("destination path already exists
+    and is not an empty directory"), and the local fetcher
+    (``copytree(dirs_exist_ok=True)``) would silently merge the old tree into the
+    new one."""
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    if target.exists():
+        for n in range(1, 100):
+            cand = work / f"{stem}-{n}"
+            if not cand.exists():
+                return cand
+    return target
+
+
 class Orchestrator:
     def __init__(self, config: Optional[Config] = None, *, workroot: str | Path = "work"):
         self.config = config or load_config()
@@ -78,10 +98,12 @@ class Orchestrator:
     ) -> Report:
         sid = sid or submission_id(ref)
         work = self.workroot / sid
-        srcdir = work / "src"
         rundir = work / "run"
         outdir = work / "out"
         logdir = work / "logs"
+        # A fetch must land in a pristine tree, so re-running a submission (or a
+        # batch --resume retry) never inherits the previous fetch's files.
+        srcdir = self._fresh_dir(work, work / "src", "src")
         for d in (srcdir, outdir, logdir):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -384,18 +406,11 @@ class Orchestrator:
             prov["llm_confidence_threshold"] = self.config.llm.get("confidence_threshold")
         return prov
 
+    _fresh_dir = staticmethod(fresh_dir)
+
     @staticmethod
     def _fresh_rundir(work: Path, rundir: Path) -> Path:
-        """Remove the previous run copy; if Windows file locks defeat rmtree,
-        fall back to a fresh uniquely-named dir instead of crashing mid-batch."""
-        if rundir.exists():
-            shutil.rmtree(rundir, ignore_errors=True)
-        if rundir.exists():
-            for n in range(1, 100):
-                cand = work / f"run-{n}"
-                if not cand.exists():
-                    return cand
-        return rundir
+        return fresh_dir(work, rundir, "run")
 
     def _write(self, outdir: Path, report: Report) -> None:
         (outdir / "report.json").write_text(
