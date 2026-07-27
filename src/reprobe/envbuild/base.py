@@ -111,7 +111,8 @@ def plan(
     install, dep_warnings = _install_commands(
         env, src, r_needed,
         detected_r_packages=detect_result.r_packages,
-        cran_repo=config.cran_repo)
+        cran_repo=config.cran_repo,
+        executes_code=bool(detect_result.steps))
 
     flags = detect_result.flags
     if ("needs-repo2docker" in flags or builder == "repo2docker") and allow_repo2docker:
@@ -157,7 +158,8 @@ def plan(
 
 def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
                       detected_r_packages: list[str] | tuple[str, ...] = (),
-                      cran_repo: str = "") -> tuple[list[str], list[str]]:
+                      cran_repo: str = "",
+                      executes_code: bool = False) -> tuple[list[str], list[str]]:
     """Returns (commands, warnings). Any declared or detected dependency file
     the pinned-base builder does NOT install must surface as a warning — the
     report says what was not installed (never over-claim)."""
@@ -216,6 +218,21 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
         else:
             warnings.append(f"R packages {cran_pkgs} were declared/detected but no R steps were found; "
                             "they were NOT installed")
+
+    # The silent case, and the most over-claimable one: the artifact declares NO
+    # dependencies anywhere. Every library its code imports then comes from
+    # whatever the harness base image happens to ship, so a clean run proves the
+    # code works *in reprobe's environment* — not that the artifact describes the
+    # environment it needs. Without this the report shows an empty warnings list
+    # and a green step, which reads as "self-contained and reproducible".
+    from ..detect.signatures import DEP_MANIFESTS
+    if executes_code and not any((src / m).is_file() for m in DEP_MANIFESTS):
+        warnings.append(
+            "the artifact declares NO dependency manifest (no requirements.txt, environment.yml, "
+            "renv.lock, pyproject.toml, DESCRIPTION, ...). Every library its code uses came from the "
+            "harness base image, whose contents are reprobe's choice and change between years — so a "
+            "passing step here does NOT show the artifact specifies its own environment, and the same "
+            "code may fail on a different base. This is a reproducibility defect of the artifact.")
 
     # record resolved versions in the install log so two runs are comparable
     if any(c.startswith("pip install") for c in cmds):

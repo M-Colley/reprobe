@@ -38,5 +38,6 @@ fair:
   interoperable:
     prefer_standard_formats: [csv, json, parquet, png, pdf, ipynb]
   reusable:
-    reward_manifest: true
-    reward_open_license: true
+    reward_manifest: true              # .reprobe.yaml — the artifact declares how to run itself
+    reward_open_license: true          # fetcher metadata OR a root LICENSE/COPYING file
+    reward_dependency_manifest: true   # requirements.txt / environment.yml / renv.lock / DESCRIPTION / ...

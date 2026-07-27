@@ -73,7 +73,8 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  <td>{{ s.duration_s }}s</td>
  <td>{% if s.diagnostics.harness_error %}<div class="nv">⚠️ <b>harness error</b> — no statement about the artifact: {{ s.diagnostics.harness_error }}</div>{% endif %}
  {% for c in s.claims %}✓ {{ c }}<br>{% endfor %}{% for c in s.not_verified %}<span class="muted">✗ {{ c }}</span><br>{% endfor %}
- {% if s.diagnostics.llm_advisory %}<div class="adv" style="margin-top:6px">💡 <b>diagnosis (advisory):</b> {{ s.diagnostics.llm_advisory.likely_cause }}{% for f in s.diagnostics.llm_advisory.suggested_fixes %}<br>→ {{ f }}{% endfor %}</div>{% endif %}</td></tr>
+ {% if s.diagnostics.llm_advisory %}<div class="adv" style="margin-top:6px">💡 <b>diagnosis (advisory):</b> {{ s.diagnostics.llm_advisory.likely_cause }}{% for f in s.diagnostics.llm_advisory.suggested_fixes %}<br>→ {{ f }}{% endfor %}</div>{% endif %}
+ {% if s.diagnostics.harness_diagnosis %}<div class="adv" style="margin-top:6px">🔎 <b>diagnosis (deterministic, not an LLM guess):</b> {{ s.diagnostics.harness_diagnosis.likely_cause }}{% for f in s.diagnostics.harness_diagnosis.suggested_fixes %}<br>→ {{ f }}{% endfor %}</div>{% endif %}</td></tr>
  {% else %}<tr><td colspan="5" class="muted">no runnable steps executed</td></tr>{% endfor %}
  </table>
 </div>

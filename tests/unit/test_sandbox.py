@@ -138,6 +138,38 @@ def test_timeout_kills_and_removes_container(monkeypatch, tmp_path):
     assert any(c[:3] == ["docker", "rm", "-f"] for c in calls)
 
 
+def _capture_timeouts(monkeypatch) -> list:
+    """Records the wall-clock timeout actually handed to `docker run`."""
+    seen: list = []
+    def fake_run(argv, **kw):
+        if argv[:2] == ["docker", "run"]:
+            seen.append(kw.get("timeout"))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(docker_exec.subprocess, "run", fake_run)
+    monkeypatch.setattr(docker_exec, "image_present", lambda image: True)
+    return seen
+
+
+def test_requested_timeout_is_clamped_to_the_configured_ceiling(monkeypatch, tmp_path):
+    """Runner proposes, policy disposes — the same rule every other field obeys.
+    Applies to a runner's ContainerSpec and to `reprobe run --timeout` alike."""
+    seen = _capture_timeouts(monkeypatch)
+    limits = {**load_config().limits_for("python"), "timeout_s": 60, "max_timeout_s": 900}
+
+    run_container(ContainerSpec(image="img", command=["echo"], timeout_s=99_999),
+                  limits, tmp_path / "a.log")
+    run_container(ContainerSpec(image="img", command=["echo"], timeout_s=300),
+                  limits, tmp_path / "b.log")
+    assert seen == [900, 300]
+
+
+def test_timeout_ceiling_defaults_to_the_plain_limit_when_unset(monkeypatch, tmp_path):
+    seen = _capture_timeouts(monkeypatch)
+    run_container(ContainerSpec(image="img", command=["echo"], timeout_s=99_999),
+                  {"timeout_s": 120}, tmp_path / "c.log")
+    assert seen == [120]
+
+
 def test_any_exception_kills_and_removes_container(monkeypatch, tmp_path):
     calls = []
     def boom(argv):

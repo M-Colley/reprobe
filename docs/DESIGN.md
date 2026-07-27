@@ -161,7 +161,7 @@ class ContainerSpec:
     env: dict[str, str] = ()      # no secrets unless capabilities().requires_secret is set
     network: str = "none"         # "egress" only honored if capabilities().needs_network
     needs_license: bool = False   # Unity T1/T2 → orchestrator verifies creds present
-    timeout_s: int = 1800
+    timeout_s: int | None = None  # request only; clamped to limits.yaml:max_timeout_s
 
 class RunResult(BaseModel):
     runner: str; target: str

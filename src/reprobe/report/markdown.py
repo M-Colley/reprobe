@@ -159,6 +159,14 @@ def render(r: Report) -> str:
                      f"{_ml(adv.get('likely_cause', ''))}")
             for fix in adv.get("suggested_fixes", []):
                 L.append(f"  - 💡 {_ml(fix)}")
+        hdiag = s.diagnostics.get("harness_diagnosis")
+        if hdiag:
+            # Deliberately labelled differently from the LLM advisory: this one is
+            # a fact about the run, not a guess about its cause.
+            L.append(f"- **Harness diagnosis** _(deterministic, not an LLM guess)_: "
+                     f"{_ml(hdiag.get('likely_cause', ''))}")
+            for fix in hdiag.get("suggested_fixes", []):
+                L.append(f"  - 💡 {_ml(fix)}")
         if s.diagnostics.get("log_tail"):
             tail = str(s.diagnostics["log_tail"]).splitlines()[-15:]
             fence = _fence("\n".join(tail))   # author stdout must not close the fence

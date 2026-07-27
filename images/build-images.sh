@@ -30,9 +30,33 @@ solve_lock() {  # $1 = images/base-xx dir
   if command -v conda-lock >/dev/null 2>&1; then
     echo ">> solving lock for $dir"
     conda-lock lock -f "$dir/env.yaml" -p linux-64 --lockfile "$dir/conda-lock.yml" || \
-      echo "!! conda-lock failed; image will install from env.yaml (less reproducible)"
+      echo "!! conda-lock failed"
   else
-    echo "!! conda-lock not installed; image will install from env.yaml. (pip install conda-lock for reproducible bases)"
+    echo "!! conda-lock not installed. (pip install conda-lock for reproducible bases)"
+  fi
+  # The Dockerfile PREFERS conda-lock.yml over env.yaml, so a lock left behind
+  # from an earlier solve silently wins over a freshly edited env.yaml — you get
+  # an image missing the package you just added, tagged as if it had it. Refuse
+  # to build on a lock that does not cover every declared dependency.
+  if [ -f "$dir/conda-lock.yml" ]; then
+    python - "$dir" <<'PY' || exit 1
+import sys, pathlib, re, yaml
+d = pathlib.Path(sys.argv[1])
+env = yaml.safe_load((d / "env.yaml").read_text(encoding="utf-8")) or {}
+# Top-level conda deps only: skip the nested {"pip": [...]} mapping, and strip
+# any version constraint ("python=3.13" -> "python").
+declared = {re.split(r"[=<>!~ ]", str(x), maxsplit=1)[0].strip().lower()
+            for x in env.get("dependencies", []) if isinstance(x, str)}
+lock = yaml.safe_load((d / "conda-lock.yml").read_text(encoding="utf-8")) or {}
+locked = {str(p.get("name", "")).lower() for p in (lock.get("package") or [])}
+missing = sorted(declared - locked)
+if missing:
+    sys.exit(f"!! {d}/conda-lock.yml is STALE — it does not contain {missing}.\n"
+             f"!! The Dockerfile PREFERS the lock, so it would build without them and\n"
+             f"!! tag the image as if they were there.\n"
+             f"!! Install conda-lock and re-run, or delete {d}/conda-lock.yml to build from env.yaml.")
+print(f">> lock for {d} covers all {len(declared)} declared dependencies")
+PY
   fi
 }
 

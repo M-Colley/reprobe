@@ -75,6 +75,23 @@ check**. Everything else is fixed.
   Sort the dashboard by verdict; triage anything flagged `no-checksum`,
   `anonymized`, or `warnings`. `badges.csv` is the flat per-submission export
   for reconciling against the PCS/EasyChair spreadsheet.
+- **A step reported `timeout`?** Notebooks get 90 min by default (`limits.yaml`
+  `per_runner.jupyter`); hyperparameter search plus SHAP over a real dataset can
+  exceed that. Re-run that submission with a bigger budget:
+  ```bash
+  reprobe run <url> --timeout 10800
+  ```
+  The ceiling is `limits.yaml:max_timeout_s` (6 h) — raise that if you genuinely
+  need more, since it is policy. The report records any non-default budget,
+  because a run with one is not comparable to a default run. Before reaching for
+  more time, check the collected `*.executed.ipynb` under `out/artifacts/`: it is
+  checkpointed cell by cell, so the last completed cell is the stall point, and
+  a notebook stuck on a network call will never finish under `--network none`.
+- **A report warns the artifact declares NO dependency manifest.** That is a
+  finding about the artifact, not a harness problem: with nothing declared, every
+  library its code imports came from reprobe's base image, so a passing step does
+  not show the artifact specifies its own environment. Worth raising with authors
+  even when every step is green.
 - **Interrupted batch?** Re-run with `--resume`: finished reports are reused
   as-is; only `fetch-failed` / `infra-error` submissions are retried.
 - **Author reply:** every `report.md` ends its badge section with a

@@ -34,11 +34,18 @@ class JupyterRunner(BaseRunner):
         # --cwd makes papermill run the kernel in the notebook's own directory,
         # matching nbconvert's default — the verdict must not flip on which tool
         # the image happens to contain. HOME/caches: see python_script.py.
+        #
+        # --log-output is what makes a timeout diagnosable. papermill defaults to
+        # --no-log-output, so a notebook that hangs for the whole budget emits a
+        # single line ("Executing notebook with kernel: python3") and the log tail
+        # cannot say which cell stalled. With it, papermill logs an
+        # "Executing Cell N---" boundary per cell and streams cell output, so the
+        # tail names the culprit. Logging only; it cannot change the exit code.
         cmd = (
             "export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache MPLCONFIGDIR=/tmp; "
             "export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; "
             f"if command -v papermill >/dev/null 2>&1; then "
-            f"papermill --no-progress-bar --cwd {_q(nbdir)} {_q(t)} {_q(out)}; "
+            f"papermill --no-progress-bar --log-output --cwd {_q(nbdir)} {_q(t)} {_q(out)}; "
             f"else jupyter nbconvert --to notebook --execute --output {_q(stem + '.executed')} {_q(t)}; fi"
         )
         return ["bash", "-c", cmd]

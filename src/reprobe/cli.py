@@ -53,6 +53,9 @@ def run(
     allow_repo2docker: bool = typer.Option(False, "--allow-repo2docker", help="permit repo2docker fallback build"),
     allow_net: Optional[list[str]] = typer.Option(None, "--allow-net", help="permit runtime egress (downgrades badge confidence)"),
     allow_lfs: bool = typer.Option(False, "--allow-lfs", help="pull git-lfs data during fetch (hardened, off by default)"),
+    timeout: Optional[int] = typer.Option(None, "--timeout", min=1,
+                                          help="per-step wall-clock budget in seconds; overrides the "
+                                               "config default, clamped to limits.yaml:max_timeout_s"),
     dry_run: bool = typer.Option(False, "--dry-run", help="build argv but do not launch containers"),
 ):
     """Fetch, detect, run (sandboxed), and report on a single artifact."""
@@ -60,7 +63,7 @@ def run(
     report = orch.run(
         ref, do_run=not no_run, functional=not no_functional, use_llm=not no_llm,
         allow_repo2docker=allow_repo2docker, allow_net=allow_net, allow_lfs=allow_lfs,
-        install=not no_install, dry_run=dry_run,
+        install=not no_install, dry_run=dry_run, timeout_s=timeout,
     )
     _print_report_summary(report, Path(workroot) / report.submission_id / "out")
 

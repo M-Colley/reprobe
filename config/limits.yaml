@@ -10,6 +10,11 @@ defaults:
   memory: "8g"                  # also caps memory-swap to the same value (no swap blowout)
   pids: 512
   timeout_s: 1800               # host-side hard timeout; container is docker-killed on expiry
+  # Ceiling for `reprobe run --timeout N`. The CLI may raise timeout_s up to this
+  # value and no further, so the wall-clock envelope stays policy (this file) even
+  # though the operator can pick a budget per submission. Also clamps a runner's
+  # ContainerSpec request, which is otherwise author/plugin-influenced.
+  max_timeout_s: 21600          # 6h
   tmpfs_size: "512m"            # /tmp mounted noexec,nosuid
   nofile: 4096
   nproc: 512
@@ -24,6 +29,15 @@ per_runner:
   unity:
     timeout_s: 2100
     memory: "12g"
+  # Hyperparameter search + SHAP over a real dataset routinely runs past 30 min:
+  # observed CatBoost/XGBoost/RF notebooks land in the 20-60 min range, so the
+  # old 1800s default was killing science that was working. Raise the notebook
+  # runners specifically rather than the global default — a plain script that
+  # runs for an hour is far more often a hang than a legitimate fit.
+  jupyter:
+    timeout_s: 5400             # 90 min
+  rmarkdown:
+    timeout_s: 5400
 
 # Per-submission egress allowlist — DECLARED BUT NOT YET ENFORCED; do not rely
 # on it. docker_exec never reads this list (`--allow-net` grants full egress

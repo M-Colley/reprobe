@@ -264,7 +264,12 @@ def run_container(
         return RawRunOutput(exit_code=None, duration_s=0.0, image=spec.image,
                             argv_redacted=redacted, log_path=str(log_path), error=msg)
 
-    timeout_s = int(spec.timeout_s or limits.get("timeout_s", 1800))
+    # Runner proposes, policy disposes — same rule as every other field. The spec's
+    # request is clamped to the configured ceiling so neither a runner plugin nor a
+    # CLI override can widen the wall-clock envelope beyond limits.yaml.
+    default_timeout = int(limits.get("timeout_s", 1800))
+    ceiling = int(limits.get("max_timeout_s") or default_timeout)
+    timeout_s = max(1, min(int(spec.timeout_s or default_timeout), ceiling))
     start = time.monotonic()
     timed_out = False
     with log_path.open("w", encoding="utf-8", errors="replace") as log:

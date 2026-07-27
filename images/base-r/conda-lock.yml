@@ -620,17 +620,17 @@ package:
   category: main
   optional: false
 - name: lerc
-  version: 4.1.0
+  version: 4.2.0
   manager: conda
   platform: linux-64
   dependencies:
     __glibc: '>=2.17,<3.0.a0'
     libgcc: '>=14'
     libstdcxx: '>=14'
-  url: https://conda.anaconda.org/conda-forge/linux-64/lerc-4.1.0-hdb68285_0.conda
+  url: https://conda.anaconda.org/conda-forge/linux-64/lerc-4.2.0-hdb68285_0.conda
   hash:
-    md5: a752488c68f2e7c456bcbd8f16eec275
-    sha256: f84cb54782f7e9cea95e810ea8fef186e0652d0fa73d3009914fa2c1262594e1
+    md5: fb9d356b1a57d6d54768be7ebd5fce09
+    sha256: bf9fdebf55d8bc99d83531cdffda00703f4dc5f93a1a956768c147362c72feda
   category: main
   optional: false
 - name: libblas
@@ -1090,17 +1090,18 @@ package:
   category: main
   optional: false
 - name: libsqlite
-  version: 3.53.3
+  version: 3.53.4
   manager: conda
   platform: linux-64
   dependencies:
     __glibc: '>=2.17,<3.0.a0'
+    icu: '>=78.3,<79.0a0'
     libgcc: '>=14'
     libzlib: '>=1.3.2,<2.0a0'
-  url: https://conda.anaconda.org/conda-forge/linux-64/libsqlite-3.53.3-h0c1763c_0.conda
+  url: https://conda.anaconda.org/conda-forge/linux-64/libsqlite-3.53.4-hf4e2dac_0.conda
   hash:
-    md5: 4aed8e657e9ff156bdbe849b4df44389
-    sha256: 365376f4815e5e80def2b3462a2419708b7c292da0da85278386c2618621fff4
+    md5: df088a279cd5e6fd2790b4c196434da1
+    sha256: 72023efc207fe681e26b65fc9d668062cf0b4f0eacf3431e6eb099b95c1f2efd
   category: main
   optional: false
 - name: libssh2
@@ -1369,14 +1370,14 @@ package:
   category: main
   optional: false
 - name: pandoc
-  version: '3.10'
+  version: 3.10.1
   manager: conda
   platform: linux-64
   dependencies: {}
-  url: https://conda.anaconda.org/conda-forge/linux-64/pandoc-3.10-ha770c72_0.conda
+  url: https://conda.anaconda.org/conda-forge/linux-64/pandoc-3.10.1-ha770c72_0.conda
   hash:
-    md5: a4b80dd6e9e0784ba48e6803bef1e17a
-    sha256: 2f17a165a04833bd249215336b00df912bad7f03ae445a36765b47593df34057
+    md5: 2e6769cee7eb33dc5780994f816305e6
+    sha256: 997210def3d20be889988d3e461317edc0f0a7bc665f89fd3407d91c171b8783
   category: main
   optional: false
 - name: pango
@@ -2665,17 +2666,17 @@ package:
   category: main
   optional: false
 - name: r-ggcorrplot
-  version: 0.2.0
+  version: 0.3.0
   manager: conda
   platform: linux-64
   dependencies:
     r-base: '>=4.4,<4.5.0a0'
     r-ggplot2: ''
     r-reshape2: ''
-  url: https://conda.anaconda.org/conda-forge/noarch/r-ggcorrplot-0.2.0-r44hc72bb7e_0.conda
+  url: https://conda.anaconda.org/conda-forge/noarch/r-ggcorrplot-0.3.0-r44hc72bb7e_0.conda
   hash:
-    md5: e41a73223cce168d35fba9f617f3345d
-    sha256: 0d42f8f95bdd6107c4cee2e4dc28f61df57d632c5bb941f79cc2ad2d6eea16b2
+    md5: 231b8154cb7d508479fce1d0303796e3
+    sha256: 472718cbee3521a5a356e398166b08e82b85a8e4058fc93c62689de7dc4b9b1a
   category: main
   optional: false
 - name: r-ggplot2
@@ -4267,7 +4268,7 @@ package:
   category: main
   optional: false
 - name: r-rcpparmadillo
-  version: 15.4.0_1
+  version: 15.4.2_1
   manager: conda
   platform: linux-64
   dependencies:
@@ -4279,10 +4280,10 @@ package:
     libstdcxx: '>=14'
     r-base: '>=4.4,<4.5.0a0'
     r-rcpp: '>=0.11.0'
-  url: https://conda.anaconda.org/conda-forge/linux-64/r-rcpparmadillo-15.4.0_1-r44h3704496_0.conda
+  url: https://conda.anaconda.org/conda-forge/linux-64/r-rcpparmadillo-15.4.2_1-r44h3704496_0.conda
   hash:
-    md5: a0463270933156d74bb829c86188217a
-    sha256: e42a84d4e47f68277c7dc3af2749ffa9bafe112b88722a1af42560ec96a9acc5
+    md5: b2a0c8a877b9432de3ccc6bee067dfb5
+    sha256: b088fb8431cd020efe9cdcd5d8121dca87c33ff6025943e98f55ca96fa80243d
   category: main
   optional: false
 - name: r-rcppeigen

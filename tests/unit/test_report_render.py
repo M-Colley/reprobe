@@ -30,6 +30,26 @@ def test_markdown_html_render():
     assert "<html" in h and "Available" in h
 
 
+def test_deterministic_diagnosis_renders_and_is_not_labelled_as_the_llm():
+    """A timeout with no console output gets a harness-authored diagnosis. Both
+    renderers must show it AND distinguish it from the LLM advisory — the whole
+    point is that this one is not a guess."""
+    from reprobe.orchestrator import _no_log_diagnosis
+
+    step = RunResult(runner="jupyter", target="slow.ipynb", status="timeout",
+                     duration_s=5400.0, diagnostics={"timeout_s": 5400})
+    step.diagnostics["harness_diagnosis"] = _no_log_diagnosis(step)
+    r = _report()
+    r.steps = [step]
+
+    md_out, h = markdown.render(r), html.render(r)
+    for out in (md_out, h):
+        assert "not an LLM guess" in out
+        assert "--timeout 10800" in out          # doubled from the 5400s that expired
+    assert "Harness diagnosis" in md_out
+    assert "LLM diagnosis" not in md_out
+
+
 def test_dashboard_render():
     out = dashboard.render([_report().model_dump(mode="json")])
     assert "batch" in out and "sub-1" in out

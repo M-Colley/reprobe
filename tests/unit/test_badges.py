@@ -221,10 +221,22 @@ def test_fair_interoperable_scores_declared_formats():
     assert _decide(_zenodo(), [], detect=detect_odd)["fair"]["interoperable"] == "no"
 
 
-def test_fair_reusable_rewards_manifest_and_license():
-    detect = DetectResult(artifact_types=["python"], manifest_path="reproduce.yaml")
-    assert _decide(_zenodo(metadata={"license": "MIT"}), [], detect=detect)["fair"]["reusable"] == "yes"
-    assert _decide(_zenodo(), [], detect=detect)["fair"]["reusable"] == "partial"
+def test_fair_reusable_rewards_manifest_license_and_dependencies():
+    full = DetectResult(artifact_types=["python"], manifest_path="reproduce.yaml",
+                        dep_manifest="requirements.txt")
+    assert _decide(_zenodo(metadata={"license": "MIT"}), [], detect=full)["fair"]["reusable"] == "yes"
+    assert _decide(_zenodo(), [], detect=full)["fair"]["reusable"] == "partial"
+    # code you cannot rebuild an environment for is not fully reusable
+    no_deps = DetectResult(artifact_types=["python"], manifest_path="reproduce.yaml")
+    assert _decide(_zenodo(metadata={"license": "MIT"}), [], detect=no_deps)["fair"]["reusable"] == "partial"
+
+
+def test_fair_reusable_counts_a_license_file_when_the_fetcher_reports_none():
+    """`git clone` returns no repository metadata, so scoring on meta['license']
+    alone marked every git-sourced artifact unlicensed even with a LICENSE file."""
+    detect = DetectResult(artifact_types=["python"], manifest_path="reproduce.yaml",
+                          dep_manifest="requirements.txt", license_file="LICENSE")
+    assert _decide(_zenodo(metadata={}), [], detect=detect)["fair"]["reusable"] == "yes"
 
 
 # --- report renderers (regressions for the report/ subsystem live here) -- #

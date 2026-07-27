@@ -1,5 +1,6 @@
 import types
 
+from reprobe.config import load_config
 from reprobe.llm import prompts, roles
 from reprobe.llm.client import OllamaClient, from_config, _model_in_tags, _normalize_tag
 from reprobe.llm.guard import is_clean, sanitize
@@ -117,6 +118,65 @@ def test_diagnose_failure_gates_on_confidence_threshold():
     assert lo["meets_threshold"] is False
     assert lo["confidence_threshold"] == 0.6
     assert "never applied" in lo["threshold_note"]
+
+
+def test_empty_log_never_reaches_the_model(tmp_path):
+    """Asked to explain nothing, a small model narrates the absence, quotes the
+    harness's own untrusted-data fences back into the report, and invents fixes.
+    A timeout that wrote no output must get a deterministic note instead."""
+    from reprobe.models import EnvPlan, RunResult, RunStep
+    from reprobe.orchestrator import Orchestrator
+
+    called = []
+    client = _FakeClient({"likely_cause": "should never be produced",
+                          "suggested_fixes": [], "confidence": 0.9})
+    orig_generate = client.generate_json
+    client.generate_json = lambda *a, **k: (called.append(1), orig_generate(*a, **k))[1]
+
+    res = RunResult(runner="jupyter", target="slow.ipynb", status="timeout",
+                    diagnostics={"timeout_s": 1800, "log_tail": "   \n"})
+    Orchestrator(config=load_config(), workroot=str(tmp_path))._diagnose(
+        res, client, EnvPlan(image="img"), RunStep(target="slow.ipynb", kind="jupyter"))
+
+    assert not called, "the diagnoser was asked to explain an empty log"
+    assert "llm_advisory" not in res.diagnostics
+    diag = res.diagnostics["harness_diagnosis"]
+    assert "not an LLM guess" in diag["source"]
+    assert "1800s" in diag["likely_cause"]
+    assert any("--timeout 3600" in f for f in diag["suggested_fixes"])
+
+
+def test_harness_error_suppresses_the_deterministic_note(tmp_path):
+    """An image-not-present error already says exactly why nothing ran; a second
+    note repeating "no console output" would add noise, not information."""
+    from reprobe.models import EnvPlan, RunResult, RunStep
+    from reprobe.orchestrator import Orchestrator
+
+    res = RunResult(runner="python", target="a.py", status="error",
+                    diagnostics={"harness_error": "image-not-present: img"})
+    Orchestrator(config=load_config(), workroot=str(tmp_path))._diagnose(
+        res, _FakeClient({}), EnvPlan(image="img"), RunStep(target="a.py", kind="python"))
+    assert "harness_diagnosis" not in res.diagnostics
+
+
+def test_partial_step_is_diagnosed_from_its_real_log(tmp_path):
+    """Runners record a tail only for statuses they call failures, but a
+    "partial" step (ran clean, produced nothing declared) did print things — read
+    the log rather than treating it as silent."""
+    from reprobe.models import EnvPlan, RunResult, RunStep
+    from reprobe.orchestrator import Orchestrator
+
+    log = tmp_path / "step.log"
+    log.write_text("wrote 0 rows to results/\n", encoding="utf-8")
+    client = _FakeClient({"likely_cause": "no rows", "suggested_fixes": ["check filter"],
+                          "confidence": 0.9})
+    res = RunResult(runner="python", target="a.py", status="partial", log_path=str(log))
+    Orchestrator(config=load_config(), workroot=str(tmp_path))._diagnose(
+        res, client, EnvPlan(image="img"), RunStep(target="a.py", kind="python"))
+
+    assert "harness_diagnosis" not in res.diagnostics
+    assert res.diagnostics["llm_advisory"]["likely_cause"] == "no rows"
+    assert "wrote 0 rows" in client.prompt
 
 
 def test_diagnose_failure_fences_log_tail():

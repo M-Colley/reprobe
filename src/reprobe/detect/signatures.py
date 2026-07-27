@@ -27,6 +27,23 @@ _ENTRY_PY_RE = re.compile(r"^(main|run|analysis|analyze|pipeline|reproduce|train
 _ENTRY_R_RE = re.compile(r"^(main|run|analy|reproduce)", re.I)
 _SCRIPT_DIRS = {"scripts", "script", "code", "src", "analysis", "analyses", "bin", "r"}
 
+# Any file here counts as the artifact declaring *something* about its
+# dependencies. Presence is all that is checked — reprobe installs only a few of
+# them; the point is to tell "declared, and we skipped it" (which the env planner
+# warns about per-file) apart from "declared nothing at all". Shared with
+# envbuild so the two never drift.
+DEP_MANIFESTS = (
+    "requirements.txt", "requirements.in", "Pipfile", "Pipfile.lock",
+    "pyproject.toml", "setup.py", "setup.cfg", "poetry.lock", "uv.lock",
+    "environment.yml", "environment.yaml", "conda-lock.yml",
+    "binder/environment.yml", "binder/requirements.txt",
+    "renv.lock", "install.R", "DESCRIPTION",
+)
+
+# Root-level license filenames, matched case-insensitively on the stem so
+# LICENSE, License.md, LICENCE.txt and COPYING all count.
+_LICENSE_STEMS = {"license", "licence", "copying", "copyright"}
+
 # --------------------------------------------------------------------------- #
 # R dependency discovery (static, no execution). We parse library()/require()/
 # requireNamespace()/pkg:: usages out of R sources + DESCRIPTION Imports/Depends
@@ -259,13 +276,43 @@ def _readme_text(root: Path) -> str:
     return ""
 
 
+# Pipeline-stage hints, used ONLY to break ties the author left unordered.
+# Word-boundary anchored so "cleanup_utils" matches but "unclean" does not.
+_STAGE_EARLY_RE = re.compile(
+    r"(?:^|[_\-. ])(?:prep|prepare|preprocess|preprocessing|preproc|clean|cleaning|"
+    r"load|loader|download|fetch|ingest|import|extract|setup|build_dataset)(?:[_\-. ]|$)",
+    re.IGNORECASE)
+_STAGE_LATE_RE = re.compile(
+    r"(?:^|[_\-. ])(?:analyse|analyze|analysis|aggregate|aggregated|combine|combined|"
+    r"consensus|summar(?:y|ise|ize|ised|ized)|compare|comparison|report|plot|plots|"
+    r"figure|figures|visuali[sz]e|visuali[sz]ation)(?:[_\-. ]|$)",
+    re.IGNORECASE)
+
+
+def _stage_rank(name: str) -> int:
+    """0 = data prep, 1 = unclassified, 2 = downstream aggregation/reporting.
+
+    A repo whose files carry no numeric prefix and whose README does not order
+    them falls back to alphabetical, which silently puts an aggregator first when
+    its name sorts early (`analyse_combined_*.ipynb` before `PDRA_*.ipynb`). That
+    is worse than cosmetic: the aggregator then reads the *committed* outputs of
+    steps that have not re-run yet, so it can pass on stale data and turn a
+    broken pipeline green. Ranking by name is a guess, so it ranks BELOW both the
+    numeric prefix and README order — it only decides otherwise-arbitrary ties."""
+    if _STAGE_LATE_RE.search(name):
+        return 2
+    if _STAGE_EARLY_RE.search(name):
+        return 0
+    return 1
+
+
 def _order_key(path: Path, root: Path, readme: str):
     name = path.name
     nums = _NUM_RE.search(name)
     num = int(nums.group(1)) if nums else 9999
     idx = readme.find(name)
     readme_idx = idx if idx >= 0 else 9999
-    return (num, readme_idx, str(path.relative_to(root)).lower())
+    return (num, readme_idx, _stage_rank(path.stem), str(path.relative_to(root)).lower())
 
 
 def _entry_shallow(p: Path, root: Path) -> bool:
@@ -323,6 +370,20 @@ def scan(src_dir: str | Path) -> DetectResult:
 
     if len(files) >= _MAX_SCAN_FILES:
         notes.append(f"file scan stopped at {_MAX_SCAN_FILES} files; detection is best-effort on this deposit")
+
+    # Say so when the run order is a pure guess. Multi-step pipelines are order-
+    # sensitive in a way that does not announce itself: a downstream step run too
+    # early silently consumes the committed outputs of steps that have not re-run,
+    # so it can pass on stale data. A reviewer must be told the order was inferred.
+    ordered = notebooks + rmds
+    if len(ordered) > 1 and not any(_NUM_RE.search(p.name) for p in ordered) \
+            and not any(p.name in readme for p in ordered):
+        notes.append(
+            "run order is inferred, not declared: no numeric filename prefixes and the README does not "
+            "reference these files by name. Names that look downstream (analyse/combine/summary/"
+            "compare/plot) were moved last; everything else is alphabetical. If the real order differs, "
+            "declare `steps:` in .reprobe.yaml — a mis-ordered aggregation step can read stale committed "
+            "outputs and pass.")
 
     if notebooks:
         types.append("jupyter")
@@ -396,10 +457,23 @@ def scan(src_dir: str | Path) -> DetectResult:
                    if p.suffix.lower() in (".r", ".rmd", ".ipynb") or p.name == "DESCRIPTION"]
     r_packages = scan_r_packages(r_pkg_files)
 
+    # FAIR inputs that were previously only reachable via fetcher metadata. Most
+    # fetchers (git clone in particular) return no license field at all, so a repo
+    # shipping a plain LICENSE file scored as if it had none.
+    try:
+        root_entries = sorted(root.iterdir())
+    except OSError:
+        root_entries = []
+    license_file = next((rel(p) for p in root_entries
+                         if p.is_file() and p.stem.lower() in _LICENSE_STEMS), None)
+    dep_manifest = next((m for m in DEP_MANIFESTS if (root / m).is_file()), None)
+
     return DetectResult(
         artifact_types=sorted(set(types) | set(inventory)),
         inventory=inventory,
         steps=steps,
+        license_file=license_file,
+        dep_manifest=dep_manifest,
         run_plan_source="heuristic",
         flags=sorted(set(flags)),
         notes=notes,

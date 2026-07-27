@@ -34,6 +34,53 @@ def test_heuristic_orders_notebooks_numerically(tmp_path):
     assert [s.target for s in res.steps] == ["01_first.ipynb", "02_second.ipynb"]
 
 
+def test_downstream_notebook_runs_after_the_steps_it_aggregates(tmp_path):
+    """Alphabetical order put `analyse_combined_*` first, so the aggregator read
+    the *committed* outputs of models that had not re-run yet — a stale pass.
+    Regression for PDRA_XAI_OS (2026-07)."""
+    for name in ("analyse_combined_feature_ranking.ipynb", "PDRA_CatBoost.ipynb",
+                 "PDRA_RF.ipynb", "PDRA_XGBoost.ipynb"):
+        (tmp_path / name).write_text("{}")
+    (tmp_path / "README.md").write_text("no file names here")
+    res = signatures.scan(tmp_path)
+    assert [s.target for s in res.steps][-1] == "analyse_combined_feature_ranking.ipynb"
+    assert any("run order is inferred" in n for n in res.notes)
+
+
+def test_numeric_prefix_still_outranks_the_stage_guess(tmp_path):
+    """The name heuristic must only break ties the author left unordered."""
+    (tmp_path / "01_analysis.ipynb").write_text("{}")
+    (tmp_path / "02_cleanup.ipynb").write_text("{}")
+    (tmp_path / "README.md").write_text("")
+    res = signatures.scan(tmp_path)
+    assert [s.target for s in res.steps] == ["01_analysis.ipynb", "02_cleanup.ipynb"]
+    # order was declared numerically, so no "inferred order" warning
+    assert not any("run order is inferred" in n for n in res.notes)
+
+
+def test_readme_order_outranks_the_stage_guess(tmp_path):
+    (tmp_path / "summary.ipynb").write_text("{}")
+    (tmp_path / "model.ipynb").write_text("{}")
+    (tmp_path / "README.md").write_text("First run summary.ipynb, then model.ipynb.")
+    res = signatures.scan(tmp_path)
+    assert [s.target for s in res.steps] == ["summary.ipynb", "model.ipynb"]
+
+
+def test_root_license_and_dependency_manifest_are_detected(tmp_path):
+    (tmp_path / "nb.ipynb").write_text("{}")
+    (tmp_path / "LICENSE").write_text("CC-BY-4.0")
+    (tmp_path / "requirements.txt").write_text("pandas\n")
+    res = signatures.scan(tmp_path)
+    assert res.license_file == "LICENSE"
+    assert res.dep_manifest == "requirements.txt"
+
+
+def test_missing_license_and_dependency_manifest_are_none(tmp_path):
+    (tmp_path / "nb.ipynb").write_text("{}")
+    res = signatures.scan(tmp_path)
+    assert res.license_file is None and res.dep_manifest is None
+
+
 def test_unity_structural_detection(tmp_path):
     (tmp_path / "Assets").mkdir()
     ps = tmp_path / "ProjectSettings"
@@ -163,6 +210,32 @@ def test_declared_missing_dependency_file_warns(tmp_path):
     det = DetectResult(artifact_types=["python"])
     p = plan_env(det, {"environment": {"dependencies": "requirments.txt"}}, _cfg(), tmp_path)
     assert any("does not exist" in w for w in p.warnings)
+
+
+def test_no_dependency_manifest_at_all_is_warned(tmp_path):
+    """The silent over-claim: with nothing declared, every import comes from the
+    harness base image, so a green step says nothing about the artifact."""
+    (tmp_path / "nb.ipynb").write_text("{}")
+    det = signatures.scan(tmp_path)
+    p = plan_env(det, {}, _cfg(), tmp_path)
+    assert any("declares NO dependency manifest" in w for w in p.warnings)
+
+
+def test_declared_dependencies_suppress_the_no_manifest_warning(tmp_path):
+    (tmp_path / "nb.ipynb").write_text("{}")
+    (tmp_path / "requirements.txt").write_text("pandas\n")
+    det = signatures.scan(tmp_path)
+    p = plan_env(det, {}, _cfg(), tmp_path)
+    assert not any("declares NO dependency manifest" in w for w in p.warnings)
+
+
+def test_no_manifest_warning_needs_runnable_code(tmp_path):
+    """A data-only deposit has no code, so it cannot be blamed for not pinning
+    an environment it never uses."""
+    (tmp_path / "data.csv").write_text("a,b\n1,2\n")
+    det = signatures.scan(tmp_path)
+    p = plan_env(det, {}, _cfg(), tmp_path)
+    assert not any("declares NO dependency manifest" in w for w in p.warnings)
 
 
 def test_builder_repo2docker_request_warns_without_flag(tmp_path):

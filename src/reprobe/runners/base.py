@@ -136,10 +136,18 @@ class BaseRunner:
                 not_verified=list(caps.cannot_verify),
             )
         if raw.timed_out:
+            # A timeout is evidence, not a void. Keep the same two things a
+            # failure keeps: the log tail (which cell was running) and whatever
+            # the partial run wrote — papermill/knitr checkpoint their output
+            # after every cell, so the half-executed notebook shows exactly how
+            # far it got. Reporting neither makes a timeout indistinguishable
+            # from a harness bug, and leaves the diagnoser nothing to work with.
             return RunResult(
                 runner=self.id, target=ctx.step.target, status="timeout",
                 exit_code=raw.exit_code, duration_s=raw.duration_s, log_path=raw.log_path,
-                diagnostics={"timeout_s": ctx.limits.get("timeout_s")},
+                artifacts=self._produced(ctx),
+                diagnostics={"timeout_s": ctx.limits.get("timeout_s"),
+                             "log_tail": _tail(raw.log_path)},
                 not_verified=list(caps.cannot_verify),
             )
         if raw.exit_code in (125, 126, 127):

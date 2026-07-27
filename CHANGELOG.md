@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased — stop blaming the artifact for the harness's gaps
+
+Findings from a real submission (`PDRA_XAI_OS`, 2026-07): of five notebooks, two
+were failed for a package the *base image* lacked, one was killed by a budget
+tuned for scripts rather than model fitting, and the one that passed was reported
+without mentioning that everything it imported came from reprobe rather than from
+the artifact. Every item below comes from that run.
+
+- **The base image can now read the formats the detector advertises.** `base-py`
+  gains `pyarrow`, `openpyxl`, `xlrd`, `pytables`, `netcdf4` and `pyreadstat`.
+  `detect/signatures.py` inventories `.parquet`/`.xlsx`/`.h5` as *dataset* files,
+  but pandas in the image could open none of them — artifacts died with
+  `ImportError: Unable to find a usable engine` and were scored as broken code.
+  A unit test now fails if an extension is added on one side and not the other.
+  **Base images republished as `2026.3`; run `bash images/build-images.sh`.**
+- **`build-images.sh` refuses to build on a stale lock.** The Dockerfile prefers
+  `conda-lock.yml` over `env.yaml`, so a leftover lock silently outvoted a
+  freshly added dependency — you got an image missing the package you just added,
+  tagged as though it had it.
+- **A timeout now reports evidence.** It keeps the log tail and the partially
+  executed notebook (papermill checkpoints after every cell), where before it
+  recorded neither and was indistinguishable from a harness bug.
+- **Notebooks are executed with `papermill --log-output`.** papermill's default is
+  silent, so a notebook that hung for the entire budget emitted one line and the
+  log could not say which cell stalled. Cell boundaries are now logged.
+- **The LLM diagnoser is never asked to explain an empty log.** Given nothing it
+  narrated the absence, quoted the harness's own untrusted-data fences back into
+  the report, and invented fixes. Steps with no output get a clearly-labelled
+  deterministic note instead.
+- **Notebook budgets raised to 90 min** (`jupyter`, `rmarkdown`), and
+  `reprobe run --timeout N` overrides per run — clamped to the new
+  `limits.yaml:max_timeout_s` ceiling, which also closes a gap where a runner's
+  `ContainerSpec` timeout request was applied unclamped. A non-default budget is
+  recorded in the report.
+- **Inferred run order is stated, and downstream steps run last.** Plain
+  alphabetical ordering ran `analyse_combined_*.ipynb` *before* the models it
+  aggregates, so it would have read the committed outputs of steps that had not
+  re-run — a pass on stale data. Numeric prefixes and README order still win; the
+  name heuristic only breaks ties, and the report says when order was inferred.
+- **"Declares no dependencies at all" is now a stated finding.** Previously that
+  case produced an empty warnings list and a green step, which reads as
+  self-contained. It is the artifact's most consequential reproducibility defect
+  and is now named as one.
+- **FAIR `reusable` counts a `LICENSE` file and a dependency manifest.** It scored
+  licensing purely from fetcher metadata, which `git clone` never populates — so
+  every git-sourced artifact was marked unlicensed even with a LICENSE at the
+  root. Rebuilding the environment is now also rewarded (`reward_dependency_manifest`).
+
 ## Unreleased — results vs the paper (advisory)
 
 Until now a report could say "the code ran and produced its declared outputs"

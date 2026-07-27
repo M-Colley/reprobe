@@ -76,11 +76,19 @@ def test_python_and_jupyter_export_writable_home(tmp_path):
 
 def test_jupyter_papermill_runs_kernel_in_notebook_dir(tmp_path):
     cmd = _bash(JupyterRunner().build_command(_ctx(tmp_path, RunStep(target="analysis/figs.ipynb", kind="jupyter"))))
-    assert "papermill --no-progress-bar --cwd 'analysis' 'analysis/figs.ipynb' 'analysis/figs.executed.ipynb'" in cmd
+    assert ("papermill --no-progress-bar --log-output --cwd 'analysis' "
+            "'analysis/figs.ipynb' 'analysis/figs.executed.ipynb'") in cmd
     assert "nbconvert --to notebook --execute --output 'figs.executed'" in cmd
     # root-level notebook: parent is "."
     cmd = _bash(JupyterRunner().build_command(_ctx(tmp_path, RunStep(target="nb.ipynb", kind="jupyter"))))
     assert "--cwd '.'" in cmd
+
+
+def test_jupyter_asks_papermill_to_log_cell_boundaries(tmp_path):
+    """Without --log-output papermill emits one line for an entire run, so a
+    timed-out notebook leaves nothing to say which cell stalled."""
+    cmd = _bash(JupyterRunner().build_command(_ctx(tmp_path, RunStep(target="nb.ipynb", kind="jupyter"))))
+    assert "--log-output" in cmd
 
 
 # --------------------------------------------------------------------------- #
@@ -97,6 +105,26 @@ def test_launcher_exit_codes_are_harness_errors_not_author_fails(tmp_path, code)
     assert res.status == "error"
     assert "could not start" in res.diagnostics["harness_error"]
     assert "log_tail" in res.diagnostics
+
+
+def test_timeout_keeps_the_log_tail_and_the_partial_output(tmp_path):
+    """A timeout used to report neither, which made it indistinguishable from a
+    harness bug and left the LLM diagnoser with an empty string to explain."""
+    log = tmp_path / "step.log"
+    log.write_text("Executing Cell 12---\n[reprobe] hard timeout after 1800s\n", encoding="utf-8")
+    ctx = _ctx(tmp_path, RunStep(target="slow.ipynb", kind="jupyter"))
+    # papermill checkpoints after every cell, so a partial notebook exists on disk
+    (tmp_path / "slow.executed.ipynb").write_text("{}", encoding="utf-8")
+
+    res = JupyterRunner().interpret(
+        _raw(exit_code=None, timed_out=True, log_path=str(log)), ctx)
+
+    assert res.status == "timeout"
+    assert "Executing Cell 12" in res.diagnostics["log_tail"]
+    assert "slow.executed.ipynb" in res.artifacts
+    # a timeout still claims nothing about the science
+    assert res.claims == []
+    assert "results match the paper" in res.not_verified
 
 
 def test_raw_error_maps_to_error_and_exit_1_stays_fail(tmp_path):

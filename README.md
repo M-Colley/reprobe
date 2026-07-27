@@ -77,6 +77,10 @@ reprobe run <url> --no-run
 
 # Pull git-lfs data during fetch (opt-in, hardened; default keeps skip-smudge):
 reprobe run <url> --allow-lfs
+
+# Give long-running steps a bigger budget (notebooks default to 90 min;
+# clamped to limits.yaml:max_timeout_s, and recorded in the report):
+reprobe run <url> --timeout 10800
 ```
 
 Missing R packages are handled automatically: reprobe detects the CRAN packages a

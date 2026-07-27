@@ -126,6 +126,11 @@ class DetectResult(BaseModel):
     inventory: dict[str, int] = Field(default_factory=dict)   # non-code files by category
     steps: list[RunStep] = Field(default_factory=list)
     manifest_path: Optional[str] = None
+    # Root-level LICENSE/COPYING file, and the first recognized dependency
+    # manifest, if any. Both feed the FAIR "reusable" score, which previously
+    # relied on fetcher metadata that most fetchers never populate.
+    license_file: Optional[str] = None
+    dep_manifest: Optional[str] = None
     run_plan_source: Literal["manifest", "llm", "heuristic"] = "heuristic"
     llm_confidence: Optional[float] = None
     flags: list[str] = Field(default_factory=list)   # e.g. "needs-repo2docker"

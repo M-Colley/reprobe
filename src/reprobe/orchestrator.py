@@ -92,6 +92,7 @@ class Orchestrator:
         allow_lfs: bool = False,
         install: bool = True,
         dry_run: bool = False,
+        timeout_s: Optional[int] = None,
         sid: Optional[str] = None,
     ) -> Report:
         sid = sid or submission_id(ref)
@@ -150,6 +151,12 @@ class Orchestrator:
         env_plan = plan_env(detect_res, manifest_meta, self.config, srcdir,
                             allow_repo2docker=allow_repo2docker)
         report.environment = _env_section(env_plan)
+        if timeout_s:
+            # A non-default budget makes this run non-comparable to a default one;
+            # that belongs on the record, not just in the operator's shell history.
+            report.environment.setdefault("warnings", []).append(
+                f"per-step timeout overridden to {timeout_s}s via --timeout "
+                f"(config default: {self.config.limits.get('defaults', {}).get('timeout_s')}s)")
 
         functional_requested = functional and manifest_wants_functional(manifest_meta, functional)
 
@@ -185,9 +192,14 @@ class Orchestrator:
                     env_plan.image
                     if env_plan.env_provenance in ("author-specified", "fallback-generic")
                     else self.config.base_image(runner.image_key) or env_plan.image)
+                step_limits = self.config.limits_for(runner.id)
+                if timeout_s:
+                    # docker_exec still clamps this to limits.yaml:max_timeout_s —
+                    # the operator picks a budget, config keeps the ceiling.
+                    step_limits["timeout_s"] = timeout_s
                 ctx = RunContext(step=step, rundir=rundir, src_dir=srcdir, out_dir=outdir,
                                  image=image, config=self.config,
-                                 limits=self.config.limits_for(runner.id),
+                                 limits=step_limits,
                                  pre_index=snapshot(rundir))
                 spec = runner.container_spec(ctx)
                 if spec is None:                       # host-only runner (Unity T0)
@@ -450,7 +462,14 @@ class Orchestrator:
                   logdir: Path | None = None, image_key: str | None = None) -> None:
         if res.status in ("pass", "skipped") or llm_client is None:
             return
+        from .runners.base import _tail
         run_tail = str(res.diagnostics.get("log_tail", ""))
+        if not run_tail.strip() and res.log_path:
+            # Runners only record a tail for the statuses they consider failures,
+            # but the log file exists either way. Read it here so a "partial" step
+            # (ran clean, produced nothing declared) is diagnosed from what it
+            # actually printed rather than treated as having printed nothing.
+            run_tail = _tail(res.log_path)
         # If a step failed and the dependency-install phase logged an error, feed
         # that in too — the real root cause (e.g. a version constraint) usually
         # lives in the install log, not the run log.
@@ -458,10 +477,20 @@ class Orchestrator:
         if logdir and image_key:
             ilog = logdir / f"install-{image_key}.log"
             if ilog.exists():
-                from .runners.base import _tail
                 itail = _tail(str(ilog), 25)
                 if "error" in itail.lower():
                     log_tail = f"[dependency-install log]\n{itail}\n\n[run log]\n{run_tail}"
+        if not log_tail.strip():
+            # Never ask the model to explain nothing. Given an empty log it does
+            # not say "no evidence" — it narrates the absence ("the snippet is
+            # empty..."), quotes the harness's own untrusted-data fences back
+            # into the report, and invents plausible fixes with zero support.
+            # A deterministic, clearly-non-LLM note is strictly more honest.
+            if not res.diagnostics.get("harness_error"):
+                # ...unless the harness already recorded exactly why nothing ran,
+                # which the report renders on its own and explains it better.
+                res.diagnostics["harness_diagnosis"] = _no_log_diagnosis(res)
+            return
         adv = llm_roles.diagnose_failure(
             llm_client, target=step.target, kind=step.kind,
             env=f"{env_plan.strategy}:{env_plan.image}", log_tail=log_tail)
@@ -505,6 +534,33 @@ class Orchestrator:
 
 
 # ---------------------------------------------------------------------- #
+def _no_log_diagnosis(res: RunResult) -> dict[str, Any]:
+    """Deterministic stand-in for the LLM diagnoser when a step left no log to
+    read. States the one thing that is actually known and points at the next
+    concrete action — no cause is invented."""
+    if res.status == "timeout":
+        limit = res.diagnostics.get("timeout_s")
+        return {
+            "source": "harness (deterministic — not an LLM guess)",
+            "likely_cause": (
+                f"the step was killed at the {limit}s budget without writing any console output, "
+                "so how far it got is unknown. A notebook that logs nothing usually means the "
+                "kernel never reached a printing cell — a long fit/search, a blocking prompt, "
+                "or a network call that hangs under --network none."),
+            "suggested_fixes": [
+                f"re-run this step with a larger budget: `reprobe run <ref> --timeout {int(limit or 1800) * 2}`",
+                "inspect the partially-executed notebook collected under out/artifacts/ — "
+                "papermill checkpoints after every cell, so the last completed cell is the stall point",
+            ],
+        }
+    return {
+        "source": "harness (deterministic — not an LLM guess)",
+        "likely_cause": (f"the step ended with status '{res.status}' but produced no console output, "
+                         "so there is no evidence to diagnose from."),
+        "suggested_fixes": [f"inspect the full log at {res.log_path or '(none recorded)'}"],
+    }
+
+
 def manifest_wants_functional(manifest_meta: dict[str, Any], default: bool) -> bool:
     claimed = (manifest_meta or {}).get("badges_claimed", []) or []
     if claimed:

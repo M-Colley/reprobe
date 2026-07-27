@@ -168,7 +168,16 @@ def _fair(fetch: FetchResult, detect: DetectResult, *,
         hits += bool(detect.manifest_path)
     if reu_cfg.get("reward_open_license", True):
         wants += 1
-        hits += bool(meta.get("license"))
+        # meta["license"] only exists for fetchers that return repository
+        # metadata; a git clone returns none, so scoring on it alone marked every
+        # git-sourced artifact unlicensed even with a LICENSE file at the root.
+        # The file on disk is the stronger, always-available evidence.
+        hits += bool(meta.get("license") or detect.license_file)
+    if reu_cfg.get("reward_dependency_manifest", True):
+        # For reusability this is the load-bearing one: code you cannot rebuild an
+        # environment for is not reusable, whatever else it ships.
+        wants += 1
+        hits += bool(detect.dep_manifest)
     reusable = "yes" if wants and hits == wants else "partial" if hits else "no"
 
     return {

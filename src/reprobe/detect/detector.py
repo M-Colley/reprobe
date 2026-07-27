@@ -41,6 +41,11 @@ def detect(
             # the deterministic scan also discovers required R packages, which a
             # manifest doesn't enumerate — carry them for the env planner
             m_result.r_packages = heuristic.r_packages
+            # ...and the license / dependency-manifest files on disk, which feed
+            # the FAIR score. A manifest never declares these, so without this a
+            # manifest-carrying repo would score WORSE than an unmanaged one.
+            m_result.license_file = heuristic.license_file
+            m_result.dep_manifest = heuristic.dep_manifest
             return m_result, meta
         # codecheck or partial manifest: use heuristic steps + lifted expected outputs
         exp = meta.get("expected_outputs", [])
