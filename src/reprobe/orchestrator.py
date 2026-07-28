@@ -16,6 +16,7 @@ from typing import Any, Optional
 from . import __version__
 from .config import Config, load_config
 from .detect import detect as detect_artifacts
+from .detect.manifest import declared_data_sources
 from .docker_exec import DAEMON_DOWN_ERRORS, image_digest as _image_digest, run_container
 from .envbuild import plan as plan_env
 from .fetch import FetchError, configure as configure_fetchers, fetch as fetch_ref
@@ -94,6 +95,7 @@ class Orchestrator:
         dry_run: bool = False,
         timeout_s: Optional[int] = None,
         sid: Optional[str] = None,
+        data_sources: Optional[list[str]] = None,
     ) -> Report:
         sid = sid or submission_id(ref)
         work = self.workroot / sid
@@ -134,6 +136,11 @@ class Orchestrator:
             return report
         report.source = _source_section(fetch_res)
 
+        # -- (1b) SECONDARY DATA SOURCES -------------------------------- #
+        # Before detection, so a deposit's files are part of what gets
+        # inventoried, planned and copied into the run tree.
+        self._data_source_phase(data_sources, srcdir, work, report)
+
         # -- (2) DETECT ------------------------------------------------- #
         detect_res, manifest_meta = detect_artifacts(srcdir, use_llm=use_llm, llm_client=llm_client)
         report.detect = {
@@ -146,6 +153,7 @@ class Orchestrator:
             "notes": detect_res.notes + self._runner_load_errors,
             "steps": [s.target for s in detect_res.steps],
         }
+        self._note_prose_only_data(srcdir, report)
 
         # -- (3) PLAN ENV ----------------------------------------------- #
         env_plan = plan_env(detect_res, manifest_meta, self.config, srcdir,
@@ -273,6 +281,83 @@ class Orchestrator:
         return report
 
     # ------------------------------------------------------------------ #
+    def _note_prose_only_data(self, srcdir: Path, report: Report) -> None:
+        """Say so when the artifact's data lives somewhere its README only names
+        in prose. Without this the run fails at the first missing input and the
+        report reads like broken code, when the real finding is that the data was
+        never declared anywhere a harness can act on."""
+        if report.source.get("data_sources"):
+            return                       # a deposit was supplied; nothing to advise
+        from .fetch.data_source import referenced_deposits
+
+        hints = referenced_deposits(srcdir)
+        if not hints:
+            return
+        report.detect.setdefault("notes", []).append(
+            "the documentation links a data repository but the artifact declares no "
+            "`data_sources:` in a manifest, so the harness has no way to fetch it: "
+            + ", ".join(hints)
+            + ". If a step below fails on a missing input, re-run with "
+            + " ".join(f"--data {h}" for h in hints[:2]))
+        report.not_verified.append(
+            "whether the artifact runs WITH its external data — the data is linked in prose "
+            "only and was not fetched")
+
+    def _data_source_phase(self, specs: Optional[list[str]], srcdir: Path, work: Path,
+                           report: Report) -> None:
+        """Fetch secondary data deposits and merge them into the artifact tree.
+
+        The "code in git, data on OSF" split is the common shape of an artifact,
+        and fetching one half alone says nothing: the code half dies at the first
+        ``read_csv`` and the data half has nothing to run. Sources come from
+        ``--data`` and from the manifest's ``data_sources``; the operator's are
+        merged first, so a deposit can never displace what the chair asked for."""
+        specs = list(specs or []) + declared_data_sources(srcdir)
+        if not specs:
+            return
+        from .fetch.data_source import fetch_data_source, merge_into, parse_ref
+
+        records: list[dict[str, Any]] = []
+        notes: list[str] = []
+        for i, spec in enumerate(specs):
+            url, into = parse_ref(str(spec))
+            if not url:
+                continue
+            rec: dict[str, Any] = {"input": url, "into": into or "."}
+            stage = fresh_dir(work, work / f"data{i:02d}", f"data{i:02d}")
+            try:
+                fr = fetch_data_source(url, stage)
+                copied, collisions = merge_into(stage, srcdir, into)
+            except FetchError as e:
+                rec.update(status="failed", error=str(e))
+                records.append(rec)
+                notes.append(f"data source '{url}' could not be fetched ({e}) — the artifact was "
+                             f"checked WITHOUT it, so a missing-input failure below may be ours")
+                continue
+            finally:
+                shutil.rmtree(stage, ignore_errors=True)
+            rec.update(status="ok", resolved_type=fr.resolved_type, pin=fr.pin.model_dump(),
+                       files=copied, collisions=collisions,
+                       checksum_verified=fr.checksum_verified, warnings=fr.warnings)
+            records.append(rec)
+            if copied == 0:
+                notes.append(f"data source '{url}' contributed no files")
+            if collisions:
+                # Never silently resolved: if a deposit could overwrite a script,
+                # the code reviewed would not be the code submitted.
+                notes.append(
+                    f"data source '{url}': {len(collisions)} file(s) already existed in the "
+                    f"artifact and were NOT overwritten ({', '.join(collisions[:5])}"
+                    f"{', …' if len(collisions) > 5 else ''})")
+        if not records:
+            return
+        report.source["data_sources"] = records
+        if any(r.get("status") == "ok" for r in records):
+            notes.append("data was merged from a separate deposit; it is author-controlled and "
+                         "does NOT strengthen the Available badge, which is decided by the "
+                         "primary source's pin alone")
+        report.source.setdefault("warnings", []).extend(notes)
+
     def _dataset_phase(self, manifest_meta: dict[str, Any], rundir: Path, report: Report, *,
                        dry_run: bool) -> None:
         """Download author-declared datasets (manifest ``data[]``) into the run

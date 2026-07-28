@@ -131,6 +131,36 @@ a code fix: add the hostname to `pins.yaml` under `fetch.extra_git_hosts`
 (Dataverse installs whose hostname lacks "dataverse", e.g.
 `darus.uni-stuttgart.de`), then re-run.
 
+## If the submission is code in one place and data in another
+
+The usual shape: a GitHub repo of scripts, and an OSF/Zenodo/Dryad deposit the
+README links to in prose ("download the participant logs from OSF"). Running
+just the code URL fails at the first `read_csv` and reads like broken code, so
+fetch both in one command:
+
+```bash
+reprobe run https://github.com/<org>/<repo> --data https://osf.io/<guid>
+```
+
+- Repeat `--data` for each deposit.
+- Append `::subdir` when the code reads from a specific directory —
+  `--data https://osf.io/<guid>::dataset`. Without it the deposit merges at the
+  tree root, which is where an author's own working copy usually had it.
+- Direct download links work too — OSF's UI hands out
+  `files.<region>.osf.io/v1/resources/<guid>/providers/osfstorage/<id>/?zip=`
+  bundles, which are unpacked automatically.
+- Read the report's **Data sources** table before believing a failure: a deposit
+  that failed to fetch, or whose files collided with the repo's own, is named
+  there. Collisions are never overwritten — the code always wins.
+- A data deposit **never** upgrades Available. That badge follows the primary
+  source's pin, and OSF *project* storage is mutable (pin `none`) unless the
+  author registered it.
+
+When the report says *"the documentation links a data repository but the artifact
+declares no `data_sources:`"*, it has already printed the command to re-run with.
+Tell the authors to add `data_sources:` to their manifest — that is the fix that
+outlives your review.
+
 ## If an upstream breaks
 
 GameCI and repo2docker are best-effort upstreams behind our interface. A break

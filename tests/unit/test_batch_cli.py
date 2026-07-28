@@ -113,3 +113,30 @@ def test_badges_csv_quotes_formula_input():
     # the malicious input cell must be prefixed so a spreadsheet treats it as text
     assert "'=HYPERLINK(evil)" in out
     assert ",=HYPERLINK(evil)" not in out
+
+
+def test_doctor_fails_loudly_on_a_config_dir_that_does_not_exist(tmp_path):
+    """This row hardcoded "ok" and printed the path without looking at it, so a
+    non-editable install — whose config resolves to <prefix>/Lib/config — was
+    vouched for by the one check that could have caught it."""
+    missing = tmp_path / "no-such-config"
+    res = runner.invoke(app, ["doctor", "--config-dir", str(missing)])
+    out = " ".join(res.stdout.split())
+    assert "does not exist" in out
+    assert res.exit_code != 0, "doctor exited 0 with an unusable config dir"
+
+
+def test_doctor_accepts_a_real_config_dir():
+    cfg = Path(__file__).resolve().parents[2] / "config"
+    res = runner.invoke(app, ["doctor", "--config-dir", str(cfg)])
+    out = " ".join(res.stdout.split())
+    assert "does not exist" not in out
+    assert "year=2026" in out or "pins.yaml ok" in out.replace("│", "")
+
+
+def test_non_editable_install_detection_matches_this_checkout():
+    """An editable install (or a plain checkout) leaves the package in the repo;
+    only a copied install lands under site-packages."""
+    from reprobe.config import installed_non_editably
+    assert installed_non_editably() is False, \
+        "the test suite is running against a copied install, not this checkout"

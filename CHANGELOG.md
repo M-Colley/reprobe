@@ -1,6 +1,60 @@
 # Changelog
 
-## Unreleased — stop blaming the artifact for the harness's gaps
+## 0.3.0 — the artifact is not always one repository
+
+### Composite artifacts: code in git, data on OSF
+
+The common shape of a real submission is two deposits: the code in a git repo
+and the data in a repository (OSF, Zenodo, Dryad, ...) that the README links to
+in prose. reprobe could fetch either half and neither combination — point it at
+the code and every step dies at the first `read_csv`; point it at the data and
+there is nothing to run. Both outcomes were reported as if they said something
+about the artifact.
+
+- **`--data URL[::SUBDIR]` (repeatable) merges a second deposit into the
+  artifact tree.** Sources go through the SAME fetcher registry as a submission,
+  so OSF / Zenodo / Dryad / figshare / Dataverse / git / local paths all work.
+  `::subdir` places the deposit where the code expects it; the default merges at
+  the tree root. Merging happens BEFORE detection, so the data is part of the
+  inventory, the run plan, and the tree that reaches the container — data that
+  appeared only at run time would be missing from every statement the report
+  makes about what the artifact contains.
+- **Manifest `data_sources:`** declares the same thing permanently, so the
+  artifact carries its own data provenance instead of relying on the chair
+  knowing. (`data:` is unchanged — it stays the per-file, checksummed form.)
+- **A data source can never overwrite the code.** Collisions are skipped and
+  named in the report; silently replacing a script would mean the code reviewed
+  is not the code submitted.
+- **A data source never strengthens Available.** It is author-controlled bytes
+  fetched at review time, recorded with its own (usually `none`) pin. The badge
+  still follows the primary source alone.
+- **Bare http(s) data URLs are supported** — READMEs paste OSF `?zip=` bundle
+  links, not API references. They reuse the existing SSRF guard, byte caps and
+  zip-bomb guards, and the archive is unpacked and removed. This is deliberately
+  data-only: a bare URL as a *submission* still fails with the supported-sources
+  list, because a submission needs a pin and a URL has none.
+- **Prose-only data links are now a stated finding.** When the documentation
+  points at a data repository and nothing declares it machine-readably, the
+  report says so and prints the `--data` command that fixes it, instead of
+  letting the run fail on missing inputs and read like broken code.
+- **The OSF fetcher stopped claiming links it could not resolve.** `"osf.io"` is
+  a substring of `files.de-1.osf.io`, OSF's own bundle host, so pasting the URL
+  from a README produced `could not parse OSF guid` — a usable download turned
+  into an unfetchable source. It now claims only refs carrying a real guid.
+- **`.reprobe.yaml` is read as a manifest.** The report told authors to "declare
+  `steps:` in .reprobe.yaml" while the loader only looked for `autoui-repro.yml`,
+  so following the advice produced a file nothing would ever load.
+
+### `reprobe doctor` no longer vouches for a path it did not look at
+
+The config-dir row printed a hardcoded "ok". A non-editable install resolves its
+config to `<prefix>/Lib/config`, which exists for nobody — and the one check that
+could have caught it confirmed it instead, leaving `pins.yaml FAIL year=None` and
+two `base image FAIL None` rows to be explained some other way. The row now stats
+the directory, fails loudly, and names the cause when the package is installed
+outside a checkout.
+
+### stop blaming the artifact for the harness's gaps
 
 Findings from a real submission (`PDRA_XAI_OS`, 2026-07): of five notebooks, two
 were failed for a package the *base image* lacked, one was killed by a budget
@@ -48,7 +102,7 @@ the artifact. Every item below comes from that run.
   every git-sourced artifact was marked unlicensed even with a LICENSE at the
   root. Rebuilding the environment is now also rewarded (`reward_dependency_manifest`).
 
-## Unreleased — a dead daemon is not a broken artifact
+### a dead daemon is not a broken artifact
 
 A second run of the same submission lost the Docker engine 30 minutes into the
 first notebook. The harness then produced five failure rows, four LLM diagnoses,
@@ -81,7 +135,7 @@ statements that read as findings about the artifact.
   same way a timeout does; before, a 30-minute partial run was indistinguishable
   from one that never started.
 
-## Unreleased — results vs the paper (advisory)
+### results vs the paper (advisory)
 
 Until now a report could say "the code ran and produced its declared outputs"
 but never touched the question a reviewer actually cares about: *do the numbers
@@ -116,7 +170,7 @@ put the comparison in front of the human instead of making them do it cold.
   `pip install 'reprobe[paper]'` — without it the report says the PDF was **not
   read**, never that it matched.
 
-## Unreleased — dependency & data provisioning
+### dependency & data provisioning
 
 Real submissions failed for two mundane reasons: a needed R package wasn't in the
 base image, and LFS-tracked datasets were never pulled. Both are now handled while
@@ -217,7 +271,7 @@ keeping the author analysis offline — the network stays in the sanctioned phas
   freshness rule `run/` already had (Windows file-lock fallback to a uniquely
   named sibling instead of crashing mid-batch); `reprobe detect` too.
 
-## Unreleased — security & robustness hardening
+### security & robustness hardening
 
 Findings from a full code review; the trust boundary is the fetch/detect stages
 that handle untrusted submitter input on the host, *before* any container exists.

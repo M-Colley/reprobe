@@ -35,6 +35,13 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  · checksum {{ r.source.checksum_verified }}{% endif %}{% if r.source.anonymized %} · <b>anonymized</b>{% endif %}
  {% if r.source.error %}<div class="nv" style="margin-top:6px">⚠️ <b>fetch failed</b> — no code was run and nothing about the artifact was checked: {{ r.source.error }}</div>{% endif %}
  {% for w in r.source.warnings %}<div class="muted">⚠️ {{ w }}</div>{% endfor %}
+ {% if r.source.data_sources %}<div style="margin-top:6px"><b>Data sources</b> (merged into the artifact tree)
+  <table><tr><th>Deposit</th><th>Into</th><th>Type</th><th>Pin</th><th>Files</th><th>Status</th></tr>
+  {% for d in r.source.data_sources %}<tr><td><code>{{ d.input }}</code></td><td><code>{{ d.into }}</code></td>
+   <td>{{ d.resolved_type or '—' }}</td><td><code>{{ d.pin.kind if d.pin else 'none' }}</code></td>
+   <td>{{ d.files if d.files is not none else '—' }}</td>
+   <td class="{{ 'pass' if d.status == 'ok' else 'fail' }}">{{ d.status }}{% if d.error %} — {{ d.error }}{% endif %}</td></tr>{% endfor %}
+  </table></div>{% endif %}
 </div>
 
 {% if not r.source.error %}

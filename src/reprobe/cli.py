@@ -28,7 +28,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from . import __version__
-from .config import load_config
+from .config import installed_non_editably, load_config
 from .docker_exec import docker_available, image_present, pull_image, run_container
 from .models import ContainerSpec
 from .orchestrator import Orchestrator, fresh_dir, submission_id
@@ -53,6 +53,11 @@ def run(
     allow_repo2docker: bool = typer.Option(False, "--allow-repo2docker", help="permit repo2docker fallback build"),
     allow_net: Optional[list[str]] = typer.Option(None, "--allow-net", help="permit runtime egress (downgrades badge confidence)"),
     allow_lfs: bool = typer.Option(False, "--allow-lfs", help="pull git-lfs data during fetch (hardened, off by default)"),
+    data: Optional[list[str]] = typer.Option(
+        None, "--data", metavar="URL[::SUBDIR]",
+        help="extra data deposit merged into the artifact tree (repeatable) — for artifacts "
+             "whose code is in git and data on OSF/Zenodo/Dryad/figshare/Dataverse. Append "
+             "'::subdir' to place it somewhere other than the tree root"),
     timeout: Optional[int] = typer.Option(None, "--timeout", min=1,
                                           help="per-step wall-clock budget in seconds; overrides the "
                                                "config default, clamped to limits.yaml:max_timeout_s"),
@@ -64,6 +69,7 @@ def run(
         ref, do_run=not no_run, functional=not no_functional, use_llm=not no_llm,
         allow_repo2docker=allow_repo2docker, allow_net=allow_net, allow_lfs=allow_lfs,
         install=not no_install, dry_run=dry_run, timeout_s=timeout,
+        data_sources=list(data or []),
     )
     _print_report_summary(report, Path(workroot) / report.submission_id / "out")
 
@@ -74,10 +80,18 @@ def detect(
     workroot: str = typer.Option("work"),
     config_dir: Optional[str] = typer.Option(None),
     no_llm: bool = typer.Option(False, "--no-llm"),
+    data: Optional[list[str]] = typer.Option(
+        None, "--data", metavar="URL[::SUBDIR]",
+        help="extra data deposit merged into the tree before detecting (repeatable), "
+             "same as `reprobe run --data`"),
 ):
     """Detection only — no code execution. Shows the run plan reprobe would use."""
+    import shutil
+
     from .detect import detect as detect_artifacts
-    from .fetch import fetch as fetch_ref
+    from .detect.manifest import declared_data_sources
+    from .fetch import FetchError, fetch as fetch_ref
+    from .fetch.data_source import fetch_data_source, merge_into, parse_ref
 
     sid = submission_id(ref)
     work = Path(workroot) / sid
@@ -85,6 +99,22 @@ def detect(
     srcdir = fresh_dir(work, work / "src", "src")
     srcdir.mkdir(parents=True, exist_ok=True)
     fr = fetch_ref(ref, srcdir)
+    # Detection must see the same tree `run` would build, or the preview shows a
+    # different artifact from the one that gets checked.
+    for i, spec in enumerate(list(data or []) + declared_data_sources(srcdir)):
+        url, into = parse_ref(str(spec))
+        stage = fresh_dir(work, work / f"data{i:02d}", f"data{i:02d}")
+        try:
+            dfr = fetch_data_source(url, stage)
+            copied, collisions = merge_into(stage, srcdir, into)
+            console.print(f"[bold]data source[/bold]: {url} → {into or '.'} · "
+                          f"{dfr.resolved_type} · {copied} file(s)"
+                          + (f" · [yellow]{len(collisions)} not overwritten[/yellow]"
+                             if collisions else ""))
+        except FetchError as e:
+            console.print(f"[red]data source failed[/red]: {url} — {e}")
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
     cfg = load_config(config_dir)
     from .llm import from_config as llm_from_config
     client = None if no_llm else llm_from_config(cfg.llm)
@@ -210,7 +240,24 @@ def doctor(
     ok = True
     t = Table("check", "status", "detail")
 
-    t.add_row("config dir", "ok", str(cfg.config_dir))
+    # Never vouch for a path without looking at it. This row read "ok" for a
+    # directory that did not exist, so the one check that could have caught a
+    # wrong config resolution instead confirmed it.
+    cfg_dir_ok = cfg.config_dir.is_dir()
+    ok &= cfg_dir_ok
+    detail = str(cfg.config_dir)
+    if not cfg_dir_ok:
+        detail += " — does not exist"
+        if installed_non_editably():
+            # src-layout: config lives at <repo>/config, found via parents[2] of
+            # this package. From site-packages that resolves to <prefix>/Lib/config,
+            # which is nobody's config dir — the give-away for a plain `pip install`.
+            detail += ("; reprobe was installed non-editably, so it cannot see the repo's "
+                       "config/. Reinstall with `pip install -e .` from the checkout, or set "
+                       "REPROBE_CONFIG_DIR")
+        else:
+            detail += "; pass --config-dir or set REPROBE_CONFIG_DIR"
+    t.add_row("config dir", "ok" if cfg_dir_ok else "FAIL", detail)
     t.add_row("pins.yaml", "ok" if cfg.pins else "FAIL", f"year={cfg.pins.get('year')}")
 
     git_ok = _shutil.which("git") is not None

@@ -81,7 +81,24 @@ reprobe run <url> --allow-lfs
 # Give long-running steps a bigger budget (notebooks default to 90 min;
 # clamped to limits.yaml:max_timeout_s, and recorded in the report):
 reprobe run <url> --timeout 10800
+
+# Code in git, data on OSF/Zenodo/Dryad/figshare/Dataverse — merge both:
+reprobe run https://github.com/ciao-group/PerceivedRisk --data https://osf.io/cwd6h
+
+# ...into the directory the code expects, and repeat for several deposits:
+reprobe run <code-url> --data <deposit-url>::dataset --data <other-url>::models
 ```
+
+**Artifacts split across two repositories** are the normal case, not the
+exception: the code is in git and the data sits in a repository the README links
+to in prose. Fetching either half alone says nothing — the code half dies at the
+first `read_csv`, the data half has nothing to run. `--data` fetches the deposit
+with the same fetchers used for a submission and merges it into the artifact tree
+before detection. It never overwrites a file the code source already provides
+(collisions are reported), and it never strengthens the Available badge — that
+still follows the primary source's pin alone. Authors can declare the same thing
+permanently with `data_sources:` in the manifest; when neither is present and the
+README links a data repository, the report says so and prints the command.
 
 Missing R packages are handled automatically: reprobe detects the CRAN packages a
 repo needs (`library()`/`require()`/`pkg::` and `DESCRIPTION`) and installs the
@@ -115,8 +132,14 @@ CODECHECK `codecheck.yml` is also read). See
 
 - `environment.r_packages: [pkg1, pkg2]` — pin exactly the CRAN packages to
   install (reprobe also auto-detects them, so this is only for overriding).
-- `data: [{path, source, checksum}]` — data files reprobe should download (from
-  an http(s) `source`) into the run tree before your analysis runs.
+- `data: [{path, source, checksum}]` — individual data files reprobe should
+  download (from an http(s) `source`) into the run tree before your analysis runs.
+- `data_sources: [{source, into}]` — whole external deposits (OSF, Zenodo, Dryad,
+  figshare, Dataverse, or a direct URL) merged into your tree before the run.
+  **This is the fix if your data lives on OSF and your code on GitHub**: without
+  it the harness has only your README's prose to go on, and every step fails on a
+  missing input. `into` is the subdirectory your code reads from (default: the
+  repo root).
 - `paper: {doi, pdf}` — the paper this artifact reproduces. reprobe compares your
   produced numbers against its claims and shows a reviewer the differences
   (advisory only — it never grants a badge). **Committing the PDF is worth far

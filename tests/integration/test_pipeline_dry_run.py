@@ -240,3 +240,103 @@ def test_daemon_loss_stops_the_pipeline_instead_of_inventing_more_failures(tmp_p
         assert s.executed is False
     # the harness failed, so the report still makes no claim about the artifact
     assert report.verdict["overall"] == "infra-error"
+
+
+def test_data_source_is_merged_before_detection(tmp_path):
+    """The "code in git, data on OSF" artifact. The deposit must land in the tree
+    BEFORE detect, or the data is missing from the inventory, from the run plan,
+    and from the copy that reaches the container — and the run fails on inputs
+    the harness was told about."""
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "01_analyze.py").write_text("import pandas\n", encoding="utf-8")
+    deposit = tmp_path / "deposit"
+    (deposit / "Study Data").mkdir(parents=True)
+    (deposit / "Study Data" / "p01.csv").write_text("id,risk\n1,0.5\n", encoding="utf-8")
+
+    o = Orchestrator(workroot=tmp_path / "wk")
+    report = o.run(str(code), use_llm=False, dry_run=True,
+                   data_sources=[f"{deposit}::dataset"])
+
+    src = tmp_path / "wk" / report.submission_id / "src"
+    assert (src / "dataset" / "Study Data" / "p01.csv").is_file()
+    assert (src / "01_analyze.py").is_file(), "the code source was disturbed"
+
+    ds = report.source["data_sources"]
+    assert len(ds) == 1 and ds[0]["status"] == "ok" and ds[0]["files"] == 1
+    assert ds[0]["into"] == "dataset"
+    # a deposit is author-controlled bytes: it must never carry an archival pin
+    assert ds[0]["pin"]["kind"] == "none"
+    assert any("does NOT strengthen the Available badge" in w
+               for w in report.source["warnings"])
+    # detection saw it
+    assert report.detect["inventory"].get("dataset", 0) >= 1
+    # and the run tree got it
+    assert (tmp_path / "wk" / report.submission_id / "run" / "dataset" / "Study Data" / "p01.csv").is_file()
+
+
+def test_data_source_never_overwrites_the_code(tmp_path):
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "01_analyze.py").write_text("REAL = 1\n", encoding="utf-8")
+    deposit = tmp_path / "deposit"
+    deposit.mkdir()
+    (deposit / "01_analyze.py").write_text("REAL = 'tampered'\n", encoding="utf-8")
+
+    o = Orchestrator(workroot=tmp_path / "wk")
+    report = o.run(str(code), use_llm=False, dry_run=True, data_sources=[str(deposit)])
+
+    src = tmp_path / "wk" / report.submission_id / "src"
+    assert (src / "01_analyze.py").read_text() == "REAL = 1\n"
+    assert report.source["data_sources"][0]["collisions"] == ["01_analyze.py"]
+    assert any("NOT overwritten" in w for w in report.source["warnings"])
+
+
+def test_failed_data_source_is_stated_not_swallowed(tmp_path):
+    """If the harness could not fetch declared data, a later missing-input
+    failure may be the harness's fault — the report has to say so."""
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "01_analyze.py").write_text("x = 1\n", encoding="utf-8")
+
+    o = Orchestrator(workroot=tmp_path / "wk")
+    report = o.run(str(code), use_llm=False, dry_run=True,
+                   data_sources=[str(tmp_path / "does-not-exist")])
+
+    rec = report.source["data_sources"][0]
+    assert rec["status"] == "failed"
+    assert any("could not be fetched" in w and "WITHOUT it" in w
+               for w in report.source["warnings"])
+
+
+def test_prose_only_data_link_becomes_an_actionable_note(tmp_path):
+    """An artifact that says "download the data from OSF" has declared it in a
+    way no harness can act on. Say so, with the command that fixes it."""
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "01_analyze.py").write_text("x = 1\n", encoding="utf-8")
+    (code / "README.md").write_text(
+        "Download the logs ([OSF](https://osf.io/cwd6h/))\n", encoding="utf-8")
+
+    o = Orchestrator(workroot=tmp_path / "wk")
+    report = o.run(str(code), use_llm=False, dry_run=True)
+
+    note = " ".join(report.detect["notes"])
+    assert "data_sources" in note and "https://osf.io/cwd6h/" in note
+    assert "--data https://osf.io/cwd6h/" in note
+    assert any("linked in prose only" in x for x in report.not_verified)
+
+
+def test_no_hint_once_a_data_source_was_supplied(tmp_path):
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "01_analyze.py").write_text("x = 1\n", encoding="utf-8")
+    (code / "README.md").write_text("Data: https://osf.io/cwd6h/\n", encoding="utf-8")
+    deposit = tmp_path / "deposit"
+    deposit.mkdir()
+    (deposit / "p01.csv").write_text("a\n", encoding="utf-8")
+
+    o = Orchestrator(workroot=tmp_path / "wk")
+    report = o.run(str(code), use_llm=False, dry_run=True, data_sources=[str(deposit)])
+
+    assert not any("no way to fetch it" in n for n in report.detect["notes"])

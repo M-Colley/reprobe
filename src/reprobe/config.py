@@ -23,6 +23,16 @@ def _find_repo_config() -> Path:
     return candidate
 
 
+def installed_non_editably() -> bool:
+    """True when this package lives inside site-packages rather than a checkout.
+
+    ``_find_repo_config`` walks two parents up from the package, which is
+    ``<repo>/config`` for this src layout but ``<prefix>/Lib/config`` for a
+    copied install — a path that exists for nobody. An editable install leaves
+    the package in the repo, so this stays False there."""
+    return "site-packages" in Path(__file__).resolve().parts
+
+
 def resolve_config_dir(explicit: str | os.PathLike[str] | None = None) -> Path:
     if explicit:
         return Path(explicit).resolve()

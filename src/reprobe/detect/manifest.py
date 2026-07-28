@@ -23,7 +23,11 @@ import yaml
 
 from ..models import DetectResult, RunStep
 
-_AUTOUI_NAMES = ("autoui-repro.yml", "autoui-repro.yaml", ".autoui-repro.yml")
+# `.reprobe.yaml` is accepted because the harness's own report tells authors to
+# write one ("declare `steps:` in .reprobe.yaml"); reading only autoui-repro.yml
+# made that advice produce a file nothing would ever load.
+_AUTOUI_NAMES = ("autoui-repro.yml", "autoui-repro.yaml", ".autoui-repro.yml",
+                 ".reprobe.yaml", ".reprobe.yml", "reprobe.yaml", "reprobe.yml")
 _CODECHECK_NAMES = ("codecheck.yml", "codecheck.yaml")
 
 _KIND_BY_SUFFIX = {".ipynb": "jupyter", ".py": "python", ".r": "r", ".rmd": "rmarkdown"}
@@ -159,6 +163,31 @@ def _invalid(rel: str, err: str) -> tuple[DetectResult, dict[str, Any]]:
         notes=[f"manifest present but invalid: {err}; falling back to heuristic detection"],
     )
     return result, {"environment": {}, "expected_outputs": [], "badges_claimed": [], "data": [], "paper": {}}
+
+
+def declared_data_sources(src_dir: str | Path) -> list[str]:
+    """The manifest's ``data_sources`` as ``"URL::into"`` specs.
+
+    Read on its own, before detection, because the deposits have to be in the
+    tree before the detector inventories it. Deliberately silent on every error:
+    a malformed manifest must never abort a run, and ``load()`` reports the
+    validation failure properly a moment later."""
+    found = find_manifest(src_dir)
+    if not found or found[1] != "autoui":
+        return []
+    try:
+        data = yaml.safe_load(found[0].read_text(encoding="utf-8", errors="replace")) or {}
+        entries = data.get("data_sources") or []
+        specs: list[str] = []
+        for e in entries:
+            if isinstance(e, str):
+                specs.append(e)
+            elif isinstance(e, dict) and e.get("source"):
+                into = str(e.get("into") or "").strip()
+                specs.append(f"{e['source']}::{into}" if into else str(e["source"]))
+        return specs
+    except Exception:
+        return []
 
 
 def load(src_dir: str | Path) -> Optional[tuple[DetectResult, dict[str, Any]]]:

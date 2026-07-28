@@ -23,6 +23,19 @@ from .base import (FetchError, checksum_verdict, download, get,
 _GUID = re.compile(r"osf\.io/([a-z0-9]{4,})|10\.17605/OSF\.IO/(\w+)", re.I)
 _API = "https://api.osf.io/v2"
 
+# Path segments that look like a guid but name a route, not a node.
+_NOT_A_GUID = {"download", "files", "project", "search", "settings", "dashboard",
+               "preprints", "registries", "institutions"}
+
+
+def guid_of(ref: str) -> str | None:
+    """The project/registration guid in ``ref``, or None if there isn't one."""
+    m = _GUID.search(ref)
+    guid = (m.group(1) or m.group(2)) if m else None
+    if not guid or guid.lower() in _NOT_A_GUID:
+        return None
+    return guid.lower()
+
 
 def _decide_pin(node_type: str, doi: str | None, guid: str) -> tuple[Pin, list[str]]:
     """version_doi only for a minted DOI on a frozen registration — never
@@ -41,15 +54,17 @@ class OSFFetcher:
     name = "osf"
 
     def can_handle(self, ref: str) -> bool:
-        r = ref.lower()
-        return "osf.io" in r or "10.17605/osf.io" in r
+        # Claim only what fetch() can actually resolve. "osf.io" also appears in
+        # OSF's file-server bundle links — files.de-1.osf.io/v1/resources/<guid>/
+        # providers/osfstorage/<id>/?zip= — which is the form READMEs paste and
+        # which carries no node guid in the position fetch() walks. Claiming them
+        # turned a perfectly usable direct download into "could not parse OSF guid".
+        return guid_of(ref) is not None
 
     def fetch(self, ref: str, dest: Path) -> FetchResult:
-        m = _GUID.search(ref)
-        guid = (m.group(1) or m.group(2)) if m else None
-        if not guid or guid in ("download", "files"):
+        guid = guid_of(ref)
+        if not guid:
             raise FetchError("could not parse OSF guid")
-        guid = guid.lower()
         view_only = parse_qs(urlparse(ref).query).get("view_only", [None])[0]
         params = {"view_only": view_only} if view_only else {}
         dest.mkdir(parents=True, exist_ok=True)

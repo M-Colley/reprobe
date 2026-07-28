@@ -41,6 +41,19 @@
         }
       }
     },
+    "data_sources": {
+      "type": "array",
+      "description": "External data deposits merged into the artifact tree before the run — for the common 'code in git, data on OSF' split. Each is fetched with the same fetchers as a submission (OSF, Zenodo, Dryad, figshare, Dataverse, git, or a direct http(s) URL).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source"],
+        "properties": {
+          "source": { "type": "string", "description": "URL or DOI of the deposit" },
+          "into": { "type": "string", "description": "subdirectory to merge it into (default: artifact root)" }
+        }
+      }
+    },
     "run": {
       "type": "object",
       "additionalProperties": false,

@@ -49,6 +49,17 @@ def render(r: Report) -> str:
     L.append(f"- **Checksum verified:** {src.get('checksum_verified')} · **Anonymized:** {src.get('anonymized')}")
     for w in src.get("warnings", []) or []:
         L.append(f"  - ⚠️ {_ml(w)}")
+    for d in src.get("data_sources", []) or []:
+        pin = (d.get("pin") or {}).get("kind", "none")
+        if d.get("status") == "ok":
+            L.append(f"- **Data source:** `{_ml(str(d.get('input')))}` → "
+                     f"`{d.get('into')}` · {d.get('resolved_type')} · pin `{pin}` · "
+                     f"{d.get('files')} file(s)")
+            for c in d.get("collisions") or []:
+                L.append(f"  - ⚠️ not overwritten (the artifact already ships it): `{_ml(str(c))}`")
+        else:
+            L.append(f"- **Data source:** `{_ml(str(d.get('input')))}` — "
+                     f"**{d.get('status')}**: {_ml(str(d.get('error', '')))}")
     L.append("")
 
     det = r.detect or {}
