@@ -244,3 +244,68 @@ def test_image_digest_none_when_docker_unreachable(monkeypatch):
 
 def test_image_digest_empty_image_is_none():
     assert docker_exec.image_digest("") is None
+
+
+# --------------------------------------------------------------------------- #
+# Daemon loss vs artifact failure — exit 125 means both, and the report must
+# not blame the base image for a host outage.
+# --------------------------------------------------------------------------- #
+def _run_with(monkeypatch, tmp_path, *, returncode, stdout="", daemon_up=True):
+    """Runs a container whose `docker run` writes `stdout` and exits `returncode`."""
+    def fake_run(argv, **kw):
+        if argv[:2] == ["docker", "run"]:
+            log = kw.get("stdout")
+            if log is not None and stdout:
+                log.write(stdout)
+            return SimpleNamespace(returncode=returncode)
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(docker_exec.subprocess, "run", fake_run)
+    monkeypatch.setattr(docker_exec, "image_present", lambda image: True)
+    monkeypatch.setattr(docker_exec, "docker_available", lambda: daemon_up)
+    return run_container(_spec(), load_config().limits_for("python"), tmp_path / "run.log")
+
+
+def test_daemon_dying_mid_run_is_not_reported_as_a_broken_image(monkeypatch, tmp_path):
+    """The engine vanishing under a running container exits 125 exactly like a
+    container that never started. Telling a chair to check the base image for a
+    step that ran fine for 30 minutes sends them after the wrong thing."""
+    raw = _run_with(monkeypatch, tmp_path, returncode=125,
+                    stdout='Trial 948 finished\ntime="..." level=error '
+                           'msg="error waiting for container: unexpected EOF"\n')
+    assert raw.error.startswith("docker-daemon-lost")
+    assert "nothing here is a statement about the artifact" in raw.error
+
+
+def test_daemon_loss_detected_even_when_the_cli_said_nothing(monkeypatch, tmp_path):
+    # No disconnect wording in the log, but nothing answers afterwards either.
+    raw = _run_with(monkeypatch, tmp_path, returncode=125, stdout="boom\n", daemon_up=False)
+    assert raw.error.startswith("docker-daemon-lost")
+
+
+def test_genuine_start_failure_stays_a_start_failure(monkeypatch, tmp_path):
+    """125 with a live daemon and no disconnect: the container really did fail to
+    start, and the runner's "check the base image" wording is the right advice."""
+    raw = _run_with(monkeypatch, tmp_path, returncode=125,
+                    stdout="docker: Error response from daemon: no such file or directory\n")
+    assert raw.error is None and raw.exit_code == 125
+
+
+def test_missing_image_is_only_claimed_when_the_daemon_can_answer(monkeypatch, tmp_path):
+    """`docker image inspect` fails identically for "no such image" and "no
+    daemon", so an unreachable daemon must not be reported as a missing image —
+    that sends a chair to `docker pull` a tag that was there all along."""
+    monkeypatch.setattr(docker_exec, "image_present", lambda image: False)
+    monkeypatch.setattr(docker_exec, "docker_available", lambda: False)
+    raw = run_container(_spec(), load_config().limits_for("python"), tmp_path / "a.log")
+    assert raw.error.startswith("docker-unavailable")
+    assert "image-not-present" not in raw.error
+
+    monkeypatch.setattr(docker_exec, "docker_available", lambda: True)
+    raw = run_container(_spec(), load_config().limits_for("python"), tmp_path / "b.log")
+    assert raw.error.startswith("image-not-present")
+
+
+def test_daemon_down_errors_are_recognisable_to_callers():
+    # The orchestrator keys its abort on these prefixes; keep them in sync.
+    assert "docker-daemon-lost".startswith(docker_exec.DAEMON_DOWN_ERRORS)
+    assert "docker-unavailable".startswith(docker_exec.DAEMON_DOWN_ERRORS)

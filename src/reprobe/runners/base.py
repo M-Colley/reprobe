@@ -129,10 +129,22 @@ class BaseRunner:
             raise NotImplementedError(f"{self.id} returned no ContainerSpec but did not override interpret()")
 
         if raw.error:
+            # docker_exec sets `error` only for conditions it established itself
+            # (no daemon, no image, sandbox violation). Mark them so the LLM
+            # diagnoser stays out: the cause is already known exactly, and the
+            # log holds no evidence about the artifact for a model to read.
+            diagnostics: dict = {"harness_error": raw.error, "infra": True}
+            ran = raw.duration_s > 0            # 0.0 = the container never launched
+            if ran and raw.log_path:
+                # The container did run before the harness lost it, so its output
+                # and its half-written outputs are real evidence of how far the
+                # step got — the same reason a timeout keeps both.
+                diagnostics["log_tail"] = _tail(raw.log_path)
             return RunResult(
                 runner=self.id, target=ctx.step.target, status="error",
                 exit_code=raw.exit_code, duration_s=raw.duration_s, log_path=raw.log_path,
-                diagnostics={"harness_error": raw.error},
+                artifacts=self._produced(ctx) if ran else [],
+                diagnostics=diagnostics,
                 not_verified=list(caps.cannot_verify),
             )
         if raw.timed_out:

@@ -226,6 +226,45 @@ def _redact(argv: list[str], spec: ContainerSpec) -> list[str]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Daemon loss. `docker run` exits 125 for "the CLI/daemon failed, not the
+# container's command" — one code covering two very different events: the
+# container never started (bad flag, unusable image), or the daemon went away
+# WHILE the container ran. Only the CLI's own wording separates them.
+# --------------------------------------------------------------------------- #
+_DAEMON_LOST_MARKERS = (
+    "error waiting for container",       # "…: unexpected EOF" — engine vanished mid-run
+    "cannot connect to the docker daemon",
+    "error during connect",
+    "is the docker daemon running",
+)
+
+# Error prefixes meaning "the daemon, not the artifact". Callers use these to
+# tell an infrastructure failure from a failure of the code under test.
+DAEMON_DOWN_ERRORS = ("docker-daemon-lost", "docker-unavailable")
+
+_RESTART_HINT = (
+    "Restart Docker (Desktop: quit it fully and relaunch; Linux: "
+    "`sudo systemctl restart docker`), confirm with `reprobe doctor`, then re-run."
+)
+
+
+def _log_tail_text(path: Path, n_bytes: int = 4096) -> str:
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - n_bytes))
+            return fh.read().decode("utf-8", "replace").lower()
+    except OSError:
+        return ""
+
+
+def _daemon_lost(log_path: Path) -> bool:
+    """True when the docker CLI reported losing the daemon rather than failing to
+    start the container — the two cases exit 125 alike."""
+    return any(m in _log_tail_text(log_path) for m in _DAEMON_LOST_MARKERS)
+
+
 def run_container(
     spec: ContainerSpec,
     limits: dict,
@@ -256,10 +295,21 @@ def run_container(
         return RawRunOutput(exit_code=0, duration_s=0.0, image=spec.image, argv_redacted=redacted)
 
     if not image_present(spec.image):
-        msg = (
-            f"image-not-present: {spec.image}. `docker pull {spec.image}` "
-            f"(base images are published) or build with `bash images/build-images.sh`, then retry."
-        )
+        # `docker image inspect` fails the same way for "no such image" and for
+        # "no daemon to ask", so the absence of an image is only a fact once the
+        # daemon has answered. Reporting the wrong one of these sends a chair to
+        # `docker pull` a tag that was present all along.
+        if not docker_available():
+            msg = (
+                "docker-unavailable: the Docker daemon is not reachable, so no image can be "
+                f"checked or run. This says nothing about {spec.image} or about the artifact. "
+                + _RESTART_HINT
+            )
+        else:
+            msg = (
+                f"image-not-present: {spec.image}. `docker pull {spec.image}` "
+                f"(base images are published) or build with `bash images/build-images.sh`, then retry."
+            )
         log_path.write_text(msg + "\n", encoding="utf-8")
         return RawRunOutput(exit_code=None, duration_s=0.0, image=spec.image,
                             argv_redacted=redacted, log_path=str(log_path), error=msg)
@@ -292,11 +342,26 @@ def run_container(
                 subprocess.run(["docker", "kill", name], capture_output=True)
                 subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
+    duration_s = round(time.monotonic() - start, 2)
+
+    # A 125 whose log ends in a CLI disconnect — or that leaves no reachable
+    # daemon behind — is the engine dying under a running container, not a
+    # container that failed to start. Only this module can tell the difference,
+    # and getting it wrong blames the base image for a host outage.
+    error: Optional[str] = None
+    if exit_code == 125 and (_daemon_lost(log_path) or not docker_available()):
+        error = (
+            f"docker-daemon-lost: the Docker daemon stopped responding {round(duration_s)}s into "
+            "this step (`docker run` exited 125 after the container had been running). The run was "
+            "lost to a host failure — nothing here is a statement about the artifact. " + _RESTART_HINT
+        )
+
     return RawRunOutput(
         exit_code=exit_code,
-        duration_s=round(time.monotonic() - start, 2),
+        duration_s=duration_s,
         timed_out=timed_out,
         log_path=str(log_path),
         image=spec.image,
         argv_redacted=redacted,
+        error=error,
     )

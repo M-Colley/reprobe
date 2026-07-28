@@ -48,6 +48,39 @@ the artifact. Every item below comes from that run.
   every git-sourced artifact was marked unlicensed even with a LICENSE at the
   root. Rebuilding the environment is now also rewarded (`reward_dependency_manifest`).
 
+## Unreleased — a dead daemon is not a broken artifact
+
+A second run of the same submission lost the Docker engine 30 minutes into the
+first notebook. The harness then produced five failure rows, four LLM diagnoses,
+and a recommendation to check whether a base-image tag existed — for a tag that
+was present locally and published on ghcr the whole time. One host outage, five
+statements that read as findings about the artifact.
+
+- **Exit 125 is no longer read as "the base image is broken".** `docker run`
+  returns 125 both when a container fails to start *and* when the daemon dies
+  under a running one; the harness assumed the first and told the operator to
+  check the image, for a step that had been fitting models for 1798s. It now
+  separates the two by the CLI's own disconnect wording (`error waiting for
+  container: unexpected EOF`) and by re-probing the daemon, and reports
+  `docker-daemon-lost` with the elapsed time.
+- **A missing image is only claimed when the daemon can answer.** `docker image
+  inspect` fails identically for "no such image" and "no daemon", so every step
+  after the crash was reported as `image-not-present` with a `docker pull`
+  instruction that would have changed nothing. That path now checks the daemon
+  first and reports `docker-unavailable`.
+- **The pipeline stops when the daemon goes.** Remaining steps are recorded as
+  `skipped — not attempted`, instead of four identical infra failures that read
+  like independent findings.
+- **Infrastructure failures never reach the LLM diagnoser.** Handed a log full of
+  the artifact's own healthy output, the model explained the *artifact* — it
+  advised verifying a published image tag and speculated about the notebook
+  hanging. The harness already knows these causes exactly, so it states them and
+  asks nothing.
+- **A harness error keeps the evidence of a container that did run.** The
+  daemon-loss case now carries the log tail and the checkpointed notebook, the
+  same way a timeout does; before, a 30-minute partial run was indistinguishable
+  from one that never started.
+
 ## Unreleased — results vs the paper (advisory)
 
 Until now a report could say "the code ran and produced its declared outputs"

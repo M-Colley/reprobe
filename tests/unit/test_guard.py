@@ -269,3 +269,27 @@ def test_from_config_reads_confidence_threshold():
     c = from_config({"enabled": True, "provider": "ollama", "confidence_threshold": 0.8})
     assert c.confidence_threshold == 0.8
     assert from_config({"enabled": False}) is None
+
+
+def test_infrastructure_failures_never_reach_the_model(tmp_path):
+    """The daemon dying leaves a log full of the artifact's own healthy output.
+    Handed that, the model explains the *artifact* — in one real report it told a
+    chair to check whether a published image tag existed. The harness already
+    knows the cause exactly, so it states it and asks nothing."""
+    from reprobe.models import EnvPlan, RunResult, RunStep
+    from reprobe.orchestrator import Orchestrator
+
+    called = []
+    client = _FakeClient({"likely_cause": "the notebook seems to have hung",
+                          "suggested_fixes": ["verify the image tag exists"], "confidence": 0.9})
+    orig_generate = client.generate_json
+    client.generate_json = lambda *a, **k: (called.append(1), orig_generate(*a, **k))[1]
+
+    res = RunResult(runner="jupyter", target="fit.ipynb", status="error",
+                    diagnostics={"harness_error": "docker-daemon-lost: ...", "infra": True,
+                                 "log_tail": "Trial 948 finished with value: 0.44\n"})
+    Orchestrator(config=load_config(), workroot=str(tmp_path))._diagnose(
+        res, client, EnvPlan(image="img"), RunStep(target="fit.ipynb", kind="jupyter"))
+
+    assert not called, "the diagnoser was asked to explain a host outage"
+    assert "llm_advisory" not in res.diagnostics

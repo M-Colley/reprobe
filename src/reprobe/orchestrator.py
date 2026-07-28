@@ -16,7 +16,7 @@ from typing import Any, Optional
 from . import __version__
 from .config import Config, load_config
 from .detect import detect as detect_artifacts
-from .docker_exec import image_digest as _image_digest, run_container
+from .docker_exec import DAEMON_DOWN_ERRORS, image_digest as _image_digest, run_container
 from .envbuild import plan as plan_env
 from .fetch import FetchError, configure as configure_fetchers, fetch as fetch_ref
 from .llm import from_config as llm_from_config, roles as llm_roles
@@ -219,6 +219,18 @@ class Orchestrator:
                     res = runner.interpret(raw, ctx)
                     self._diagnose(res, llm_client, env_plan, step, logdir, runner.image_key)
                 results.append(res)
+                if _daemon_down(res):
+                    # Once the daemon is gone every remaining step fails in
+                    # milliseconds for the same host reason, and each one reads in
+                    # the report like an independent finding about the artifact.
+                    # Record the truth — they were never attempted — and stop.
+                    for rest in detect_res.steps[i + 1:]:
+                        results.append(RunResult(
+                            runner=rest.runner or "?", target=rest.target,
+                            status="skipped", executed=False,
+                            diagnostics={"reason": "not attempted — the Docker daemon became "
+                                                   f"unreachable during `{step.target}`"}))
+                    break
             self._collect_artifacts(results, rundir, outdir)
             # Pin the exact image bytes that ran (pins.yaml carries a mutable tag).
             # A mixed python+R run uses more than one base, so record a digest per
@@ -462,6 +474,12 @@ class Orchestrator:
                   logdir: Path | None = None, image_key: str | None = None) -> None:
         if res.status in ("pass", "skipped") or llm_client is None:
             return
+        if res.diagnostics.get("infra"):
+            # The harness established this failure itself (daemon gone, image
+            # absent, sandbox violation) and the report states it verbatim. The
+            # model has no artifact evidence to read here, so what it produces is
+            # confident narration about a cause it cannot see.
+            return
         from .runners.base import _tail
         run_tail = str(res.diagnostics.get("log_tail", ""))
         if not run_tail.strip() and res.log_path:
@@ -534,6 +552,13 @@ class Orchestrator:
 
 
 # ---------------------------------------------------------------------- #
+def _daemon_down(res: RunResult) -> bool:
+    """True when a step failed because the Docker daemon is gone — the one
+    failure that makes every later step meaningless rather than informative."""
+    diags = res.diagnostics if isinstance(res.diagnostics, dict) else {}
+    return str(diags.get("harness_error", "")).startswith(DAEMON_DOWN_ERRORS)
+
+
 def _no_log_diagnosis(res: RunResult) -> dict[str, Any]:
     """Deterministic stand-in for the LLM diagnoser when a step left no log to
     read. States the one thing that is actually known and points at the next

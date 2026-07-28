@@ -290,3 +290,35 @@ def test_tail_missing_or_empty(tmp_path):
     assert _tail(str(tmp_path / "nope.log")) == ""
     empty = tmp_path / "e.log"; empty.write_text("")
     assert _tail(str(empty)) == ""
+
+
+def test_harness_error_keeps_the_evidence_of_a_container_that_did_run(tmp_path):
+    """A daemon lost mid-run is a harness error, but the container produced real
+    output and a checkpointed notebook first. Dropping both makes a 30-minute
+    partial run indistinguishable from one that never started."""
+    log = tmp_path / "step.log"
+    log.write_text("Trial 948 finished\nerror waiting for container: unexpected EOF\n",
+                   encoding="utf-8")
+    ctx = _ctx(tmp_path, RunStep(target="fit.ipynb", kind="jupyter"))
+    (tmp_path / "fit.executed.ipynb").write_text("{}", encoding="utf-8")
+
+    res = JupyterRunner().interpret(
+        RawRunOutput(exit_code=125, duration_s=1798.1, log_path=str(log),
+                     error="docker-daemon-lost: the Docker daemon stopped responding"), ctx)
+
+    assert res.status == "error"
+    assert res.diagnostics["infra"] is True
+    assert "Trial 948" in res.diagnostics["log_tail"]
+    assert "fit.executed.ipynb" in res.artifacts
+
+
+def test_harness_error_before_launch_claims_no_output(tmp_path):
+    """Nothing ran (duration 0.0), so there is no tail and nothing was produced —
+    a snapshot diff here could only pick up files this run never touched."""
+    ctx = _ctx(tmp_path, RunStep(target="fit.ipynb", kind="jupyter"))
+    res = JupyterRunner().interpret(
+        RawRunOutput(exit_code=None, duration_s=0.0, error="docker-unavailable: ..."), ctx)
+
+    assert res.status == "error" and res.diagnostics["infra"] is True
+    assert "log_tail" not in res.diagnostics
+    assert res.artifacts == []

@@ -204,3 +204,39 @@ def test_dataset_phase_noop_in_dry_run(tmp_path):
     meta = {"data": [{"path": "x.csv", "source": "https://93.184.216.34/x.csv"}]}
     o._dataset_phase(meta, tmp_path, report, dry_run=True)
     assert "datasets" not in report.environment      # dry-run downloads nothing
+
+
+def test_daemon_loss_stops_the_pipeline_instead_of_inventing_more_failures(tmp_path, monkeypatch):
+    """When the engine dies mid-run, every later step fails in milliseconds for
+    the same host reason. Those rows read like independent findings about the
+    artifact (and each used to draw its own LLM diagnosis), so the run must stop
+    and say the remaining steps were never attempted."""
+    from reprobe.models import RawRunOutput
+
+    src = tmp_path / "three-step"
+    src.mkdir()
+    for name in ("01_prep.py", "02_fit.py", "03_plot.py"):
+        (src / name).write_text("print('hi')\n", encoding="utf-8")
+
+    real = orch_mod.run_container
+    attempted: list[str] = []
+
+    def fake(spec, limits, log_path, **kw):
+        if spec.network == "egress":                  # dependency-install phase
+            return real(spec, limits, log_path, **kw)
+        attempted.append(spec.image)
+        return RawRunOutput(exit_code=125, duration_s=12.5, image=spec.image,
+                            log_path=str(log_path),
+                            error="docker-daemon-lost: the Docker daemon stopped responding")
+
+    monkeypatch.setattr(orch_mod, "run_container", fake)
+    report = _run(tmp_path / "wk", src)
+
+    assert len(attempted) == 1, f"kept launching containers after the daemon vanished: {attempted}"
+    statuses = [s.status for s in report.steps]
+    assert statuses == ["error", "skipped", "skipped"], statuses
+    for s in report.steps[1:]:
+        assert "not attempted" in str(s.diagnostics.get("reason", ""))
+        assert s.executed is False
+    # the harness failed, so the report still makes no claim about the artifact
+    assert report.verdict["overall"] == "infra-error"
