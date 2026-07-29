@@ -147,6 +147,10 @@ class EnvPlan(BaseModel):
     env_provenance: Literal["author-specified", "harness-default", "repo2docker-built",
                             "fallback-generic"] = "harness-default"
     install_commands: list[str] = Field(default_factory=list)   # run in a gated-egress phase
+    # Prefix of a conda env the install phase built from the artifact's own
+    # environment.yml. When set, author code runs with THAT interpreter, not the
+    # base image's.
+    conda_env_prefix: Optional[str] = None
     base_image_digest: Optional[str] = None
     resolved_deps_digest: Optional[str] = None
     repo2docker_version: Optional[str] = None

@@ -173,28 +173,36 @@ def referenced_deposits(src_root: str | Path, limit: int = 5) -> list[str]:
     return found
 
 
-def merge_into(src_root: str | Path, dest_root: str | Path, into: str = "") -> tuple[int, list[str]]:
+def merge_into(src_root: str | Path, dest_root: str | Path,
+               into: str = "") -> tuple[list[str], list[str]]:
     """Copy the tree at ``src_root`` under ``dest_root``/``into``.
 
-    Returns ``(files_copied, collisions)``. An existing file is NEVER replaced:
-    the code source defines the artifact, and a data deposit that silently
-    overwrote a script would mean the reviewed code is not the submitted code.
-    Collisions are returned so the report can name them."""
+    Returns ``(copied_paths, collisions)``, both relative to ``dest_root``. The
+    paths matter beyond counting: the rest of the pipeline has to tell deposit
+    files from the submission's own, or a deposit of figures supplies "the
+    paper" and its PDFs get described as committed in a repository they were
+    never in.
+
+    An existing file is NEVER replaced: the code source defines the artifact, and
+    a data deposit that silently overwrote a script would mean the reviewed code
+    is not the submitted code. Collisions are returned so the report can name
+    them."""
     src_root = Path(src_root)
     target_root = safe_join(Path(dest_root), into) if into else Path(dest_root)
     target_root.mkdir(parents=True, exist_ok=True)
 
-    copied = 0
+    copied: list[str] = []
     collisions: list[str] = []
     for src in sorted(p for p in src_root.rglob("*") if p.is_file()):
         rel = src.relative_to(src_root).as_posix()
         # safe_join re-validates every component, so a deposit cannot escape the
         # tree through a crafted member name that survived extraction.
         dst = safe_join(target_root, rel)
+        out_rel = dst.relative_to(Path(dest_root)).as_posix()
         if dst.exists():
-            collisions.append((Path(into) / rel).as_posix() if into else rel)
+            collisions.append(out_rel)
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
-        copied += 1
+        copied.append(out_rel)
     return copied, collisions

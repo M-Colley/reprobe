@@ -98,6 +98,10 @@ class Orchestrator:
         data_sources: Optional[list[str]] = None,
     ) -> Report:
         sid = sid or submission_id(ref)
+        # Files merged in from a data deposit, relative to srcdir. They are in the
+        # tree but they are not the submission, so anything that reasons about
+        # what the artifact *contains* has to be able to exclude them.
+        self._merged_data_paths: set[str] = set()
         work = self.workroot / sid
         rundir = work / "run"
         outdir = work / "out"
@@ -208,7 +212,8 @@ class Orchestrator:
                 ctx = RunContext(step=step, rundir=rundir, src_dir=srcdir, out_dir=outdir,
                                  image=image, config=self.config,
                                  limits=step_limits,
-                                 pre_index=snapshot(rundir))
+                                 pre_index=snapshot(rundir),
+                                 conda_env_prefix=env_plan.conda_env_prefix)
                 spec = runner.container_spec(ctx)
                 if spec is None:                       # host-only runner (Unity T0)
                     res = runner.interpret(None, ctx)
@@ -319,6 +324,7 @@ class Orchestrator:
 
         records: list[dict[str, Any]] = []
         notes: list[str] = []
+        merged: set[str] = self._merged_data_paths
         for i, spec in enumerate(specs):
             url, into = parse_ref(str(spec))
             if not url:
@@ -336,11 +342,12 @@ class Orchestrator:
                 continue
             finally:
                 shutil.rmtree(stage, ignore_errors=True)
+            merged.update(copied)
             rec.update(status="ok", resolved_type=fr.resolved_type, pin=fr.pin.model_dump(),
-                       files=copied, collisions=collisions,
+                       files=len(copied), collisions=collisions,
                        checksum_verified=fr.checksum_verified, warnings=fr.warnings)
             records.append(rec)
-            if copied == 0:
+            if not copied:
                 notes.append(f"data source '{url}' contributed no files")
             if collisions:
                 # Never silently resolved: if a deposit could overwrite a script,
@@ -511,7 +518,8 @@ class Orchestrator:
         rundir = work / "run"
         try:
             found = paper_mod.locate(srcdir, work, manifest_meta=manifest_meta,
-                                     pin_value=fetch_res.pin.value or "")
+                                     pin_value=fetch_res.pin.value or "",
+                                     exclude=self._merged_data_paths)
         except Exception as e:                      # never let this break a run
             report.llm["results_check"] = {"status": "error",
                                            "detail": f"{type(e).__name__}: {e}"}
@@ -703,7 +711,8 @@ def _failed_source_section(ref: str, error: str) -> dict[str, Any]:
 def _env_section(p: EnvPlan) -> dict[str, Any]:
     return {
         "strategy": p.strategy, "image": p.image, "env_provenance": p.env_provenance,
-        "install_commands": p.install_commands, "repo2docker_version": p.repo2docker_version,
+        "install_commands": p.install_commands, "conda_env_prefix": p.conda_env_prefix,
+        "repo2docker_version": p.repo2docker_version,
         "base_image_digest": p.base_image_digest, "resolved_deps_digest": p.resolved_deps_digest,
         "warnings": p.warnings,
     }

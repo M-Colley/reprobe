@@ -108,7 +108,7 @@ def detect(
             dfr = fetch_data_source(url, stage)
             copied, collisions = merge_into(stage, srcdir, into)
             console.print(f"[bold]data source[/bold]: {url} → {into or '.'} · "
-                          f"{dfr.resolved_type} · {copied} file(s)"
+                          f"{dfr.resolved_type} · {len(copied)} file(s)"
                           + (f" · [yellow]{len(collisions)} not overwritten[/yellow]"
                              if collisions else ""))
         except FetchError as e:

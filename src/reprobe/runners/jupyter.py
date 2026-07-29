@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
-from .base import BaseRunner, RunContext, _q
+from .base import BaseRunner, RunContext, _q, env_path_prefix
 from ..models import Capabilities
 
 
@@ -44,6 +44,7 @@ class JupyterRunner(BaseRunner):
         cmd = (
             "export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache MPLCONFIGDIR=/tmp; "
             "export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; "
+            f"{env_path_prefix(ctx)}"
             f"if command -v papermill >/dev/null 2>&1; then "
             f"papermill --no-progress-bar --log-output --cwd {_q(nbdir)} {_q(t)} {_q(out)}; "
             f"else jupyter nbconvert --to notebook --execute --output {_q(stem + '.executed')} {_q(t)}; fi"

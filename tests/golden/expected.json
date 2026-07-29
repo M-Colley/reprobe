@@ -81,7 +81,10 @@
       "needs-repo2docker"
     ],
     "strategy": "besteffort",
-    "install_commands": [],
+    "install_commands": [
+      "export MAMBA_ROOT_PREFIX=/var/tmp/reprobe-mamba && micromamba create -y -q -p /work/.reprobe_env -f environment.yml && micromamba install -y -q -p /work/.reprobe_env -c conda-forge papermill ipykernel nbconvert",
+      "micromamba list -p /work/.reprobe_env"
+    ],
     "step_statuses": [
       "pass"
     ],

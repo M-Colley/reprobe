@@ -190,20 +190,47 @@ def test_manifest_repo_keeps_heuristic_flags(tmp_path):
 # --------------------------------------------------------------------------- #
 # envbuild: declared-but-not-installed warnings, builder, renv gating
 # --------------------------------------------------------------------------- #
-def test_conda_env_warns_not_installed():
+def test_conda_env_is_built_not_ignored():
+    """environment.yml used to be detected, warned about, and skipped — and the
+    artifact was then failed on the very import it had declared. The base image
+    IS micromamba, so the declared environment gets built in the install phase."""
     det = signatures.scan(FIXTURES / "conda-env")
     p = plan_env(det, {"environment": {}}, _cfg(), FIXTURES / "conda-env")
-    assert not any("environment.yml" in c for c in p.install_commands)
-    assert any("NOT installed" in w for w in p.warnings)
+    assert any("micromamba create" in c and "environment.yml" in c for c in p.install_commands)
+    assert p.conda_env_prefix == "/work/.reprobe_env"
+    # built is not the same as faithful — say what it does not reproduce
+    assert any("activate" in w for w in p.warnings)
 
 
-def test_declared_conda_warns_and_still_autodetects(tmp_path):
+def test_conda_env_and_requirements_txt_do_not_shadow_each_other(tmp_path):
+    """A --target pip install lands on PYTHONPATH, which precedes site-packages —
+    it would shadow the very environment the manifest declared. Both go into the
+    env instead."""
     (tmp_path / "environment.yml").write_text("dependencies: [pandas]\n")
     (tmp_path / "requirements.txt").write_text("pandas\n")
     det = DetectResult(artifact_types=["jupyter"])
     p = plan_env(det, {"environment": {"dependencies": "environment.yml"}}, _cfg(), tmp_path)
-    assert any("requirements.txt" in c for c in p.install_commands)
-    assert any("NOT installed" in w for w in p.warnings)
+
+    pip = [c for c in p.install_commands if "pip install" in c]
+    assert pip and all(c.startswith("/work/.reprobe_env/bin/pip") for c in pip), pip
+    assert not any("--target=/work/.reprobe_deps" in c for c in p.install_commands)
+
+
+def test_notebook_env_gets_papermill_or_it_runs_the_wrong_python(tmp_path):
+    """papermill lives in the BASE image. Without it inside the built env, the
+    notebook runner finds the base papermill on PATH and executes against the
+    interpreter environment.yml exists to replace."""
+    (tmp_path / "environment.yml").write_text("dependencies: [pandas]\n")
+    nb = plan_env(DetectResult(artifact_types=["jupyter"]), {}, _cfg(), tmp_path)
+    py = plan_env(DetectResult(artifact_types=["python"]), {}, _cfg(), tmp_path)
+    assert any("papermill" in c for c in nb.install_commands)
+    assert not any("papermill" in c for c in py.install_commands)
+
+
+def test_anaconda_defaults_channel_is_flagged(tmp_path):
+    (tmp_path / "environment.yml").write_text("channels: [defaults]\ndependencies: [pandas]\n")
+    p = plan_env(DetectResult(artifact_types=["python"]), {}, _cfg(), tmp_path)
+    assert any("terms of service" in w for w in p.warnings)
 
 
 def test_declared_missing_dependency_file_warns(tmp_path):
@@ -366,7 +393,7 @@ def test_install_command_quotes_untrusted_dep_filename(tmp_path):
     from reprobe.envbuild.base import _install_commands
     weird = "a b;c.txt"                       # valid filename, shell-hostile if raw
     (tmp_path / weird).write_text("numpy\n")
-    cmds, _ = _install_commands({"dependencies": weird}, tmp_path, r_needed=False)
+    cmds, _, _ = _install_commands({"dependencies": weird}, tmp_path, r_needed=False)
     pip = next(c for c in cmds if c.startswith("pip install"))
     assert "'a b;c.txt'" in pip                # shlex-quoted
     assert "-r a b;c.txt" not in pip           # never the raw injectable form
@@ -520,3 +547,32 @@ def test_declared_install_list_ignores_unrelated_vectors(tmp_path):
 def test_declared_install_list_forms(tmp_path, src, expected):
     from reprobe.detect.signatures import _declared_install_packages
     assert _declared_install_packages(src) == expected
+
+
+def test_conda_package_cache_is_never_on_the_work_bind_mount(tmp_path):
+    """/work is a host bind mount, and on Windows/macOS that filesystem folds
+    case — while micromamba's package cache is integrity-checked file-for-file.
+    ncurses (a CPython dependency) ships share/terminfo/N and .../n, so a cache
+    on /work dies with "Cannot find a valid extracted directory cache". Observed
+    on a real run; the cache belongs on the container's own filesystem."""
+    (tmp_path / "environment.yml").write_text("dependencies: [pandas]\n", encoding="utf-8")
+    p = plan_env(DetectResult(artifact_types=["python"]), {}, _cfg(), tmp_path)
+    create = next(c for c in p.install_commands if "micromamba create" in c)
+    root_prefix = create.split("MAMBA_ROOT_PREFIX=")[1].split()[0]
+    assert not root_prefix.startswith("/work"), root_prefix
+    assert not root_prefix.startswith("/tmp"), f"{root_prefix} is a 4g tmpfs; torch overflows it"
+
+
+def test_case_folding_host_is_disclosed(tmp_path, monkeypatch):
+    """On a case-folding host the built env is close to, but not byte-identical
+    with, the one that was solved. Say so rather than let it pass as faithful."""
+    import reprobe.envbuild.base as eb
+    (tmp_path / "environment.yml").write_text("dependencies: [pandas]\n", encoding="utf-8")
+
+    monkeypatch.setattr(eb, "_case_insensitive", lambda path: True)
+    assert any("folds case" in w for w in
+               plan_env(DetectResult(artifact_types=["python"]), {}, _cfg(), tmp_path).warnings)
+
+    monkeypatch.setattr(eb, "_case_insensitive", lambda path: False)
+    assert not any("folds case" in w for w in
+                   plan_env(DetectResult(artifact_types=["python"]), {}, _cfg(), tmp_path).warnings)

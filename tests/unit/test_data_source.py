@@ -121,7 +121,7 @@ def test_merge_copies_nested_tree(tmp_path):
 
     copied, collisions = merge_into(src, dest)
 
-    assert copied == 2 and collisions == []
+    assert sorted(copied) == ["Study Data/p01.csv", "top.txt"] and collisions == []
     assert (dest / "Study Data" / "p01.csv").read_text() == "x"
 
 
@@ -131,7 +131,7 @@ def test_merge_into_subdir(tmp_path):
     (src / "p01.csv").write_text("x", encoding="utf-8")
     dest.mkdir()
     copied, _ = merge_into(src, dest, "dataset/raw")
-    assert copied == 1
+    assert copied == ["dataset/raw/p01.csv"]
     assert (dest / "dataset" / "raw" / "p01.csv").is_file()
 
 
@@ -146,7 +146,7 @@ def test_merge_never_overwrites_the_artifacts_own_files(tmp_path):
 
     copied, collisions = merge_into(src, dest)
 
-    assert copied == 1 and collisions == ["main.py"]
+    assert copied == ["new.csv"] and collisions == ["main.py"]
     assert (dest / "main.py").read_text() == "print('from the repo')"
 
 
@@ -159,7 +159,7 @@ def test_merge_cannot_escape_the_tree(tmp_path):
 
     copied, _ = merge_into(src, dest, "../../escaped")
 
-    assert copied == 1
+    assert copied == ["escaped/ok.csv"]
     assert (dest / "escaped" / "ok.csv").is_file()
     assert not (tmp_path / "escaped").exists(), "data escaped the artifact tree"
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .base import BaseRunner, RunContext, _q
+from .base import BaseRunner, RunContext, _q, env_path_prefix
 from ..models import Capabilities
 
 
@@ -27,4 +27,5 @@ class PythonScriptRunner(BaseRunner):
         # PYTHONPATH lets a gated-egress install phase drop deps into /work/.reprobe_deps
         return ["bash", "-c",
                 f"export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache MPLCONFIGDIR=/tmp; "
-                f"export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; python {_q(target)} {extra}".rstrip()]
+                f"export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; "
+                f"{env_path_prefix(ctx)}python {_q(target)} {extra}".rstrip()]

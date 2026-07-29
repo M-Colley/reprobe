@@ -185,3 +185,35 @@ def test_compare_results_returns_none_on_junk():
                                  coverage="c") is None
     assert roles.compare_results(_Client({"claims": []}), paper="p", produced="q",
                                  coverage="c") is None
+
+
+def test_a_deposits_figures_are_never_mistaken_for_the_paper(tmp_path):
+    """Merging a data deposit into the tree put its PDFs in reach of the paper
+    finder, and a figure from OSF was reported as "full text of ... (committed in
+    the repository)" — wrong twice: not the paper, and not committed."""
+    from reprobe.paper import find_pdf
+
+    (tmp_path / "dataset" / "HeatMap").mkdir(parents=True)
+    fig = tmp_path / "dataset" / "HeatMap" / "gaze_entropy_annotated_OSF_35.pdf"
+    fig.write_bytes(b"%PDF-1.4 figure")
+
+    merged = {"dataset/HeatMap/gaze_entropy_annotated_OSF_35.pdf"}
+    assert find_pdf(tmp_path, exclude=merged) is None
+    assert find_pdf(tmp_path) == fig            # without the exclusion it is picked
+
+    # the submission's own PDF still wins over anything the deposit brought
+    own = tmp_path / "paper.pdf"
+    own.write_bytes(b"%PDF-1.4 manuscript")
+    assert find_pdf(tmp_path, exclude=merged) == own
+
+
+def test_declared_paper_pdf_wins_even_inside_a_deposit_path(tmp_path):
+    """An author who explicitly points at a PDF has made a statement; the
+    exclusion is a heuristic and must not override it."""
+    from reprobe.paper import find_pdf
+
+    (tmp_path / "dataset").mkdir()
+    p = tmp_path / "dataset" / "manuscript.pdf"
+    p.write_bytes(b"%PDF-1.4")
+    assert find_pdf(tmp_path, {"paper": {"pdf": "dataset/manuscript.pdf"}},
+                    exclude={"dataset/manuscript.pdf"}) == p

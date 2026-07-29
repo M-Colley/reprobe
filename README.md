@@ -100,6 +100,13 @@ still follows the primary source's pin alone. Authors can declare the same thing
 permanently with `data_sources:` in the manifest; when neither is present and the
 README links a data repository, the report says so and prints the command.
 
+**Declared environments are built, not assumed.** A `requirements.txt` is
+pip-installed and an `environment.yml` is built with micromamba (the pinned base
+*is* a micromamba image) during the sandboxed **install phase**; the analysis then
+runs with that interpreter, still under `--network none`. The report states what
+building it does *not* reproduce — conda `activate` hooks, environment variables,
+and exact versions, since channels resolve fresh with no lock file.
+
 Missing R packages are handled automatically: reprobe detects the CRAN packages a
 repo needs (`library()`/`require()`/`pkg::` and `DESCRIPTION`) and installs the
 CRAN-available ones — pinned to a dated snapshot (`r.cran_snapshot` in

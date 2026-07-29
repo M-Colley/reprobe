@@ -9,17 +9,17 @@ year: 2026
 # Bump on every republish — a tag must never be reused for different bytes, or
 # reports that pin "<year>.<revision>" stop meaning one thing. Revision 2 adds
 # the base-r compiler toolchain + preinstalled stats stack; revision 3 adds the
-# dataset readers (pyarrow/openpyxl/pytables/...) that base-py was missing (see
-# CHANGELOG).
-revision: 3                       # base-image tag becomes "<year>.<revision>"
+# dataset readers (pyarrow/openpyxl/pytables/...) that base-py was missing;
+# revision 4 adds CPU-only pytorch + torchvision to base-py (see CHANGELOG).
+revision: 4                       # base-image tag becomes "<year>.<revision>"
 
 base_images:
   # The immutable build base. Add the @sha256:... digest after first pull:
   #   docker pull mambaorg/micromamba:1.5.10-noble && docker inspect ...
   micromamba_base: "mambaorg/micromamba:1.5.10-noble"
-  python:     "ghcr.io/m-colley/reprobe-base-py:2026.3"   # built by images/build-images.sh
-  r:          "ghcr.io/m-colley/reprobe-base-r:2026.3"
-  controller: "ghcr.io/m-colley/reprobe-controller:2026.3"
+  python:     "ghcr.io/m-colley/reprobe-base-py:2026.4"   # built by images/build-images.sh
+  r:          "ghcr.io/m-colley/reprobe-base-r:2026.4"
+  controller: "ghcr.io/m-colley/reprobe-controller:2026.4"
 
 llm:
   enabled: true

@@ -39,6 +39,10 @@ class RunContext:
     config: Config
     limits: dict
     pre_index: dict[str, float] = field(default_factory=dict)   # rundir snapshot before run
+    # Conda env the install phase built from the artifact's environment.yml. When
+    # set, its bin/ goes first on PATH so `python`/`papermill` are the artifact's
+    # own, not the base image's.
+    conda_env_prefix: Optional[str] = None
 
 
 @runtime_checkable
@@ -63,11 +67,26 @@ def _q(s: object) -> str:
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
+def env_path_prefix(ctx: "RunContext") -> str:
+    """`export PATH=…` putting the artifact's own conda env first, or "".
+
+    One place, so every runner picks up a built environment the same way and a
+    step can never silently execute against the base interpreter that the
+    artifact's environment.yml exists to replace."""
+    prefix = getattr(ctx, "conda_env_prefix", None)
+    return f"export PATH={prefix}/bin:$PATH; " if prefix else ""
+
+
 def snapshot(rundir: Path) -> dict[str, float]:
     """Cheap mtime snapshot of files under rundir, to detect produced files."""
     idx: dict[str, float] = {}
     for root, dirs, files in os.walk(rundir):
-        dirs[:] = [d for d in dirs if d not in {".git", "node_modules"}]
+        # The harness's own scratch dirs are not artifact output. Walking them
+        # is also what makes this expensive: a conda environment built for the
+        # artifact is ~50k files, snapshotted twice per step, and every one of
+        # them would be reported as a file the run "produced".
+        dirs[:] = [d for d in dirs
+                   if d not in {".git", "node_modules"} and not d.startswith(".reprobe_")]
         for f in files:
             p = Path(root) / f
             try:

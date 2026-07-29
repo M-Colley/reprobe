@@ -322,3 +322,41 @@ def test_harness_error_before_launch_claims_no_output(tmp_path):
     assert res.status == "error" and res.diagnostics["infra"] is True
     assert "log_tail" not in res.diagnostics
     assert res.artifacts == []
+
+
+def test_built_conda_env_goes_first_on_path(tmp_path):
+    """A step must execute with the environment the artifact declared. Without
+    this the base image's `python`/`papermill` win and environment.yml is built
+    for nothing."""
+    from reprobe.runners.jupyter import JupyterRunner
+
+    ctx = _ctx(tmp_path, RunStep(target="run.py", kind="python"))
+    ctx.conda_env_prefix = "/work/.reprobe_env"
+    cmd = _bash(PythonScriptRunner().build_command(ctx))
+    assert "export PATH=/work/.reprobe_env/bin:$PATH" in cmd
+    assert cmd.index("export PATH=") < cmd.index("python 'run.py'")
+
+    nb = _ctx(tmp_path, RunStep(target="nb.ipynb", kind="jupyter"))
+    nb.conda_env_prefix = "/work/.reprobe_env"
+    nbcmd = _bash(JupyterRunner().build_command(nb))
+    assert "export PATH=/work/.reprobe_env/bin:$PATH" in nbcmd
+    assert nbcmd.index("export PATH=") < nbcmd.index("command -v papermill")
+
+
+def test_no_conda_env_leaves_the_command_unchanged(tmp_path):
+    ctx = _ctx(tmp_path, RunStep(target="run.py", kind="python"))
+    assert "export PATH=" not in _bash(PythonScriptRunner().build_command(ctx))
+
+
+def test_harness_scratch_dirs_are_not_artifact_output(tmp_path):
+    """A built conda env is ~50k files under /work/.reprobe_env. Walking it makes
+    every snapshot expensive and reports each file as something the run produced."""
+    from reprobe.runners.base import snapshot
+
+    (tmp_path / ".reprobe_env" / "lib").mkdir(parents=True)
+    (tmp_path / ".reprobe_env" / "lib" / "torch.so").write_text("x", encoding="utf-8")
+    (tmp_path / ".reprobe_deps").mkdir()
+    (tmp_path / ".reprobe_deps" / "pkg.py").write_text("x", encoding="utf-8")
+    (tmp_path / "results.csv").write_text("a\n", encoding="utf-8")
+
+    assert set(snapshot(tmp_path)) == {"results.csv"}

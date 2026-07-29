@@ -118,19 +118,27 @@ def find_doi(src: Path, manifest_meta: dict[str, Any] | None = None,
     return None
 
 
-def find_pdf(src: Path, manifest_meta: dict[str, Any] | None = None) -> Optional[Path]:
+def find_pdf(src: Path, manifest_meta: dict[str, Any] | None = None, *,
+             exclude: Optional[set[str]] = None) -> Optional[Path]:
     """The most paper-like PDF in the repo, or None.
 
     A manifest ``paper.pdf`` wins. Otherwise prefer a shallow file whose name
     looks like a paper rather than a figure/appendix, then the largest — a
-    manuscript is normally the biggest PDF a repo carries."""
+    manuscript is normally the biggest PDF a repo carries.
+
+    ``exclude`` holds repo-relative paths that came from a merged data deposit.
+    A deposit of figures is full of PDFs, and calling one of them "the paper,
+    committed in the repository" is wrong twice over — it is not the paper, and
+    it was not committed. The paper is a property of the submission itself."""
     declared = ((manifest_meta or {}).get("paper") or {}).get("pdf")
     if declared:
         cand = src / str(declared)
         if cand.is_file() and cand.suffix.lower() == ".pdf":
-            return cand
+            return cand                  # an explicit declaration always wins
+    skip = exclude or set()
     pdfs = [p for p in src.rglob("*.pdf")
-            if p.is_file() and not p.is_symlink() and ".git" not in p.parts][:200]
+            if p.is_file() and not p.is_symlink() and ".git" not in p.parts
+            and p.relative_to(src).as_posix() not in skip][:200]
     if not pdfs:
         return None
     hint = re.compile(r"paper|manuscript|preprint|camera|accepted|main|article", re.I)
@@ -267,11 +275,15 @@ def doi_text(doi: str, workdir: Path) -> Paper:
 
 def locate(src_dir: str | Path, workdir: str | Path, *,
            manifest_meta: dict[str, Any] | None = None,
-           pin_value: str = "") -> Optional[Paper]:
+           pin_value: str = "",
+           exclude: Optional[set[str]] = None) -> Optional[Paper]:
     """Find the paper for this artifact: a committed PDF first (full text, no
-    network), else a DOI. Returns None when the artifact references no paper."""
+    network), else a DOI. Returns None when the artifact references no paper.
+
+    ``exclude`` names files merged in from a data deposit — they are not part of
+    the submission and must never be mistaken for its paper."""
     src, work = Path(src_dir), Path(workdir)
-    pdf = find_pdf(src, manifest_meta)
+    pdf = find_pdf(src, manifest_meta, exclude=exclude)
     if pdf is not None:
         rel = str(pdf.relative_to(src)).replace("\\", "/")
         text, warns = pdf_text(pdf)

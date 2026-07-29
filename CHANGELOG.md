@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased — the environment an artifact declared is the one it gets
+
+A real submission (`ciao-group/PerceivedRisk`, 2026-07) declared
+`environment.yml` and was failed for `ModuleNotFoundError: torch` — a module its
+own manifest pulls in via `ultralytics`. The builder had detected the file,
+warned that it was "NOT installed", and run the code against the bare base image
+anyway. The warning was honest; the outcome still read as broken code.
+
+- **`environment.yml` is now built, not just warned about.** The pinned base *is*
+  a micromamba image, so the artifact's declared conda environment is created in
+  the same sanctioned egress phase that already installs pip and CRAN deps, and
+  the analysis runs with that interpreter (its `bin/` goes first on `PATH`).
+  Works for a manifest-declared `dependencies:` and for auto-detected
+  `environment.yml` / `binder/environment.yml`.
+- **Built is not the same as faithful, and the report says so**: conda `activate`
+  hooks and env vars are not applied, channels resolve fresh with no lock, and
+  when a notebook step exists the harness adds papermill/ipykernel/nbconvert to
+  the artifact's environment (otherwise the notebook runner finds the *base*
+  image's papermill and executes against the interpreter the environment.yml
+  existed to replace). An `defaults`-channel environment is flagged for
+  Anaconda's terms of service.
+- **A repo shipping both `environment.yml` and `requirements.txt` installs both
+  into the env.** The old `pip install --target=/work/.reprobe_deps` lands on
+  `PYTHONPATH`, which precedes `site-packages` — it would have shadowed the very
+  environment the artifact declared.
+- **CPU-only `pytorch` + `torchvision` added to `base-py`.** Torch-importing
+  submissions are the norm at this venue and were all failing the same way.
+  CPU-only is deliberate: `docker_exec` never passes `--gpus`, so a CUDA build
+  would be gigabytes that cannot execute. **Base images republished as `2026.4`;
+  run `bash images/build-images.sh` before the next run.**
+- **micromamba's package cache never goes on `/work`.** `/work` is a host bind
+  mount, and on a Windows or macOS host that filesystem folds case — while the
+  package cache is integrity-checked file-for-file. ncurses (a CPython
+  dependency) ships `share/terminfo/N` and `.../n`, which merge into one entry,
+  and the build then dies with *"Cannot find a valid extracted directory cache
+  for ncurses"*. Found by running it, not by reading it. The cache now lives on
+  the install container's own filesystem — not `/tmp`, which is a 4 GB tmpfs a
+  torch-sized download would overflow. On a case-folding host the report also
+  discloses that the built environment is close to, but not byte-identical with,
+  the one that was solved.
+- **The harness's own scratch dirs are no longer counted as artifact output.**
+  `snapshot()` walked `.reprobe_deps` / `.reprobe_cache`; a built conda env is
+  ~50k more files, snapshotted twice per step and reported as files the run
+  "produced".
+- **A data deposit's PDFs can no longer be mistaken for the paper.** Merging a
+  deposit put its figures in reach of the paper finder, and an OSF heatmap was
+  reported as "full text of … (committed in the repository)" — wrong twice over.
+  Files merged from a deposit are now excluded from the search; an explicit
+  `paper.pdf` in the manifest still wins.
+
 ## 0.3.0 — the artifact is not always one repository
 
 ### Composite artifacts: code in git, data on OSF
