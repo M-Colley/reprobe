@@ -88,13 +88,42 @@ _R_BASE_PKGS = frozenset({
 # deposit can never carry a shell metacharacter into the later `bash -c`.
 # --------------------------------------------------------------------------- #
 _PY_MOD = r"[A-Za-z_][A-Za-z0-9_]*"
-_PY_DIST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Trailing "[extra]" is permitted so a distribution can carry the extra that
+# actually provides the imported submodule (see _PY_SUBMODULE_TO_DIST).
+_PY_DIST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?$")
 # What follows the module name has to look like Python, not English. Prose in a
 # docstring ("import the module first") matched a bare `import\s+(\w+)` and put
 # "the" on the install list, so require a real statement ending: end of line, a
 # comma, ` as `, a dotted path, or a trailing comment.
 _PY_IMPORT_RE = re.compile(rf"(?m)^[ \t]*import[ \t]+({_PY_MOD})(?=[ \t]*(?:$|[,#.])|[ \t]+as[ \t])")
 _PY_FROM_RE = re.compile(rf"(?m)^[ \t]*from[ \t]+({_PY_MOD})(?:\.{_PY_MOD})*[ \t]+import[ \t]")
+
+# The same two statements, keeping the dotted path the regexes above discard.
+# `from ray import tune` names the submodule in the IMPORT list, not the module
+# path, so both halves have to be read to reconstruct "ray.tune".
+_PY_IMPORT_DOTTED_RE = re.compile(rf"(?m)^[ \t]*import[ \t]+({_PY_MOD}(?:\.{_PY_MOD})+)")
+_PY_FROM_NAMES_RE = re.compile(
+    rf"(?m)^[ \t]*from[ \t]+({_PY_MOD}(?:\.{_PY_MOD})*)[ \t]+import[ \t]+([^\n#]+)")
+
+#: Dotted import path -> the distribution WITH the extra that provides it.
+#: An import scan reads `from ray import tune` as the distribution `ray`, and a
+#: bare `pip install ray` then fails at runtime with the library's own advice —
+#: "Can't import ray.tune as some dependencies are missing. Run `pip install
+#: "ray[tune]"` to fix." The extra appears nowhere in the source, so it has to
+#: be known here. Longest path wins, so ray.tune.schedulers still maps to
+#: ray[tune]. Keep this list to cases whose upstream genuinely gates the
+#: submodule behind an extra — guessing one that does not exist turns a working
+#: install into a resolver error.
+_PY_SUBMODULE_TO_DIST = {
+    "ray.tune": "ray[tune]",
+    "ray.train": "ray[train]",
+    "ray.serve": "ray[serve]",
+    "ray.rllib": "ray[rllib]",
+    "ray.data": "ray[data]",
+    "dask.dataframe": "dask[dataframe]",
+    "dask.array": "dask[array]",
+    "dask.distributed": "distributed",     # a separate distribution, not an extra
+}
 
 #: Import name -> PyPI distribution, for the cases where they differ. Unlisted
 #: names are assumed to match, which is true for the overwhelming majority.
@@ -165,6 +194,7 @@ def scan_py_packages(root: Path, files) -> list[str]:
     stdlib = getattr(sys, "stdlib_module_names", frozenset())
     local = _local_module_names(root, files)
     found: set[str] = set()
+    extras: set[str] = set()
     for p in files:
         suf = p.suffix.lower()
         if suf == ".py":
@@ -177,6 +207,7 @@ def scan_py_packages(root: Path, files) -> list[str]:
             continue
         for rx in (_PY_IMPORT_RE, _PY_FROM_RE):
             found.update(rx.findall(text))
+        extras.update(_extra_dists(text, local))
     dists = set()
     for mod in found:
         if mod in stdlib or mod in local or mod.startswith("_"):
@@ -184,7 +215,36 @@ def scan_py_packages(root: Path, files) -> list[str]:
         dist = _PY_IMPORT_TO_DIST.get(mod, mod)
         if _PY_DIST_RE.match(dist):
             dists.add(dist)
-    return sorted(dists)
+    dists |= extras
+    # `ray[tune]` supersedes a bare `ray`: it is the same distribution, and
+    # installing both would leave the run depending on which pip resolved last.
+    superseded = {d.split("[", 1)[0] for d in dists if "[" in d}
+    return sorted(d for d in dists if d not in superseded)
+
+
+def _extra_dists(text: str, local: frozenset[str] | set[str]) -> set[str]:
+    """Distributions whose EXTRA a dotted import implies (ray.tune -> ray[tune]).
+
+    Reads both statement shapes, since `from ray import tune` puts the submodule
+    in the import list rather than the module path. Longest known prefix wins."""
+    paths: set[str] = {m.group(1) for m in _PY_IMPORT_DOTTED_RE.finditer(text)}
+    for m in _PY_FROM_NAMES_RE.finditer(text):
+        mod = m.group(1)
+        paths.add(mod)
+        for name in re.split(r"[\s,()]+", m.group(2)):
+            if re.fullmatch(_PY_MOD, name or ""):
+                paths.add(f"{mod}.{name}")
+    out: set[str] = set()
+    for path in paths:
+        parts = path.split(".")
+        if parts[0] in local:            # the deposit's own package, not PyPI
+            continue
+        for n in range(len(parts), 1, -1):
+            dist = _PY_SUBMODULE_TO_DIST.get(".".join(parts[:n]))
+            if dist:
+                out.add(dist)
+                break
+    return out
 
 
 def _read_head(p: Path, cap: int = _R_SCAN_READ_CAP) -> str:

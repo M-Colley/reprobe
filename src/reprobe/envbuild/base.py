@@ -103,7 +103,13 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) 
     from ..detect.signatures import _PY_IMPORT_TO_DIST
 
     inverse = {v: k for k, v in _PY_IMPORT_TO_DIST.items()}
-    pairs = [(inverse.get(d, d.replace("-", "_")), d) for d in dists]
+    # An extra gets an empty module name, which the generated code treats as
+    # "always offer to pip". A presence check cannot answer for an extra:
+    # find_spec("ray.tune") succeeds on the file layout alone, while importing
+    # it still raises because ray[tune]'s dependencies are absent — which is the
+    # exact failure this mapping exists to fix. pip is idempotent, so offering
+    # an already-satisfied extra costs a no-op.
+    pairs = [("" if "[" in d else inverse.get(d, d.replace("-", "_")), d) for d in dists]
     spec = ", ".join(f'("{m}", "{d}")' for m, d in pairs)
     py = f"{conda_prefix}/bin/python" if conda_prefix else "python"
     target = ', "--target=/work/.reprobe_deps"' if not conda_prefix else ""
@@ -116,7 +122,7 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) 
         # installed under a name whose import differs from what we guessed.
         'have = {norm(getattr(x, "name", "") or "") for x in md.distributions()}; '
         "need = sorted({d for m, d in pairs "
-        "if u.find_spec(m) is None and norm(d) not in have}); "
+        "if not m or (u.find_spec(m) is None and norm(d) not in have)}); "
         'print("reprobe: imports the environment does not provide:", need or "none", flush=True); '
         "fail = [d for d in need if subprocess.call([sys.executable, \"-m\", \"pip\", "
         f'"install", "--no-input"{target}, d]) != 0]; '

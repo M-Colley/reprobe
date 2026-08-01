@@ -35,7 +35,7 @@
     "flags": [],
     "strategy": "pinned-base",
     "install_commands": [
-      "python -c 'import importlib.util as u, importlib.metadata as md, subprocess, sys; pairs = [(\"pandas\", \"pandas\")]; norm = lambda s: s.lower().replace(\"_\", \"-\"); have = {norm(getattr(x, \"name\", \"\") or \"\") for x in md.distributions()}; need = sorted({d for m, d in pairs if u.find_spec(m) is None and norm(d) not in have}); print(\"reprobe: imports the environment does not provide:\", need or \"none\", flush=True); fail = [d for d in need if subprocess.call([sys.executable, \"-m\", \"pip\", \"install\", \"--no-input\", \"--target=/work/.reprobe_deps\", d]) != 0]; print(\"reprobe: pip could NOT install (reported, not faked):\", fail or \"none\")'"
+      "python -c 'import importlib.util as u, importlib.metadata as md, subprocess, sys; pairs = [(\"pandas\", \"pandas\")]; norm = lambda s: s.lower().replace(\"_\", \"-\"); have = {norm(getattr(x, \"name\", \"\") or \"\") for x in md.distributions()}; need = sorted({d for m, d in pairs if not m or (u.find_spec(m) is None and norm(d) not in have)}); print(\"reprobe: imports the environment does not provide:\", need or \"none\", flush=True); fail = [d for d in need if subprocess.call([sys.executable, \"-m\", \"pip\", \"install\", \"--no-input\", \"--target=/work/.reprobe_deps\", d]) != 0]; print(\"reprobe: pip could NOT install (reported, not faked):\", fail or \"none\")'"
     ],
     "step_statuses": [
       "partial"

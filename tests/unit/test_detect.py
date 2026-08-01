@@ -696,3 +696,60 @@ def test_manifest_repo_still_carries_detected_packages(tmp_path):
     assert res.run_plan_source == "manifest"
     assert "shap" in res.py_packages and "opencv-python" in res.py_packages
     assert "ggplot2" in res.r_packages
+
+
+# --------------------------------------------------------------------------- #
+# Python extras: an import scan cannot see them, so they are mapped explicitly
+# --------------------------------------------------------------------------- #
+def _scan_py(tmp_path, source: str, **extra_files):
+    from reprobe.detect.signatures import scan_py_packages
+    (tmp_path / "a.py").write_text(source, encoding="utf-8")
+    for name, body in extra_files.items():
+        (tmp_path / name).write_text(body, encoding="utf-8")
+    # rglob, like the real scanner: a package directory is only recognised as
+    # local when its own files are in the list.
+    return scan_py_packages(tmp_path, sorted(tmp_path.rglob("*.py")))
+
+
+def test_submodule_import_maps_to_the_extra_that_provides_it(tmp_path):
+    """`pip install ray` leaves `from ray import tune` failing at runtime with
+    ray's own advice: run `pip install "ray[tune]"`. The extra appears nowhere
+    in the source, so a bare import scan can never find it. Regression for
+    PerceivedRisk (2026-07)."""
+    assert "ray[tune]" in _scan_py(tmp_path, "from ray import tune\n")
+
+
+def test_extra_supersedes_the_bare_distribution(tmp_path):
+    """Installing both leaves the run depending on which pip resolved last."""
+    got = _scan_py(tmp_path, "import ray\nfrom ray import tune\n")
+    assert "ray[tune]" in got and "ray" not in got
+
+
+@pytest.mark.parametrize("src,expected", [
+    ("from ray import tune\n", "ray[tune]"),              # submodule in the import list
+    ("import ray.tune\n", "ray[tune]"),                   # submodule in the module path
+    ("import ray.tune.schedulers\n", "ray[tune]"),        # longest known prefix wins
+    ("from ray.tune import Tuner\n", "ray[tune]"),
+    ("from dask.dataframe import read_csv\n", "dask[dataframe]"),
+    ("from dask.distributed import Client\n", "distributed"),   # separate dist, not an extra
+])
+def test_every_dotted_statement_shape_is_read(tmp_path, src, expected):
+    assert expected in _scan_py(tmp_path, src)
+
+
+def test_a_local_package_never_becomes_an_extra(tmp_path):
+    (tmp_path / "ray").mkdir()
+    (tmp_path / "ray" / "__init__.py").write_text("", encoding="utf-8")
+    got = _scan_py(tmp_path, "from ray import tune\n")
+    assert not any(g.startswith("ray") for g in got), got
+
+
+def test_extras_bypass_the_presence_check(tmp_path):
+    """find_spec("ray.tune") succeeds on the file layout alone while importing
+    still raises, so an extra must be offered to pip unconditionally — the
+    check cannot answer for it."""
+    from reprobe.envbuild.base import _py_detected_install_command
+    cmd = _py_detected_install_command(["ray[tune]", "shap"], "/work/.reprobe_env")
+    assert '("", "ray[tune]")' in cmd, cmd          # empty module -> always install
+    assert '("shap", "shap")' in cmd                # ordinary dist keeps its check
+    assert "if not m or (u.find_spec(m) is None" in cmd
