@@ -87,6 +87,44 @@ def _cran_install_command(packages: list[str], cran_repo: str) -> str:
     return "Rscript -e '" + r_code + "'"
 
 
+def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) -> str:
+    """Install statically-detected imports the environment does not already ship.
+
+    The Python twin of ``_cran_install_command``, and it follows the same rules:
+    the presence check happens INSIDE the container at install time, so nothing
+    already provided by the base image (or by the artifact's own built env) is
+    touched; and a name PyPI does not have is *reported*, never faked and never
+    fatal — a mis-detected local module must not fail the phase.
+
+    Distribution names are pre-validated to ``[A-Za-z0-9][A-Za-z0-9._-]*`` and
+    module names to an identifier, so embedding them in the double-quoted Python
+    literals inside this single-quoted ``-c`` argument cannot inject shell or
+    Python code."""
+    from ..detect.signatures import _PY_IMPORT_TO_DIST
+
+    inverse = {v: k for k, v in _PY_IMPORT_TO_DIST.items()}
+    pairs = [(inverse.get(d, d.replace("-", "_")), d) for d in dists]
+    spec = ", ".join(f'("{m}", "{d}")' for m, d in pairs)
+    py = f"{conda_prefix}/bin/python" if conda_prefix else "python"
+    target = ', "--target=/work/.reprobe_deps"' if not conda_prefix else ""
+    code = (
+        "import importlib.util as u, importlib.metadata as md, subprocess, sys; "
+        f"pairs = [{spec}]; "
+        'norm = lambda s: s.lower().replace("_", "-"); '
+        # Two independent presence checks: the module may be importable without
+        # dist metadata (conda packages sometimes are), and the dist may be
+        # installed under a name whose import differs from what we guessed.
+        'have = {norm(getattr(x, "name", "") or "") for x in md.distributions()}; '
+        "need = sorted({d for m, d in pairs "
+        "if u.find_spec(m) is None and norm(d) not in have}); "
+        'print("reprobe: imports the environment does not provide:", need or "none", flush=True); '
+        "fail = [d for d in need if subprocess.call([sys.executable, \"-m\", \"pip\", "
+        f'"install", "--no-input"{target}, d]) != 0]; '
+        'print("reprobe: pip could NOT install (reported, not faked):", fail or "none")'
+    )
+    return f"{py} -c '{code}'"
+
+
 def plan(
     detect_result: DetectResult,
     manifest_meta: dict[str, Any],
@@ -116,7 +154,9 @@ def plan(
         detected_r_packages=detect_result.r_packages,
         cran_repo=config.cran_repo,
         executes_code=bool(detect_result.steps),
-        notebooks=_needs(kinds, "jupyter"))
+        notebooks=_needs(kinds, "jupyter"),
+        py_needed=py_needed,
+        detected_py_packages=detect_result.py_packages)
 
     flags = detect_result.flags
     if ("needs-repo2docker" in flags or builder == "repo2docker") and allow_repo2docker:
@@ -267,7 +307,10 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
                       detected_r_packages: list[str] | tuple[str, ...] = (),
                       cran_repo: str = "",
                       executes_code: bool = False,
-                      notebooks: bool = False) -> tuple[list[str], list[str], Optional[str]]:
+                      notebooks: bool = False,
+                      py_needed: bool = False,
+                      detected_py_packages: list[str] | tuple[str, ...] = (),
+                      ) -> tuple[list[str], list[str], Optional[str]]:
     """Returns (commands, warnings). Any declared or detected dependency file
     the pinned-base builder does NOT install must surface as a warning — the
     report says what was not installed (never over-claim)."""
@@ -332,6 +375,26 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
         else:
             warnings.append(f"R packages {cran_pkgs} were declared/detected but no R steps were found; "
                             "they were NOT installed")
+
+    # Python imports the code reaches for but no manifest declares. Same policy
+    # as the CRAN block above: install only what the environment lacks, report
+    # what PyPI refuses. Without this, an artifact that imports shap without
+    # declaring it either died on ModuleNotFoundError or — worse — passed by
+    # silently borrowing the package from the harness base image.
+    py_pkgs = [str(d) for d in (detected_py_packages or [])]
+    if py_pkgs:
+        if py_needed:
+            cmds.append(_py_detected_install_command(py_pkgs, conda_prefix))
+            warnings.append(
+                f"{len(py_pkgs)} Python import(s) were detected statically and installed only "
+                "where the environment did not already provide them: "
+                + ", ".join(py_pkgs[:12]) + ("…" if len(py_pkgs) > 12 else "")
+                + ". Anything in that list the artifact's own manifest does not declare is a "
+                  "reproducibility defect of the artifact, not of the harness — the install log "
+                  "records which were actually missing.")
+        else:
+            warnings.append(f"Python packages {py_pkgs} were detected but no Python steps "
+                            "were found; they were NOT installed")
 
     # The silent case, and the most over-claimable one: the artifact declares NO
     # dependencies anywhere. Every library its code imports then comes from

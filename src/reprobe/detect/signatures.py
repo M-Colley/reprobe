@@ -12,7 +12,13 @@ from pathlib import Path
 from ..models import DetectResult, RunStep
 
 _SKIP_DIRS = {".git", ".hg", "node_modules", "__pycache__", ".ipynb_checkpoints",
-              "Library", "Temp", "obj", "Build", "Builds", ".venv", "venv", "renv"}
+              "Library", "Temp", "obj", "Build", "Builds", ".venv", "venv", "renv",
+              # Installed third-party code is never the artifact's own. A deposit
+              # that vendors a site-packages tree (or a re-scanned run dir, which
+              # carries the env the install phase built) otherwise contributes
+              # thousands of files and every dependency of every dependency.
+              "site-packages", "dist-packages",
+              ".reprobe_env", ".reprobe_deps", ".reprobe_cache", ".reprobe_Rlib"}
 # The fetched tree is untrusted. Walk it without following symlinks (no loops,
 # no escaping the fetch dir) and stop after a sane cap so a deposit with millions
 # of files can't hang detection before any container is even used.
@@ -65,6 +71,120 @@ _R_BASE_PKGS = frozenset({
     "boot", "class", "cluster", "codetools", "foreign", "KernSmooth", "lattice",
     "MASS", "Matrix", "mgcv", "nlme", "nnet", "rpart", "spatial", "survival",
 })
+
+
+# --------------------------------------------------------------------------- #
+# Python imports the artifact uses but never declares.
+#
+# The R side has done this since 0.1: library()/require() calls are scanned and
+# the CRAN-available subset is installed in the sanctioned egress phase. Python
+# had no counterpart, so the same defect produced two different verdicts — an R
+# artifact calling library(shap) without declaring it ran, while the Python one
+# died on ModuleNotFoundError. Worse, a Python artifact could *appear* to pass by
+# silently borrowing a package from the harness base image, which is exactly the
+# over-claim the report elsewhere works to prevent.
+#
+# Names are validated to a strict charset so a token discovered in an untrusted
+# deposit can never carry a shell metacharacter into the later `bash -c`.
+# --------------------------------------------------------------------------- #
+_PY_MOD = r"[A-Za-z_][A-Za-z0-9_]*"
+_PY_DIST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# What follows the module name has to look like Python, not English. Prose in a
+# docstring ("import the module first") matched a bare `import\s+(\w+)` and put
+# "the" on the install list, so require a real statement ending: end of line, a
+# comma, ` as `, a dotted path, or a trailing comment.
+_PY_IMPORT_RE = re.compile(rf"(?m)^[ \t]*import[ \t]+({_PY_MOD})(?=[ \t]*(?:$|[,#.])|[ \t]+as[ \t])")
+_PY_FROM_RE = re.compile(rf"(?m)^[ \t]*from[ \t]+({_PY_MOD})(?:\.{_PY_MOD})*[ \t]+import[ \t]")
+
+#: Import name -> PyPI distribution, for the cases where they differ. Unlisted
+#: names are assumed to match, which is true for the overwhelming majority.
+_PY_IMPORT_TO_DIST = {
+    "cv2": "opencv-python", "sklearn": "scikit-learn", "skimage": "scikit-image",
+    "PIL": "pillow", "yaml": "pyyaml", "bs4": "beautifulsoup4",
+    "dateutil": "python-dateutil", "dotenv": "python-dotenv", "serial": "pyserial",
+    "OpenGL": "PyOpenGL", "Crypto": "pycryptodome", "fitz": "pymupdf",
+    "mpl_toolkits": "matplotlib", "google": "protobuf", "attr": "attrs",
+    "jwt": "pyjwt", "usb": "pyusb", "zmq": "pyzmq", "lxml": "lxml",
+    "tables": "pytables", "netCDF4": "netcdf4", "pyreadstat": "pyreadstat",
+}
+
+
+def _py_ipynb_source(p: Path) -> str:
+    """Concatenated code cells of a PYTHON-kernel notebook, else ""."""
+    import json
+    try:
+        data = json.loads(_read_head(p, 5_000_000))
+    except (ValueError, OSError, RecursionError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    meta = data.get("metadata") or {}
+    ks = meta.get("kernelspec") or {}
+    lang = str(ks.get("language", "")).lower()
+    li = str((meta.get("language_info") or {}).get("name", "")).lower()
+    name = str(ks.get("name", "")).lower()
+    # An absent kernelspec is treated as Python: that is the overwhelming default
+    # for .ipynb, and the R scanner already claims the ones that say "R".
+    if lang not in ("", "python") and li not in ("", "python") and not name.startswith("py"):
+        return ""
+    out: list[str] = []
+    for cell in (data.get("cells") or []):
+        if isinstance(cell, dict) and cell.get("cell_type") == "code":
+            src = cell.get("source")
+            out.append("".join(src) if isinstance(src, list) else str(src or ""))
+    return "\n".join(out)
+
+
+def _local_module_names(root: Path, files) -> set[str]:
+    """Module names the deposit itself provides, so its own files are never
+    mistaken for PyPI distributions. `import helper` in a repo shipping
+    helper.py must not try to install a package called "helper"."""
+    local: set[str] = set()
+    for p in files:
+        try:
+            rel_parts = p.relative_to(root).parts
+        except ValueError:
+            continue
+        if p.suffix == ".py":
+            local.add(p.stem)
+            if len(rel_parts) > 1:
+                local.add(rel_parts[0])          # a package directory
+        if p.name == "__init__.py" and len(rel_parts) > 1:
+            local.add(rel_parts[-2])
+    return local
+
+
+def scan_py_packages(root: Path, files) -> list[str]:
+    """PyPI distributions the deposit's Python code imports.
+
+    Excludes the standard library, the deposit's own modules, and relative
+    imports. Returns sorted distribution names, each matching _PY_DIST_RE. The
+    caller decides what to install; this only says what the code reaches for."""
+    import sys
+
+    stdlib = getattr(sys, "stdlib_module_names", frozenset())
+    local = _local_module_names(root, files)
+    found: set[str] = set()
+    for p in files:
+        suf = p.suffix.lower()
+        if suf == ".py":
+            text = _read_head(p)
+        elif suf == ".ipynb":
+            text = _py_ipynb_source(p)
+        else:
+            continue
+        if not text:
+            continue
+        for rx in (_PY_IMPORT_RE, _PY_FROM_RE):
+            found.update(rx.findall(text))
+    dists = set()
+    for mod in found:
+        if mod in stdlib or mod in local or mod.startswith("_"):
+            continue
+        dist = _PY_IMPORT_TO_DIST.get(mod, mod)
+        if _PY_DIST_RE.match(dist):
+            dists.add(dist)
+    return sorted(dists)
 
 
 def _read_head(p: Path, cap: int = _R_SCAN_READ_CAP) -> str:
@@ -456,6 +576,7 @@ def scan(src_dir: str | Path) -> DetectResult:
     r_pkg_files = [p for p in files
                    if p.suffix.lower() in (".r", ".rmd", ".ipynb") or p.name == "DESCRIPTION"]
     r_packages = scan_r_packages(r_pkg_files)
+    py_packages = scan_py_packages(root, files)
 
     # FAIR inputs that were previously only reachable via fetcher metadata. Most
     # fetchers (git clone in particular) return no license field at all, so a repo
@@ -478,6 +599,7 @@ def scan(src_dir: str | Path) -> DetectResult:
         flags=sorted(set(flags)),
         notes=notes,
         r_packages=r_packages,
+        py_packages=py_packages,
     )
 
 

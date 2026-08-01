@@ -139,6 +139,7 @@ class DetectResult(BaseModel):
     # pkg::/DESCRIPTION). Advisory input to the env planner, which installs the
     # CRAN-available subset in the sanctioned egress phase — never authority.
     r_packages: list[str] = Field(default_factory=list)
+    py_packages: list[str] = Field(default_factory=list)
 
 
 class EnvPlan(BaseModel):

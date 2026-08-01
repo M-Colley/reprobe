@@ -576,3 +576,123 @@ def test_case_folding_host_is_disclosed(tmp_path, monkeypatch):
     monkeypatch.setattr(eb, "_case_insensitive", lambda path: False)
     assert not any("folds case" in w for w in
                    plan_env(DetectResult(artifact_types=["python"]), {}, _cfg(), tmp_path).warnings)
+
+
+# --------------------------------------------------------------------------- #
+# Python import discovery — the counterpart to scan_r_packages
+# --------------------------------------------------------------------------- #
+def test_py_imports_detected_stdlib_and_local_excluded(tmp_path):
+    """An artifact that imports shap without declaring it used to either die on
+    ModuleNotFoundError or pass by silently borrowing the package from the
+    harness base image. R has had library() scanning since 0.1; this is its twin."""
+    (tmp_path / "main.py").write_text(
+        "import os, sys\n"
+        "import numpy as np\n"
+        "import shap\n"
+        "from sklearn.metrics import r2_score\n"
+        "from helper import allowed_classes\n"
+        "import cv2\n"
+        "from . import sibling\n",
+        encoding="utf-8")
+    (tmp_path / "helper.py").write_text("x = 1\n", encoding="utf-8")
+
+    pkgs = signatures.scan(tmp_path).py_packages
+
+    assert "shap" in pkgs
+    assert "scikit-learn" in pkgs and "opencv-python" in pkgs   # import name != dist name
+    assert "os" not in pkgs and "sys" not in pkgs               # stdlib
+    assert "helper" not in pkgs                                 # the deposit's own module
+    assert "sibling" not in pkgs                                # relative import
+
+
+def test_prose_is_not_a_dependency(tmp_path):
+    r"""`^import\s+(\w+)` matched documentation ("import the module first") and
+    put "the" on the install list."""
+    (tmp_path / "run.py").write_text(
+        '"""Usage: import the module first, then call it.\n'
+        'You should from now on import whatever you like.\n"""\n'
+        "import pandas\n",
+        encoding="utf-8")
+    pkgs = signatures.scan(tmp_path).py_packages
+    assert pkgs == ["pandas"], pkgs
+
+
+def test_vendored_dependencies_are_not_the_artifacts_imports(tmp_path):
+    """A deposit carrying a site-packages tree (or a re-scanned run dir holding
+    the env the install phase built) contributed 13k files and every transitive
+    dependency of every dependency — ~500 names including English words."""
+    (tmp_path / "main.py").write_text("import pandas\n", encoding="utf-8")
+    for vendor in (".reprobe_env/lib/python3.12/site-packages/ultralytics",
+                   "venv/lib/site-packages/foo"):
+        d = tmp_path / vendor
+        d.mkdir(parents=True)
+        (d / "mod.py").write_text("import torch_npu\nimport onnxruntime\n", encoding="utf-8")
+
+    pkgs = signatures.scan(tmp_path).py_packages
+    assert pkgs == ["pandas"], pkgs
+
+
+def test_python_notebook_imports_counted_r_notebook_not(tmp_path):
+    import json
+    nb = {"metadata": {"kernelspec": {"language": "python", "name": "python3"}},
+          "cells": [{"cell_type": "code", "source": ["import shap\n"]}]}
+    (tmp_path / "a.ipynb").write_text(json.dumps(nb), encoding="utf-8")
+    rnb = {"metadata": {"kernelspec": {"language": "R", "name": "ir"}},
+           "cells": [{"cell_type": "code", "source": ["library(ggplot2)\n"]}]}
+    (tmp_path / "b.ipynb").write_text(json.dumps(rnb), encoding="utf-8")
+
+    res = signatures.scan(tmp_path)
+    assert "shap" in res.py_packages
+    assert "ggplot2" in res.r_packages          # the R scanner still claims it
+
+
+def test_detected_python_install_only_touches_what_is_missing(tmp_path):
+    """Mirrors the CRAN rule: the presence check runs INSIDE the container, so
+    nothing the image (or the artifact's built env) already ships is reinstalled,
+    and a name PyPI lacks is reported rather than fatal."""
+    from reprobe.envbuild.base import _py_detected_install_command
+
+    cmd = _py_detected_install_command(["shap", "opencv-python"], None)
+    assert "find_spec" in cmd and "md.distributions()" in cmd     # both presence checks
+    assert '("cv2", "opencv-python")' in cmd                      # dist -> import name
+    assert "--target=/work/.reprobe_deps" in cmd
+    assert "could NOT install" in cmd
+    # into the artifact's own env when one was built, never onto PYTHONPATH
+    env_cmd = _py_detected_install_command(["shap"], "/work/.reprobe_env")
+    assert env_cmd.startswith("/work/.reprobe_env/bin/python")
+    assert "--target=" not in env_cmd
+
+
+def test_detected_python_packages_are_shell_safe(tmp_path):
+    """Discovered tokens reach a `bash -c`; the charset gate is what makes
+    embedding them in the -c argument safe."""
+    (tmp_path / "main.py").write_text("import pandas\n", encoding="utf-8")
+    for pkgs in (signatures.scan(tmp_path).py_packages,):
+        for p in pkgs:
+            assert signatures._PY_DIST_RE.match(p)
+            assert not any(c in p for c in "'\" ;|&$`\n()")
+
+
+def test_no_python_steps_means_detected_packages_are_not_installed(tmp_path):
+    (tmp_path / "notes.md").write_text("no code here\n", encoding="utf-8")
+    det = DetectResult(artifact_types=["r"], py_packages=["shap"])
+    p = plan_env(det, {}, _cfg(), tmp_path)
+    assert not any("find_spec" in c for c in p.install_commands)
+    assert any("no Python steps" in w for w in p.warnings)
+
+
+def test_manifest_repo_still_carries_detected_packages(tmp_path):
+    """A full manifest wins on steps, but it never enumerates dependencies. The
+    merge dropped py_packages, so detection found the imports, unit tests passed,
+    and the env planner received an empty list — the discovery path was dead in
+    the real pipeline. r_packages had the same shape and was already carried."""
+    (tmp_path / "autoui-repro.yml").write_text(
+        "version: 1\nrun:\n  steps: [analysis.py]\n", encoding="utf-8")
+    (tmp_path / "analysis.py").write_text("import shap\nimport cv2\n", encoding="utf-8")
+    (tmp_path / "extra.R").write_text("library(ggplot2)\n", encoding="utf-8")
+
+    res, _meta = detect(tmp_path, use_llm=False)
+
+    assert res.run_plan_source == "manifest"
+    assert "shap" in res.py_packages and "opencv-python" in res.py_packages
+    assert "ggplot2" in res.r_packages

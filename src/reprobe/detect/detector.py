@@ -38,9 +38,13 @@ def detect(
             m_result.flags = sorted(set(m_result.flags) | set(heuristic.flags))
             m_result.inventory = heuristic.inventory
             m_result.artifact_types = sorted(set(m_result.artifact_types) | set(heuristic.inventory))
-            # the deterministic scan also discovers required R packages, which a
-            # manifest doesn't enumerate — carry them for the env planner
+            # the deterministic scan also discovers required R packages and Python
+            # imports, which a manifest doesn't enumerate — carry them for the env
+            # planner. Dropping either means the planner installs nothing it
+            # detected, and the whole discovery path is dead in the real pipeline
+            # while still passing its own unit tests.
             m_result.r_packages = heuristic.r_packages
+            m_result.py_packages = heuristic.py_packages
             # ...and the license / dependency-manifest files on disk, which feed
             # the FAIR score. A manifest never declares these, so without this a
             # manifest-carrying repo would score WORSE than an unmanaged one.
