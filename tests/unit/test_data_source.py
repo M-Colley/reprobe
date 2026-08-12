@@ -8,9 +8,15 @@ import pytest
 
 from reprobe.detect.manifest import declared_data_sources
 from reprobe.fetch.base import FetchError
-from reprobe.fetch.data_source import (DirectUrlFetcher, _clean_url, _filename_for,
-                                       fetch_data_source, merge_into, parse_ref,
-                                       referenced_deposits)
+from reprobe.fetch.data_source import (
+    DirectUrlFetcher,
+    _clean_url,
+    _filename_for,
+    fetch_data_source,
+    merge_into,
+    parse_ref,
+    referenced_deposits,
+)
 from reprobe.fetch.osf import OSFFetcher, guid_of
 from reprobe.fetch.registry import select
 

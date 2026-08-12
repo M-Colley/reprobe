@@ -9,9 +9,16 @@ import tarfile
 import pytest
 
 import reprobe.fetch.base as base
-from reprobe.fetch.base import (FetchError, _check_tar_member, checksum_verdict,
-                                maybe_unzip, new_checksum_stats, record_download,
-                                run_git, safe_join)
+from reprobe.fetch.base import (
+    FetchError,
+    _check_tar_member,
+    checksum_verdict,
+    maybe_unzip,
+    new_checksum_stats,
+    record_download,
+    run_git,
+    safe_join,
+)
 from reprobe.fetch.dataverse import DataverseFetcher
 from reprobe.fetch.dryad import _DOI as DRYAD_DOI
 from reprobe.fetch.figshare import _parse as fig_parse

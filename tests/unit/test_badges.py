@@ -387,3 +387,20 @@ def test_functional_is_not_evaluated_when_the_install_phase_died():
                         install_error=badges.install_error(_install_env()))
     assert out["acm"]["functional"] == "not-evaluated"
     assert any("no statement about the artifact" in n for n in out["acm"]["notes"])
+
+
+def test_a_resolving_osf_doi_is_not_reported_as_no_identifier_found():
+    """The submitter handed us 10.17605/OSF.IO/<guid> and it resolves. The reason
+    it earns no badge is that it names storage the depositor can still change —
+    saying none was found sends an author hunting for a DOI they already have."""
+    fetch = FetchResult(input="https://doi.org/10.17605/OSF.IO/4wj86", resolved_type="osf",
+                        src_dir="/x", pin=Pin(kind="none", value="osf.io/4wj86"))
+    notes = _decide(fetch, [])["acm"]["notes"]
+    assert not any("no archival persistent identifier found" in n for n in notes)
+    assert any("still change" in n for n in notes)
+
+
+def test_a_source_with_genuinely_no_identifier_still_says_so():
+    fetch = FetchResult(input="/local/path", resolved_type="local", src_dir="/x", pin=Pin())
+    assert any("no archival persistent identifier found" in n
+               for n in _decide(fetch, [])["acm"]["notes"])

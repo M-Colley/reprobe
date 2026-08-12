@@ -9,8 +9,16 @@ import re
 from pathlib import Path
 
 from ..models import FetchResult, Pin
-from .base import (FetchError, checksum_verdict, download, get, maybe_unzip,
-                   new_checksum_stats, record_download, safe_join)
+from .base import (
+    FetchError,
+    checksum_verdict,
+    download,
+    get,
+    maybe_unzip,
+    new_checksum_stats,
+    record_download,
+    safe_join,
+)
 
 _ID = re.compile(r"figshare\.com/articles/(?:[^/]+/)?[^/]*?/(\d+)(?:/(\d+))?"
                  r"|10\.6084/m9\.figshare\.(\d+)(?:\.v(\d+))?", re.I)

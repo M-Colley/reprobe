@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from rich.console import Console
@@ -96,7 +97,8 @@ def detect(
 
     from .detect import detect as detect_artifacts
     from .detect.manifest import declared_data_sources
-    from .fetch import FetchError, fetch as fetch_ref
+    from .fetch import FetchError
+    from .fetch import fetch as fetch_ref
     from .fetch.data_source import fetch_data_source, merge_into, parse_ref
 
     sid = submission_id(ref)
@@ -126,7 +128,7 @@ def detect(
     client = None if no_llm else llm_from_config(cfg.llm)
     if client is not None and not client.available():
         client = None
-    res, meta = detect_artifacts(srcdir, use_llm=not no_llm, llm_client=client)
+    res, _meta = detect_artifacts(srcdir, use_llm=not no_llm, llm_client=client)
 
     console.print(f"[bold]source[/bold]: {fr.resolved_type} · pin {fr.pin.kind}:{fr.pin.value[:50]}")
     console.print(f"[bold]artifact types[/bold]: {', '.join(res.artifact_types) or '(none)'}")
@@ -182,12 +184,23 @@ def pull(
 
 @app.command()
 def batch(
-    csv_path: str = typer.Argument(..., help="CSV with a 'url' column (or one URL per line)"),
+    csv_path: str = typer.Argument(..., help="CSV with a 'url' column, plus an optional 'data' "
+                                             "column of deposit URLs (or one URL per line)"),
     workroot: str = typer.Option("work"),
     out: str = typer.Option("out", help="dashboard output directory"),
     config_dir: Optional[str] = typer.Option(None),
     no_run: bool = typer.Option(False, "--no-run"),
     no_llm: bool = typer.Option(False, "--no-llm"),
+    no_functional: bool = typer.Option(False, "--no-functional",
+                                       help="do not evaluate the Functional candidate"),
+    no_install: bool = typer.Option(False, "--no-install", help="skip the dependency-install phase"),
+    allow_lfs: bool = typer.Option(False, "--allow-lfs", help="pull git-lfs data during fetch"),
+    timeout: Optional[int] = typer.Option(None, "--timeout", min=1,
+                                          help="per-step wall-clock budget in seconds, for every "
+                                               "submission in the season"),
+    reuse_downloads: bool = typer.Option(False, "--reuse-downloads",
+                                         help="share pip/conda downloads across the season — see "
+                                              "`reprobe run --help` for why this is off by default"),
     resume: bool = typer.Option(False, "--resume", help="reuse existing per-submission reports; "
                                 "only fetch-failed/infra-error submissions are retried"),
 ):
@@ -203,15 +216,19 @@ def batch(
     outdir = Path(out)
     outdir.mkdir(parents=True, exist_ok=True)
     reports = []
-    for ref in refs:
-        console.print(f"[cyan]>[/cyan] {ref}")
+    for row in refs:
+        ref, data = row["url"], row["data"]
+        console.print(f"[cyan]>[/cyan] {ref}" + (f"  [dim]+{len(data)} deposit(s)[/dim]" if data else ""))
         sid = submission_id(ref)
         rep = _resumed_report(Path(workroot) / sid / "out" / "report.json") if resume else None
         if rep is not None:
             console.print("[dim]  resumed from existing report[/dim]")
         else:
             try:
-                rep = orch.run(ref, do_run=not no_run, use_llm=not no_llm, sid=sid)
+                rep = orch.run(ref, do_run=not no_run, use_llm=not no_llm, sid=sid,
+                               functional=not no_functional, install=not no_install,
+                               allow_lfs=allow_lfs, timeout_s=timeout,
+                               reuse_downloads=reuse_downloads, data_sources=data)
             except Exception as e:  # one bad submission must never abort the season
                 console.print(f"[red]  harness error[/red]: {type(e).__name__}: {e}")
                 rep = Report(submission_id=sid, harness_version=f"reprobe {_v}",
@@ -307,7 +324,8 @@ def doctor(
         t.add_row("LLM (Ollama)", "ok" if st.get("ok") else "--",
                   f"{st.get('detail')} (optional; --no-llm works)")
 
-    from .runners import RunnerLoadError, load_runners as _load_runners
+    from .runners import RunnerLoadError
+    from .runners import load_runners as _load_runners
     errs: list[str] = []
     try:
         loaded = _load_runners(rows=cfg.runner_rows, errors=errs)
@@ -344,7 +362,8 @@ def doctor(
                 console.print(f"  [dim]{' '.join(raw.argv_redacted)}[/dim]")
 
     if golden:
-        from .golden import GOLDEN_REL, compare as golden_compare, find_repo_root
+        from .golden import GOLDEN_REL, find_repo_root
+        from .golden import compare as golden_compare
         root = find_repo_root()
         if root is None or not (root / GOLDEN_REL).is_file():
             console.print("[yellow]golden skipped: fixtures / tests/golden/expected.json not found "
@@ -427,7 +446,16 @@ def _badges_csv(reports: list[dict]) -> str:
     return buf.getvalue()
 
 
-def _read_refs(csv_path: str) -> list[str]:
+def _read_refs(csv_path: str) -> list[dict[str, Any]]:
+    """Submissions to review: ``{"url": ..., "data": [...]}`` per row.
+
+    A ``data`` column carries the deposits ``--data`` would carry on a single run.
+    That column is the whole reason batch needs one: an artifact CAN declare its
+    deposit in a manifest, and when it does the harness finds it either way — but
+    the split that `--data` exists for is the one where the README links the data
+    in prose and the artifact declares nothing a machine can read. That case was
+    reviewable one submission at a time and not at the scale a chair works at.
+    Several deposits go in one cell, separated by whitespace or ';'."""
     p = Path(csv_path)
     # utf-8-sig strips a leading BOM (Excel / PowerShell CSV exports carry one),
     # which would otherwise break header detection and the 'url' column lookup.
@@ -435,15 +463,24 @@ def _read_refs(csv_path: str) -> list[str]:
     lines = text.splitlines()
     if not lines:                       # empty file must not abort the whole season
         return []
-    refs: list[str] = []
+    refs: list[dict[str, Any]] = []
     if "," in lines[0] or lines[0].lower().startswith("url"):
         for row in csv.DictReader(lines):
-            url = row.get("url") or row.get("URL") or next(iter(row.values()), None)
+            low = {(k or "").strip().lower(): v for k, v in row.items()}
+            url = low.get("url") or next(iter(row.values()), None)
             if url and url.strip():
-                refs.append(url.strip())
+                refs.append({"url": url.strip(), "data": _split_data_cell(low.get("data"))})
     else:
-        refs = [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
+        refs = [{"url": ln.strip(), "data": []}
+                for ln in lines if ln.strip() and not ln.startswith("#")]
     return refs
+
+
+def _split_data_cell(cell: Optional[str]) -> list[str]:
+    """Deposit URLs from one CSV cell. ',' is the column separator and '::' the
+    subdirectory marker, so ';' and whitespace are what remain — and a URL can
+    contain neither."""
+    return [tok for tok in re.split(r"[;\s]+", (cell or "").strip()) if tok]
 
 
 def _print_report_summary(report, outdir: Path) -> None:

@@ -17,8 +17,15 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from ..models import FetchResult, Pin
-from .base import (FetchError, checksum_verdict, download, get,
-                   new_checksum_stats, record_download, safe_join)
+from .base import (
+    FetchError,
+    checksum_verdict,
+    download,
+    get,
+    new_checksum_stats,
+    record_download,
+    safe_join,
+)
 
 _GUID = re.compile(r"osf\.io/([a-z0-9]{4,})|10\.17605/OSF\.IO/(\w+)", re.I)
 _API = "https://api.osf.io/v2"

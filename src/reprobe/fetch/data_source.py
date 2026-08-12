@@ -31,8 +31,16 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from ..models import FetchResult, Pin
-from .base import (FetchError, assert_safe_url, download, get, maybe_unzip,
-                   new_checksum_stats, record_download, safe_join)
+from .base import (
+    FetchError,
+    assert_safe_url,
+    download,
+    get,
+    maybe_unzip,
+    new_checksum_stats,
+    record_download,
+    safe_join,
+)
 
 
 def parse_ref(spec: str) -> tuple[str, str]:
@@ -115,7 +123,8 @@ def fetch_data_source(ref: str, dest: str | Path) -> FetchResult:
 
     Platform fetchers are tried first — they carry pins and per-file checksums —
     then a bare http(s) URL falls back to ``DirectUrlFetcher``."""
-    from .registry import fetch as fetch_primary, select
+    from .registry import fetch as fetch_primary
+    from .registry import select
 
     dest = Path(dest)
     if select(ref) is not None:

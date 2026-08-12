@@ -8,8 +8,15 @@ import re
 from pathlib import Path
 
 from ..models import FetchResult, Pin
-from .base import (FetchError, checksum_verdict, download, get,
-                   new_checksum_stats, record_download, safe_join)
+from .base import (
+    FetchError,
+    checksum_verdict,
+    download,
+    get,
+    new_checksum_stats,
+    record_download,
+    safe_join,
+)
 
 _ID_RE = re.compile(r"(?:zenodo\.org/records?/|10\.5281/zenodo\.)(\d+)", re.I)
 

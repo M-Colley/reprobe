@@ -28,6 +28,23 @@ claimed rather than whether they rendered.
   the cache is shared between submissions.
 - Submission directories no longer start with `-` (every CLI tool read
   `work/-github-com-…` as flags).
+- **`reprobe batch` accepts a `data` column**, and the other run flags
+  (`--timeout`, `--no-install`, `--no-functional`, `--allow-lfs`,
+  `--reuse-downloads`). `--data` exists for artifacts that declare their deposit
+  nowhere a machine can read it, and that shape was reviewable one submission at
+  a time but not at the scale a chair actually works at. The column was
+  previously read and discarded without a word.
+- **The Available note no longer claims "no archival persistent identifier
+  found" for an OSF DOI that resolves.** It resolves; it just names storage the
+  depositor can still change. The old wording sent an author looking for a DOI
+  they already had.
+- **Tests for what was untested**: the deposit fetchers' `fetch()` bodies
+  (24–48% → 83–96%) and the advisory paper-claims comparison, which every other
+  test skipped via `use_llm=False` — the one place the harness writes a statement
+  about someone's *published* work.
+- **A lint gate in CI** (`ruff`, bug-finding rules only). It immediately found a
+  dead function in the CODECHECK manifest path and an annotation referring to a
+  module that was never imported.
 
 ## Earlier unreleased — the environment an artifact declared is the one it gets
 

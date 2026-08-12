@@ -2,7 +2,7 @@ import types
 
 from reprobe.config import load_config
 from reprobe.llm import prompts, roles
-from reprobe.llm.client import OllamaClient, from_config, _model_in_tags, _normalize_tag
+from reprobe.llm.client import OllamaClient, _model_in_tags, _normalize_tag, from_config
 from reprobe.llm.guard import is_clean, sanitize
 from reprobe.llm.roles import _num
 

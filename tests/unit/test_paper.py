@@ -4,14 +4,10 @@ Pure: no network, no Docker, no LLM. Network paths are exercised with stubbed
 session/API responses so the SSRF and cap behaviour is asserted, not assumed.
 """
 
-import json
-from pathlib import Path
 
 import pytest
 
-import reprobe.fetch.base as fbase
 from reprobe import paper as P
-
 
 # --- DOI discovery -----------------------------------------------------------
 

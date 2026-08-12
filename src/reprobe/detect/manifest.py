@@ -113,15 +113,6 @@ def _own_outputs_if_single(steps: list[RunStep]) -> list[RunStep]:
     return steps
 
 
-def _steps_from_codecheck(data: dict[str, Any]) -> list[RunStep]:
-    # CODECHECK lists manifest outputs and a 'codecheck.yml: paper/manifest' of files;
-    # the runnable bits are usually under 'manifest' (outputs) + a 'workflow'/script.
-    steps: list[RunStep] = []
-    expected = [m.get("file") for m in (data.get("manifest") or []) if isinstance(m, dict) and m.get("file")]
-    # Best-effort: codecheck doesn't standardize the run command; fall back to scripts named in repository.
-    return steps  # signatures.scan() will supply steps; we only lift expected_outputs
-
-
 def _shorten(msg: Any, limit: int = 200) -> str:
     text = " ".join(str(msg).split())
     return text if len(text) <= limit else text[:limit] + "..."

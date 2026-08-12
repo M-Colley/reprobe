@@ -17,10 +17,14 @@ from . import __version__
 from .config import Config, load_config
 from .detect import detect as detect_artifacts
 from .detect.manifest import declared_data_sources
-from .docker_exec import DAEMON_DOWN_ERRORS, image_digest as _image_digest, run_container
+from .docker_exec import DAEMON_DOWN_ERRORS, run_container
+from .docker_exec import image_digest as _image_digest
 from .envbuild import plan as plan_env
-from .fetch import FetchError, configure as configure_fetchers, fetch as fetch_ref
-from .llm import from_config as llm_from_config, roles as llm_roles
+from .fetch import FetchError
+from .fetch import configure as configure_fetchers
+from .fetch import fetch as fetch_ref
+from .llm import from_config as llm_from_config
+from .llm import roles as llm_roles
 from .models import (
     ContainerSpec,
     EnvPlan,
@@ -413,8 +417,14 @@ class Orchestrator:
         data = (manifest_meta or {}).get("data") or []
         if not data or dry_run:
             return
-        from .fetch.base import (assert_safe_url, checksum_verdict, download,
-                                 new_checksum_stats, record_download, safe_join)
+        from .fetch.base import (
+            assert_safe_url,
+            checksum_verdict,
+            download,
+            new_checksum_stats,
+            record_download,
+            safe_join,
+        )
 
         results: list[dict[str, Any]] = []
         stats = new_checksum_stats()

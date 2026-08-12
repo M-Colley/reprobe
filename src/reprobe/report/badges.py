@@ -56,6 +56,14 @@ def decide(
                          "Software Heritage to earn Artifact Available")
         elif fetch.anonymized:
             notes.append("anonymized review snapshot — needs a durable archival deposit before publication")
+        elif fetch.resolved_type == "osf":
+            # "none found" is false when the submitter handed us a DOI that
+            # resolves: 10.17605/OSF.IO/<guid> exists, it simply points at
+            # storage the depositor can still change. Saying it was not found
+            # sends an author looking for a DOI they already have.
+            notes.append("an OSF DOI resolves, but it points at project storage the depositor can "
+                         "still change — register the project (or deposit in Zenodo) so the "
+                         "identifier names fixed bytes")
         else:
             notes.append("no archival persistent identifier found")
 
