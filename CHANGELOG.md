@@ -1,6 +1,35 @@
 # Changelog
 
-## Unreleased — the environment an artifact declared is the one it gets
+## Unreleased — a report must distinguish our failure from theirs
+
+Found by running two AutomotiveUI '26 artifacts and re-reading what the reports
+claimed rather than whether they rendered.
+
+- **A killed install phase no longer produces a verdict about the artifact.** No
+  author code runs in that container, so when it is killed the step that then
+  dies on `ModuleNotFoundError` is reporting the harness's missing install — and
+  it is indistinguishable from an artifact that genuinely failed to declare the
+  dependency, which is the very distinction the install phase exists to draw. The
+  verdict is now `infra-error` naming the cause, and Functional is
+  `not-evaluated`. A run whose steps all passed is left alone. The install phase
+  also got **7200s** (an hour was not enough to `micromamba create` an
+  environment.yml that reaches torch's CUDA wheels).
+- **A `--data` deposit is reported even when the code fetch fails first.** A
+  paper citing a 404 repo and a deposit embargoed until a known date is a
+  different finding from one citing nothing at all, and only the second half was
+  reaching the report. Deposits are now probed for state — metadata only, nothing
+  downloaded.
+- **Clone failures name the finding, not git's plumbing.** `could not read
+  Username … terminal prompts disabled` says our host has no credentials; a host
+  answers exactly that for a private repo and for one that never existed. The
+  report now states the repository is not publicly reachable, with an
+  unauthenticated status code as evidence.
+- **`--reuse-downloads`** reuses pip/conda downloads across runs. Off by default:
+  the cache is shared between submissions.
+- Submission directories no longer start with `-` (every CLI tool read
+  `work/-github-com-…` as flags).
+
+## Earlier unreleased — the environment an artifact declared is the one it gets
 
 A real submission (`ciao-group/PerceivedRisk`, 2026-07) declared
 `environment.yml` and was failed for `ModuleNotFoundError: torch` — a module its

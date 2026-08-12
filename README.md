@@ -87,7 +87,20 @@ reprobe run https://github.com/ciao-group/PerceivedRisk --data https://osf.io/cw
 
 # ...into the directory the code expects, and repeat for several deposits:
 reprobe run <code-url> --data <deposit-url>::dataset --data <other-url>::models
+
+# Iterating on ONE artifact: reuse pip/conda downloads between runs instead of
+# re-fetching gigabytes each time (see the caveat below):
+reprobe run <url> --reuse-downloads
 ```
+
+`--reuse-downloads` exists because pip and micromamba cache under `HOME=/work` —
+inside the run directory, which is wiped before every run — so re-running one
+artifact re-downloads everything it already had. A torch-pulling `environment.yml`
+makes that a 30-minute tax per attempt. The flag points both at a cache in the
+workroot instead. **It is off by default and should stay off for a review
+season**: the cache is shared across submissions, and an `environment.yml` chooses
+its own channels, so one artifact can seed a package that another then resolves
+without going back to the network. Any run that used it says so in the report.
 
 **Artifacts split across two repositories** are the normal case, not the
 exception: the code is in git and the data sits in a repository the README links
