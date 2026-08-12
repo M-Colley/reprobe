@@ -338,3 +338,69 @@ def test_markdown_renders_fetch_failed_report_without_error():
     assert "## Badges" not in out
     assert "fetch-failed" in out
     assert "What was NOT checked" in out
+
+
+def _install_env(**over):
+    row = {"exit_code": None, "ok": False, "timed_out": True}
+    row.update(over)
+    return {"install_results": {"python": row}}
+
+
+def test_a_killed_install_phase_is_not_the_artifacts_failure():
+    """A step dying on ModuleNotFoundError reads the same whether the artifact
+    forgot to declare the import or the harness never finished installing it —
+    and the traceback cannot tell them apart. When our own install phase was
+    killed, the verdict must not be a statement about the artifact."""
+    err = badges.install_error(_install_env())
+    assert err and "wall-clock" in err
+    steps = [RunResult(runner="python", target="main.py", status="fail")]
+    v = badges.verdict(steps, True, err)
+    assert v["overall"] == "infra-error"
+    assert "no statement about the artifact" in v["note"]
+    assert "wall-clock" in v["note"]              # names the cause, not just the class
+    # the SAME steps without the install failure remain the artifact's problem
+    assert badges.verdict(steps, True)["overall"] == "runs-with-failures"
+
+
+def test_a_failed_install_is_reported_with_its_exit_code():
+    err = badges.install_error(_install_env(exit_code=137, timed_out=False))
+    assert "exited 137" in err
+
+
+def test_a_clean_run_is_not_downgraded_by_a_failed_install():
+    """Every step passed, so the install phase evidently added nothing they
+    needed — there is no finding to withdraw."""
+    steps = [RunResult(runner="python", target="main.py", status="pass")]
+    assert badges.verdict(steps, True, badges.install_error(_install_env()))["overall"] == "runs"
+
+
+def test_install_error_is_none_when_the_install_completed():
+    assert badges.install_error({"install_results": {"python": {"ok": True, "exit_code": 0}}}) is None
+    assert badges.install_error({"install_results": {}}) is None
+    assert badges.install_error({}) is None
+
+
+def test_functional_is_not_evaluated_when_the_install_phase_died():
+    steps = [RunResult(runner="python", target="main.py", status="fail")]
+    out = badges.decide(_zenodo(), steps, DetectResult(artifact_types=["python"]),
+                        badges_cfg=load_config().badges, functional_requested=True, ran=True,
+                        install_error=badges.install_error(_install_env()))
+    assert out["acm"]["functional"] == "not-evaluated"
+    assert any("no statement about the artifact" in n for n in out["acm"]["notes"])
+
+
+def test_a_resolving_osf_doi_is_not_reported_as_no_identifier_found():
+    """The submitter handed us 10.17605/OSF.IO/<guid> and it resolves. The reason
+    it earns no badge is that it names storage the depositor can still change —
+    saying none was found sends an author hunting for a DOI they already have."""
+    fetch = FetchResult(input="https://doi.org/10.17605/OSF.IO/4wj86", resolved_type="osf",
+                        src_dir="/x", pin=Pin(kind="none", value="osf.io/4wj86"))
+    notes = _decide(fetch, [])["acm"]["notes"]
+    assert not any("no archival persistent identifier found" in n for n in notes)
+    assert any("still change" in n for n in notes)
+
+
+def test_a_source_with_genuinely_no_identifier_still_says_so():
+    fetch = FetchResult(input="/local/path", resolved_type="local", src_dir="/x", pin=Pin())
+    assert any("no archival persistent identifier found" in n
+               for n in _decide(fetch, [])["acm"]["notes"])

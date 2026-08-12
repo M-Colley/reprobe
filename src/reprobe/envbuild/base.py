@@ -391,13 +391,18 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
     if py_pkgs:
         if py_needed:
             cmds.append(_py_detected_install_command(py_pkgs, conda_prefix))
+            # State what the install phase was ASKED to do, not what it achieved.
+            # This warning is composed while the plan is built, before any
+            # container has run — claiming "were installed" here asserted an
+            # outcome that a killed install phase then contradicted, in the very
+            # report that had to explain the failure.
             warnings.append(
-                f"{len(py_pkgs)} Python import(s) were detected statically and installed only "
-                "where the environment did not already provide them: "
+                f"{len(py_pkgs)} Python import(s) were detected statically; the install phase was "
+                "asked to add only those the environment does not already provide: "
                 + ", ".join(py_pkgs[:12]) + ("…" if len(py_pkgs) > 12 else "")
                 + ". Anything in that list the artifact's own manifest does not declare is a "
                   "reproducibility defect of the artifact, not of the harness — the install log "
-                  "records which were actually missing.")
+                  "records which were actually missing and whether pip got them.")
         else:
             warnings.append(f"Python packages {py_pkgs} were detected but no Python steps "
                             "were found; they were NOT installed")

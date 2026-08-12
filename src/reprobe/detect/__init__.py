@@ -1,4 +1,4 @@
+from . import manifest, signatures
 from .detector import detect
-from . import signatures, manifest
 
 __all__ = ["detect", "signatures", "manifest"]

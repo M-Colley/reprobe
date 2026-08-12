@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
-from .base import BaseRunner, RunContext, _q, env_path_prefix
 from ..models import Capabilities
+from .base import BaseRunner, RunContext, _q, env_path_prefix
 
 
 class JupyterRunner(BaseRunner):

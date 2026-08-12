@@ -12,6 +12,7 @@ import os
 import socket
 import subprocess
 import tarfile
+import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional, Protocol, runtime_checkable
 from urllib.parse import urljoin, urlparse
@@ -198,7 +199,7 @@ def _pinned_dns(host: str, infos):
         socket.getaddrinfo = real
 
 
-def guard_zip(z: "zipfile.ZipFile") -> None:
+def guard_zip(z: zipfile.ZipFile) -> None:
     """Refuse a zip whose member count or declared uncompressed size is bomb-shaped,
     BEFORE extracting it. Raises FetchError."""
     infos = z.infolist()

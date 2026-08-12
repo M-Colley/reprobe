@@ -1,6 +1,52 @@
 # Changelog
 
-## Unreleased — the environment an artifact declared is the one it gets
+## Unreleased — a report must distinguish our failure from theirs
+
+Found by running two AutomotiveUI '26 artifacts and re-reading what the reports
+claimed rather than whether they rendered.
+
+- **A killed install phase no longer produces a verdict about the artifact.** No
+  author code runs in that container, so when it is killed the step that then
+  dies on `ModuleNotFoundError` is reporting the harness's missing install — and
+  it is indistinguishable from an artifact that genuinely failed to declare the
+  dependency, which is the very distinction the install phase exists to draw. The
+  verdict is now `infra-error` naming the cause, and Functional is
+  `not-evaluated`. A run whose steps all passed is left alone. The install phase
+  also got **7200s** (an hour was not enough to `micromamba create` an
+  environment.yml that reaches torch's CUDA wheels).
+- **A `--data` deposit is reported even when the code fetch fails first.** A
+  paper citing a 404 repo and a deposit embargoed until a known date is a
+  different finding from one citing nothing at all, and only the second half was
+  reaching the report. Deposits are now probed for state — metadata only, nothing
+  downloaded.
+- **Clone failures name the finding, not git's plumbing.** `could not read
+  Username … terminal prompts disabled` says our host has no credentials; a host
+  answers exactly that for a private repo and for one that never existed. The
+  report now states the repository is not publicly reachable, with an
+  unauthenticated status code as evidence.
+- **`--reuse-downloads`** reuses pip/conda downloads across runs. Off by default:
+  the cache is shared between submissions.
+- Submission directories no longer start with `-` (every CLI tool read
+  `work/-github-com-…` as flags).
+- **`reprobe batch` accepts a `data` column**, and the other run flags
+  (`--timeout`, `--no-install`, `--no-functional`, `--allow-lfs`,
+  `--reuse-downloads`). `--data` exists for artifacts that declare their deposit
+  nowhere a machine can read it, and that shape was reviewable one submission at
+  a time but not at the scale a chair actually works at. The column was
+  previously read and discarded without a word.
+- **The Available note no longer claims "no archival persistent identifier
+  found" for an OSF DOI that resolves.** It resolves; it just names storage the
+  depositor can still change. The old wording sent an author looking for a DOI
+  they already had.
+- **Tests for what was untested**: the deposit fetchers' `fetch()` bodies
+  (24–48% → 83–96%) and the advisory paper-claims comparison, which every other
+  test skipped via `use_llm=False` — the one place the harness writes a statement
+  about someone's *published* work.
+- **A lint gate in CI** (`ruff`, bug-finding rules only). It immediately found a
+  dead function in the CODECHECK manifest path and an annotation referring to a
+  module that was never imported.
+
+## Earlier unreleased — the environment an artifact declared is the one it gets
 
 A real submission (`ciao-group/PerceivedRisk`, 2026-07) declared
 `environment.yml` and was failed for `ModuleNotFoundError: torch` — a module its

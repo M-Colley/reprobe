@@ -84,7 +84,7 @@ def test_read_refs_strips_bom(tmp_path):
     # Excel/PowerShell write a UTF-8 BOM; header + rows must still parse.
     f = tmp_path / "subs.csv"
     f.write_bytes(b"\xef\xbb\xbfurl\nhttps://github.com/a/b\n")
-    assert _read_refs(str(f)) == ["https://github.com/a/b"]
+    assert _read_refs(str(f)) == [{"url": "https://github.com/a/b", "data": []}]
 
 
 def test_read_refs_empty_file_no_crash(tmp_path):
@@ -96,7 +96,7 @@ def test_read_refs_empty_file_no_crash(tmp_path):
 def test_read_refs_plain_list_skips_comments(tmp_path):
     f = tmp_path / "list.csv"
     f.write_text("# a comment\nhttps://github.com/a/b\n\n", encoding="utf-8")
-    assert _read_refs(str(f)) == ["https://github.com/a/b"]
+    assert _read_refs(str(f)) == [{"url": "https://github.com/a/b", "data": []}]
 
 
 def test_csv_safe_neutralizes_formulas():
@@ -140,3 +140,63 @@ def test_non_editable_install_detection_matches_this_checkout():
     from reprobe.config import installed_non_editably
     assert installed_non_editably() is False, \
         "the test suite is running against a copied install, not this checkout"
+
+
+def test_read_refs_carries_a_data_column(tmp_path):
+    """`--data` exists for artifacts whose README links the deposit in prose and
+    declares nothing a machine can read. Batch is where a chair reviews a season,
+    so without this column that whole artifact shape was unreviewable at scale."""
+    f = tmp_path / "subs.csv"
+    f.write_text("url,data\nhttps://github.com/a/b,https://osf.io/cwd6h\n", encoding="utf-8")
+    assert _read_refs(str(f)) == [
+        {"url": "https://github.com/a/b", "data": ["https://osf.io/cwd6h"]}]
+
+
+def test_read_refs_splits_several_deposits_in_one_cell(tmp_path):
+    # ',' is the column separator and '::' the subdir marker, so ';' and
+    # whitespace are what is left — and a URL can contain neither.
+    f = tmp_path / "subs.csv"
+    f.write_text("url,data\nhttps://x/y,https://osf.io/a ; https://zenodo.org/records/1::data\n",
+                 encoding="utf-8")
+    assert _read_refs(str(f))[0]["data"] == ["https://osf.io/a",
+                                             "https://zenodo.org/records/1::data"]
+
+
+def test_read_refs_data_column_is_case_and_space_insensitive(tmp_path):
+    f = tmp_path / "subs.csv"
+    f.write_text(" URL , Data \nhttps://x/y,https://osf.io/a\n", encoding="utf-8")
+    row = _read_refs(str(f))[0]
+    assert row["url"] == "https://x/y" and row["data"] == ["https://osf.io/a"]
+
+
+def test_read_refs_tolerates_extra_columns(tmp_path):
+    f = tmp_path / "subs.csv"
+    f.write_text("url,notes,data\nhttps://x/y,paper 12,https://osf.io/a\n", encoding="utf-8")
+    assert _read_refs(str(f))[0]["data"] == ["https://osf.io/a"]
+
+
+def test_batch_passes_each_rows_deposits_to_the_run(tmp_path, monkeypatch):
+    """A silently ignored column is worse than an unsupported one: the season
+    would complete, and every composite artifact in it would be failed for a
+    missing input the chair had already supplied."""
+    import reprobe.cli as cli_mod
+    from reprobe.models import Report
+
+    seen = []
+
+    class FakeOrch:
+        def run(self, ref, **kw):
+            seen.append((ref, kw.get("data_sources")))
+            return Report(submission_id="sid", harness_version="t", timestamp="",
+                          verdict={"overall": "not-run", "human_review_required": True})
+
+    monkeypatch.setattr(cli_mod, "_orch", lambda *a, **k: FakeOrch())
+    f = tmp_path / "subs.csv"
+    f.write_text("url,data\nhttps://github.com/a/b,https://osf.io/cwd6h\nhttps://github.com/c/d,\n",
+                 encoding="utf-8")
+    cli_mod.batch(str(f), workroot=str(tmp_path / "w"), out=str(tmp_path / "o"),
+                  config_dir=None, no_run=True, no_llm=True, no_functional=False,
+                  no_install=False, allow_lfs=False, timeout=None, reuse_downloads=False,
+                  resume=False)
+    assert seen == [("https://github.com/a/b", ["https://osf.io/cwd6h"]),
+                    ("https://github.com/c/d", [])]

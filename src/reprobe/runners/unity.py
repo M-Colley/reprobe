@@ -17,8 +17,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from .base import BaseRunner, RunContext
 from ..models import Capabilities, RawRunOutput, RunResult
+from .base import BaseRunner, RunContext
 
 _VERSION_RE = re.compile(r"m_EditorVersion:\s*(\S+)")
 

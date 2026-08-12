@@ -1,3 +1,3 @@
-from . import badges, markdown, html, dashboard
+from . import badges, dashboard, html, markdown
 
 __all__ = ["badges", "markdown", "html", "dashboard"]

@@ -58,8 +58,13 @@ def render(r: Report) -> str:
             for c in d.get("collisions") or []:
                 L.append(f"  - ⚠️ not overwritten (the artifact already ships it): `{_ml(str(c))}`")
         else:
+            # `error` when a fetch was attempted and failed; `detail` when the
+            # deposit was only probed (the code half failed first, so nothing was
+            # fetched) — that detail carries the embargo date and is the whole
+            # point of probing.
+            why = d.get("error") or d.get("detail") or ""
             L.append(f"- **Data source:** `{_ml(str(d.get('input')))}` — "
-                     f"**{d.get('status')}**: {_ml(str(d.get('error', '')))}")
+                     f"**{d.get('status')}**: {_ml(str(why))}")
     L.append("")
 
     det = r.detect or {}

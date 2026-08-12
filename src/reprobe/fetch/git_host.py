@@ -12,9 +12,44 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ..models import FetchResult, Pin
-from .base import _MAX_LFS_TOTAL_BYTES, FetchError, assert_safe_url, run_git
+from .base import _MAX_LFS_TOTAL_BYTES, FetchError, assert_safe_url, get, run_git
 
 _HOSTS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org")
+
+#: git asks for a username when a repo is private AND when it does not exist —
+#: hosts answer both alike rather than leak which repos exist. With
+#: GIT_TERMINAL_PROMPT=0 that surfaces as this, and nothing else.
+_NEEDS_CREDENTIALS_RE = re.compile(
+    r"could not read (Username|Password)|terminal prompts disabled|"
+    r"Authentication failed|Invalid username or (password|token)", re.I)
+
+
+def _clone_failure(url: str, stderr: str) -> str:
+    """Turn a credential-prompt clone failure into the finding a reviewer needs.
+
+    ``could not read Username for 'https://github.com': terminal prompts
+    disabled`` is git plumbing: it says our host has no credentials, when what a
+    chair must record is that the repository the paper cites cannot be reached by
+    the public. Confirm that unauthenticated rather than assert it — the report
+    then carries an observed status code, not our inference."""
+    err = " ".join(stderr.split())[:300]
+    if not _NEEDS_CREDENTIALS_RE.search(err):
+        return f"git clone failed: {err}"
+    return (f"repository is not publicly accessible: {url} — private, deleted, renamed, or "
+            f"never created ({_public_probe(url)}). A host answers the same way to all of "
+            "them, so which one it is cannot be determined from the outside.")
+
+
+def _public_probe(url: str) -> str:
+    """What an unauthenticated GET sees. Best-effort: this runs on a path that has
+    already failed, so it must never raise and never be the reason a report is
+    lost. ``assert_safe_url`` keeps the SSRF guard on a submitter-supplied URL."""
+    probe = url[:-4] if url.endswith(".git") else url
+    try:
+        assert_safe_url(probe)
+        return f"unauthenticated GET returned HTTP {get(probe, timeout=20).status_code}"
+    except Exception as e:                       # noqa: BLE001 - diagnosis only
+        return f"unauthenticated check could not complete: {type(e).__name__}"
 
 
 def _lfs_tracked_files(dest: Path) -> tuple[bool, list[str]]:
@@ -209,7 +244,7 @@ class GitHostFetcher:
         # `--` ends option parsing so a URL/dest can never be read as a flag.
         clone = run_git(["clone", "--quiet", "--", url, str(dest)])
         if clone.returncode != 0:
-            raise FetchError(f"git clone failed: {clone.stderr.strip()[:300]}")
+            raise FetchError(_clone_failure(url, clone.stderr))
 
         if want_ref:
             co = run_git(["checkout", "--quiet", want_ref], cwd=dest)

@@ -9,7 +9,7 @@ artifact failures.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from ..models import DetectResult, FetchResult, RunResult
 
@@ -33,6 +33,7 @@ def decide(
     badges_cfg: dict[str, Any],
     functional_requested: bool,
     ran: bool,
+    install_error: Optional[str] = None,
 ) -> dict[str, Any]:
     acm_cfg = (badges_cfg.get("acm") or {})
     avail_cfg = acm_cfg.get("available", {}) or {}
@@ -55,6 +56,14 @@ def decide(
                          "Software Heritage to earn Artifact Available")
         elif fetch.anonymized:
             notes.append("anonymized review snapshot — needs a durable archival deposit before publication")
+        elif fetch.resolved_type == "osf":
+            # "none found" is false when the submitter handed us a DOI that
+            # resolves: 10.17605/OSF.IO/<guid> exists, it simply points at
+            # storage the depositor can still change. Saying it was not found
+            # sends an author looking for a DOI they already have.
+            notes.append("an OSF DOI resolves, but it points at project storage the depositor can "
+                         "still change — register the project (or deposit in Zenodo) so the "
+                         "identifier names fixed bytes")
         else:
             notes.append("no archival persistent identifier found")
 
@@ -70,6 +79,13 @@ def decide(
         if all(s.status == "skipped" for s in primary):
             functional = "not-evaluated"
             notes.append(f"no step was executed (no matching runner) — {_NO_STATEMENT}")
+        elif install_error and not all(s.status == "pass" for s in primary):
+            # A step can only be judged against an environment the harness finished
+            # building. Scoring it against a half-built one grades the artifact on
+            # our failure — see install_error() for why this outranks the shape of
+            # the step's own traceback.
+            functional = "not-evaluated"
+            notes.append(f"{install_error} — {_NO_STATEMENT}")
         elif not _artifact_failure(primary) and any(_infra_error(s) for s in primary):
             functional = "not-evaluated"
             notes.append(f"harness/infrastructure error — {_NO_STATEMENT}")
@@ -188,7 +204,30 @@ def _fair(fetch: FetchResult, detect: DetectResult, *,
     }
 
 
-def verdict(steps: list[RunResult], ran: bool) -> dict[str, Any]:
+def install_error(environment: dict[str, Any]) -> Optional[str]:
+    """Why the harness's own dependency install did not complete, if it didn't.
+
+    No author code runs in that container — it is reprobe installing what the
+    manifest declares and what the import scan detected, under sanctioned egress.
+    So when it is killed, the step that then dies on ModuleNotFoundError is
+    reporting OUR missing install, and calling that runs-with-failures publishes a
+    false statement about someone's artifact. The failure is also invisible from
+    the step's own traceback, which looks exactly like an undeclared dependency —
+    the very defect the install phase exists to distinguish it from."""
+    results = (environment or {}).get("install_results") or {}
+    broken = {k: v for k, v in sorted(results.items())
+              if isinstance(v, dict) and not v.get("ok")}
+    if not broken:
+        return None
+    why = "; ".join(
+        f"{k}: killed at the install-phase wall-clock limit" if v.get("timed_out")
+        else f"{k}: exited {v.get('exit_code')}"
+        for k, v in broken.items())
+    return f"the harness's dependency install did not complete ({why})"
+
+
+def verdict(steps: list[RunResult], ran: bool,
+            install_error: Optional[str] = None) -> dict[str, Any]:
     if not ran:
         return {"overall": "not-run", "human_review_required": True}
     runnable = [s for s in steps if s.executed]
@@ -212,9 +251,16 @@ def verdict(steps: list[RunResult], ran: bool) -> dict[str, Any]:
         overall = "nothing-executed"              # no runner matched any step
     else:
         overall = "runs-with-warnings"            # at least one pass/partial
+    # An unfinished install outranks the shape of the failure it caused: the step
+    # failed against an environment we never finished building. Steps that all
+    # passed are left alone — the install phase evidently added nothing they
+    # needed, so there is nothing to withdraw.
+    if install_error and overall in ("runs-with-failures", "runs-with-warnings"):
+        overall = "infra-error"
     out: dict[str, Any] = {"overall": overall, "human_review_required": overall != "runs"}
     if overall == "infra-error":
-        out["note"] = f"harness/infrastructure error — {_NO_STATEMENT}"
+        detail = f" ({install_error})" if install_error else ""
+        out["note"] = f"harness/infrastructure error{detail} — {_NO_STATEMENT}"
     elif overall == "nothing-executed":
         out["note"] = f"no step was executed (no matching runner) — {_NO_STATEMENT}"
     return out
