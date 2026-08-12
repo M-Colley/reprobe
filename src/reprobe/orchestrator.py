@@ -440,8 +440,14 @@ class Orchestrator:
                    "read_only_rootfs": False, "tmpfs_noexec": False, "tmpfs_size": "4g",
                    # compiling a large source dependency tree can exceed the 30-min
                    # author-code cap; give the harness-controlled install phase (no
-                   # author code runs here) more wall-clock and build space.
-                   "timeout_s": 3600}
+                   # author code runs here) more wall-clock and build space. An hour
+                   # was still short: PerceivedRisk (2026-08) spends the whole of it
+                   # inside `micromamba create` — an environment.yml whose pip section
+                   # reaches ultralytics, which pulls torch's CUDA wheels, ~8 GB of
+                   # mostly small files written to a bind mount. The kill then lands
+                   # before the first pip call of the import-scan install, so the step
+                   # fails on exactly the import that install exists to supply.
+                   "timeout_s": 7200}
         prep = ("set -e; mkdir -p /work/.reprobe_deps /work/.reprobe_Rlib; export HOME=/work; "
                 "export R_LIBS_USER=/work/.reprobe_Rlib; export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; ")
 

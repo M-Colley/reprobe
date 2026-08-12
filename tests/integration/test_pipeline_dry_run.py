@@ -164,7 +164,7 @@ def test_install_phase_container_gets_the_relaxed_build_envelope(tmp_path, spy_r
         assert "--read-only" not in c["argv"]
         assert c["kw"].get("allow_egress") is True
         # timeout_s is a subprocess timeout, not an argv flag
-        assert c["limits"].get("timeout_s") == 3600
+        assert c["limits"].get("timeout_s") == 7200
 
 
 def test_rerunning_same_submission_starts_from_a_pristine_src(tmp_path):
