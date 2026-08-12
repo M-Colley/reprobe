@@ -40,7 +40,7 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   {% for d in r.source.data_sources %}<tr><td><code>{{ d.input }}</code></td><td><code>{{ d.into }}</code></td>
    <td>{{ d.resolved_type or '—' }}</td><td><code>{{ d.pin.kind if d.pin else 'none' }}</code></td>
    <td>{{ d.files if d.files is not none else '—' }}</td>
-   <td class="{{ 'pass' if d.status == 'ok' else 'fail' }}">{{ d.status }}{% if d.error %} — {{ d.error }}{% endif %}</td></tr>{% endfor %}
+   <td class="{{ 'pass' if d.status in ('ok', 'available') else 'fail' }}">{{ d.status }}{% if d.error %} — {{ d.error }}{% elif d.detail %} — {{ d.detail }}{% endif %}</td></tr>{% endfor %}
   </table></div>{% endif %}
 </div>
 

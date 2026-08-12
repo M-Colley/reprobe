@@ -39,7 +39,12 @@ from .runners.base import snapshot
 
 def _slug(ref: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", ref).strip("-").lower()
-    return s[-28:] or "submission"
+    # Strip AFTER the slice, not only before it. Keeping the TAIL is deliberate —
+    # it holds the part that distinguishes one submission from another, where the
+    # head is a host prefix every submission shares — but the cut lands mid-token
+    # and can re-expose a leading "-", and a directory named "-github-com-..." is
+    # read as flags by every tool that later touches work/ (`rm -github-com-...`).
+    return s[-28:].strip("-") or "submission"
 
 
 def submission_id(ref: str) -> str:
@@ -96,6 +101,7 @@ class Orchestrator:
         timeout_s: Optional[int] = None,
         sid: Optional[str] = None,
         data_sources: Optional[list[str]] = None,
+        reuse_downloads: bool = False,
     ) -> Report:
         sid = sid or submission_id(ref)
         # Files merged in from a data deposit, relative to srcdir. They are in the
@@ -136,6 +142,12 @@ class Orchestrator:
             report.source = _failed_source_section(ref, str(e))
             report.not_verified.append(f"fetch failed ({e}); nothing about the artifact was checked")
             report.verdict = {"overall": "fetch-failed", "human_review_required": True}
+            # The code half failing says nothing about the data half. Record what
+            # the supplied deposits report about themselves before giving up: a
+            # deposit that exists under an embargo with a known lift date is a
+            # different availability finding from one that was never made, and
+            # losing that distinction is losing the only finding still available.
+            self._probe_unfetched_data(data_sources, report)
             self._write(outdir, report)
             return report
         report.source = _source_section(fetch_res)
@@ -182,7 +194,8 @@ class Orchestrator:
             rundir = fresh_dir(work, rundir, "run")
             shutil.copytree(srcdir, rundir)
             self._dataset_phase(manifest_meta, rundir, report, dry_run=dry_run)
-            self._install_phase(env_plan, rundir, logdir, install=install, dry_run=dry_run, report=report)
+            self._install_phase(env_plan, rundir, logdir, install=install, dry_run=dry_run,
+                                report=report, reuse_downloads=reuse_downloads)
 
             allow_egress_runtime = bool(allow_net)
             if allow_egress_runtime:
@@ -264,10 +277,14 @@ class Orchestrator:
         report.unity = unity_section
 
         # -- (5) BADGES + VERDICT --------------------------------------- #
+        # An install phase that never finished makes every downstream step
+        # unjudgeable, so both the badge and the verdict have to hear about it.
+        install_err = badge_rules.install_error(report.environment)
         report.badges = badge_rules.decide(
             fetch_res, results, detect_res,
-            badges_cfg=self.config.badges, functional_requested=functional_requested, ran=ran)
-        report.verdict = badge_rules.verdict(results, ran)
+            badges_cfg=self.config.badges, functional_requested=functional_requested, ran=ran,
+            install_error=install_err)
+        report.verdict = badge_rules.verdict(results, ran, install_err)
         report.not_verified = sorted(
             {x for r in results for x in r.not_verified} | set(report.not_verified))
 
@@ -307,6 +324,28 @@ class Orchestrator:
         report.not_verified.append(
             "whether the artifact runs WITH its external data — the data is linked in prose "
             "only and was not fetched")
+
+    def _probe_unfetched_data(self, specs: Optional[list[str]], report: Report) -> None:
+        """Record the state of every ``--data`` deposit when the code fetch failed.
+
+        Only the operator's sources are known at this point — the manifest's
+        ``data_sources:`` live inside the tree that could not be fetched."""
+        if not specs:
+            return
+        from .fetch.data_source import parse_ref, probe_data_source
+
+        records = []
+        for spec in specs:
+            url, _ = parse_ref(str(spec))
+            if url:
+                records.append(probe_data_source(url))
+        if not records:
+            return
+        report.source["data_sources"] = records
+        for r in records:
+            report.not_verified.append(
+                f"data deposit '{r['input']}' was not fetched (the code fetch failed first) — "
+                f"{r['status']}: {r['detail']}")
 
     def _data_source_phase(self, specs: Optional[list[str]], srcdir: Path, work: Path,
                            report: Report) -> None:
@@ -424,7 +463,8 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ #
     def _install_phase(self, env_plan: EnvPlan, rundir: Path, logdir: Path, *,
-                       install: bool, dry_run: bool, report: Report) -> None:
+                       install: bool, dry_run: bool, report: Report,
+                       reuse_downloads: bool = False) -> None:
         if not install or not env_plan.install_commands:
             return
         # SEPARATE, sanctioned egress containers; the actual analysis runs offline.
@@ -451,6 +491,35 @@ class Orchestrator:
         prep = ("set -e; mkdir -p /work/.reprobe_deps /work/.reprobe_Rlib; export HOME=/work; "
                 "export R_LIBS_USER=/work/.reprobe_Rlib; export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; ")
 
+        # Package downloads land under HOME=/work, i.e. inside the run dir, which
+        # is wiped before every run — so re-running one submission re-downloads
+        # gigabytes it already had. --reuse-downloads points pip and micromamba at
+        # a workroot-level cache instead, turning a 34-minute env build into
+        # minutes on the second attempt.
+        #
+        # OFF by default, and it must stay that way. The cache is shared across
+        # submissions, and an environment.yml chooses its own channels: artifact A
+        # can seed the package cache with its own build of a common name, which
+        # micromamba will then reuse for artifact B without going back to the
+        # network. That is a cross-submission influence a review harness should
+        # not take on unasked. Use it while iterating on ONE artifact; leave it off
+        # for a season of submissions.
+        cache_mounts: list[Mount] = []
+        if reuse_downloads:
+            cache = Path(self.workroot) / ".package-cache"
+            for sub in ("pip", "conda", "renv"):
+                (cache / sub).mkdir(parents=True, exist_ok=True)
+            cache_mounts.append(Mount(source=cache.resolve().as_posix(),
+                                      target="/reprobe-cache", read_only=False))
+            prep += ("export PIP_CACHE_DIR=/reprobe-cache/pip; "
+                     "export CONDA_PKGS_DIRS=/reprobe-cache/conda; "
+                     "export MAMBA_PKGS_DIRS=/reprobe-cache/conda; "
+                     "export RENV_PATHS_CACHE=/reprobe-cache/renv; ")
+            report.environment.setdefault("warnings", []).append(
+                "--reuse-downloads was set: pip/conda downloads came from a cache shared with "
+                "other submissions in this workroot, so the bytes installed were not all "
+                "fetched fresh for this review")
+
         install_results: dict[str, Any] = {}
         for key, cmds in groups.items():
             if not cmds:
@@ -459,19 +528,27 @@ class Orchestrator:
                      else self.config.base_image(key) or env_plan.image)
             spec = ContainerSpec(image=image, command=["bash", "-c", prep + " ; ".join(cmds)],
                                  workdir="/work",
-                                 mounts=[Mount(source=rundir.as_posix(), target="/work", read_only=False)],
+                                 mounts=[Mount(source=rundir.as_posix(), target="/work", read_only=False),
+                                         *cache_mounts],
                                  network="egress")
             log_path = logdir / f"install-{key}.log"
             raw = run_container(spec, relaxed, log_path, allow_egress=True, dry_run=dry_run,
                                 work_root=rundir)
             ok = raw.exit_code == 0
-            install_results[key] = {"exit_code": raw.exit_code, "ok": ok}
+            # Carry WHY it failed, not just that it did: a timeout is the harness
+            # running out of clock, and the verdict logic has to be able to say so
+            # rather than reprint an exit code the reader cannot interpret.
+            install_results[key] = {"exit_code": raw.exit_code, "ok": ok,
+                                    "timed_out": bool(raw.timed_out)}
             note = f"install[{key}] ({'ok' if ok else 'failed/skipped'}; egress phase)"
             report.environment.setdefault("notes", []).append(note)
             if not ok:
+                cause = ("was killed at the install-phase wall-clock limit" if raw.timed_out
+                         else f"failed (exit {raw.exit_code})")
                 report.not_verified.append(
-                    f"dependency install ({key}) failed or was skipped; step failures may be "
-                    "environmental rather than the artifact's fault")
+                    f"dependency install ({key}) {cause}; the steps below ran against an "
+                    "environment the harness never finished building, so their failures are "
+                    "ours and not the artifact's")
         report.environment["install_results"] = install_results
         # Hash the install logs (they end with pip freeze / installed.packages()) so
         # two runs of the same deposit are comparable without re-solving.

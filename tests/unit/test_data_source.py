@@ -219,3 +219,71 @@ def test_malformed_manifest_never_aborts_the_run(tmp_path):
 
 def test_no_manifest_means_no_declared_sources(tmp_path):
     assert declared_data_sources(tmp_path) == []
+
+
+class _FakeAPI:
+    """Just enough of a requests.Response for the deposit probes."""
+
+    def __init__(self, payload, status=200):
+        self.payload, self.status_code = payload, status
+
+    def json(self):
+        return self.payload
+
+
+def _probe(monkeypatch, url, resp):
+    from reprobe.fetch import data_source as ds
+
+    monkeypatch.setattr(ds, "get", lambda u, **k: resp)
+    monkeypatch.setattr(ds, "assert_safe_url", lambda u: "host")
+    return ds.probe_data_source(url)
+
+
+def test_an_embargoed_zenodo_deposit_reports_its_lift_date(monkeypatch):
+    """"Deposited, embargo lifts 2026-09-21" and "nothing was ever deposited" are
+    opposite conclusions about the same paper. When the code half fails to fetch,
+    this is the only availability finding still obtainable — it must survive."""
+    rec = _FakeAPI({"metadata": {"access_right": "embargoed", "embargo_date": "2026-09-21",
+                                 "title": "Hit and Run (Raw Data)"}, "files": []})
+    out = _probe(monkeypatch, "https://zenodo.org/records/21095524", rec)
+    assert out["status"] == "embargoed"
+    assert "2026-09-21" in out["detail"]
+    assert "21095524" in out["detail"]
+
+
+def test_an_open_zenodo_deposit_is_available(monkeypatch):
+    rec = _FakeAPI({"metadata": {"access_right": "open", "title": "Data"},
+                    "files": [{"key": "a.csv"}, {"key": "b.csv"}]})
+    out = _probe(monkeypatch, "https://doi.org/10.5281/zenodo.7", rec)
+    assert out["status"] == "available"
+    assert "2 file(s)" in out["detail"]
+
+
+def test_a_missing_zenodo_record_is_not_found(monkeypatch):
+    out = _probe(monkeypatch, "https://zenodo.org/records/999", _FakeAPI({}, status=404))
+    assert out["status"] == "not-found"
+
+
+def test_a_public_osf_node_is_available(monkeypatch):
+    node = _FakeAPI({"data": {"attributes": {"public": True, "title": "Prosocial"}}})
+    out = _probe(monkeypatch, "https://doi.org/10.17605/OSF.IO/4WJ86", node)
+    assert out["status"] == "available"
+    assert "4WJ86".lower() in out["detail"].lower()
+
+
+def test_a_private_osf_node_is_restricted(monkeypatch):
+    out = _probe(monkeypatch, "https://osf.io/abcd1", _FakeAPI({}, status=403))
+    assert out["status"] == "restricted"
+
+
+def test_probing_never_raises(monkeypatch):
+    """It runs after the code fetch already failed; an exception here would lose
+    the report its last finding."""
+    from reprobe.fetch import data_source as ds
+
+    def boom(*a, **k):
+        raise RuntimeError("DNS is gone")
+    monkeypatch.setattr(ds, "get", boom)
+    out = ds.probe_data_source("https://zenodo.org/records/1")
+    assert out["status"] == "unknown"
+    assert "could not be checked" in out["detail"]

@@ -340,3 +340,79 @@ def test_no_hint_once_a_data_source_was_supplied(tmp_path):
     report = o.run(str(code), use_llm=False, dry_run=True, data_sources=[str(deposit)])
 
     assert not any("no way to fetch it" in n for n in report.detect["notes"])
+
+
+def test_submission_dir_never_starts_with_a_dash():
+    """The slug keeps the TAIL of the ref — that is what distinguishes one
+    submission from another — but the cut lands mid-token and used to re-expose a
+    leading "-". A directory named "-github-com-..." is read as flags by every
+    tool that later touches work/ (`rm -github-com-...`)."""
+    sid = orch_mod.submission_id("https://github.com/ammarjamal/ARena")
+    assert not sid.startswith("-")
+    assert "github-com-ammarjamal-arena" in sid
+    # the tail is still what survives truncation, not the shared host prefix
+    long_sid = orch_mod.submission_id("https://github.com/some-very-long-org-name/the-repo")
+    assert long_sid.startswith("the") or "the-repo" in long_sid
+    assert not long_sid.startswith("-")
+
+
+def test_downloads_are_not_shared_between_submissions_by_default(tmp_path, spy_run_container):
+    """The cache crosses submission boundaries, so it is opt-in. Default runs must
+    mount nothing but the run dir."""
+    RMIX = Path(__file__).resolve().parents[1] / "fixtures" / "notebook-r-mix"
+    _run(tmp_path, RMIX)
+    install = [c for c in spy_run_container if c["spec"].network == "egress"]
+    assert install, "no egress install container was launched"
+    for c in install:
+        assert [m.target for m in c["spec"].mounts] == ["/work"]
+        assert "PIP_CACHE_DIR" not in " ".join(c["spec"].command)
+
+
+def test_reuse_downloads_mounts_one_cache_and_says_so(tmp_path, spy_run_container):
+    """Re-running one artifact re-downloaded gigabytes it already had, because the
+    caches live under HOME=/work — inside the run dir, which is wiped every run."""
+    RMIX = Path(__file__).resolve().parents[1] / "fixtures" / "notebook-r-mix"
+    report = _run(tmp_path, RMIX, reuse_downloads=True)
+    install = [c for c in spy_run_container if c["spec"].network == "egress"]
+    assert install, "no egress install container was launched"
+    for c in install:
+        targets = [m.target for m in c["spec"].mounts]
+        assert "/reprobe-cache" in targets
+        cmd = " ".join(c["spec"].command)
+        assert "PIP_CACHE_DIR=/reprobe-cache/pip" in cmd
+        assert "MAMBA_PKGS_DIRS=/reprobe-cache/conda" in cmd
+    assert (tmp_path / ".package-cache" / "pip").is_dir()
+    # the report must not let a cached install pass for a fresh one
+    assert any("shared with other submissions" in w
+               for w in report.environment.get("warnings", []))
+
+
+def test_a_failed_code_fetch_still_reports_what_the_data_deposit_says(tmp_path, monkeypatch):
+    """The composite artifact: code in git, data in a deposit. When the code half
+    cannot be fetched the run stops there — but "the data is deposited and its
+    embargo lifts on 2026-09-21" is the availability finding that survives, and it
+    is the opposite conclusion from "nothing was ever deposited". Dropping it left
+    the chair with neither."""
+    import reprobe.fetch.data_source as ds
+
+    monkeypatch.setattr(ds, "probe_data_source", lambda url: {
+        "input": url, "status": "embargoed",
+        "detail": "Zenodo record 21095524 exists but is embargoed until 2026-09-21"})
+
+    report = _run(tmp_path, str(tmp_path / "no-such-repo"),
+                  data_sources=["https://zenodo.org/records/21095524"])
+    assert report.verdict["overall"] == "fetch-failed"
+    records = report.source["data_sources"]
+    assert [r["status"] for r in records] == ["embargoed"]
+    assert any("2026-09-21" in n for n in report.not_verified)
+
+    # and it must reach the rendered report, not just the JSON
+    outdir = tmp_path / report.submission_id / "out"
+    for name in ("report.md", "report.html"):
+        assert "2026-09-21" in (outdir / name).read_text(encoding="utf-8"), name
+
+
+def test_no_data_probe_when_no_deposit_was_supplied(tmp_path):
+    report = _run(tmp_path, str(tmp_path / "no-such-repo"))
+    assert report.verdict["overall"] == "fetch-failed"
+    assert "data_sources" not in report.source

@@ -27,10 +27,11 @@ from __future__ import annotations
 import re
 import shutil
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote, urlparse
 
 from ..models import FetchResult, Pin
-from .base import (FetchError, assert_safe_url, download, maybe_unzip,
+from .base import (FetchError, assert_safe_url, download, get, maybe_unzip,
                    new_checksum_stats, record_download, safe_join)
 
 
@@ -124,6 +125,69 @@ def fetch_data_source(ref: str, dest: str | Path) -> FetchResult:
         return direct.fetch(ref, dest)
     # Let the registry produce its full "supported sources" message.
     return fetch_primary(ref, dest)
+
+
+_ZENODO_ID_RE = re.compile(r"(?:zenodo\.org/records?/|10\.5281/zenodo\.)(\d+)", re.I)
+_OSF_GUID_RE = re.compile(r"(?:osf\.io/|10\.17605/osf\.io/)([a-z0-9]{4,8})", re.I)
+
+
+def probe_data_source(url: str) -> dict[str, Any]:
+    """Ask a deposit what state it is in. Metadata only — nothing is downloaded.
+
+    This runs when the CODE half of a composite artifact could not be fetched. The
+    run stops there, but the deposit's state is the availability finding that
+    survives it: "the data is deposited and its embargo lifts on 2026-09-21" and
+    "there is nothing at that DOI" are opposite conclusions about the same paper,
+    and a report that mentions neither hands the chair nothing. Downloading would
+    be wasted work — there is no code left to run it against.
+
+    Never raises. It is the last thing standing on a path that already failed."""
+    rec: dict[str, Any] = {"input": url, "status": "unknown", "detail": ""}
+    try:
+        if (m := _ZENODO_ID_RE.search(url)):
+            return {**rec, **_probe_zenodo(m.group(1))}
+        if (m := _OSF_GUID_RE.search(url)):
+            return {**rec, **_probe_osf(m.group(1))}
+        assert_safe_url(url)
+        code = get(url, timeout=20).status_code
+        return {**rec, "status": "available" if code < 400 else "not-found",
+                "detail": f"unauthenticated GET returned HTTP {code}"}
+    except Exception as e:                       # noqa: BLE001 - diagnosis only
+        return {**rec, "detail": f"could not be checked: {type(e).__name__}: {e}"[:200]}
+
+
+def _probe_zenodo(rec_id: str) -> dict[str, Any]:
+    r = get(f"https://zenodo.org/api/records/{rec_id}", timeout=30)
+    if r.status_code == 404:
+        return {"status": "not-found", "detail": f"Zenodo has no record {rec_id}"}
+    meta = (r.json() or {}).get("metadata") or {}
+    access = str(meta.get("access_right") or "").lower()
+    title = str(meta.get("title") or "")[:120]
+    n = len((r.json() or {}).get("files") or [])
+    if access == "embargoed":
+        until = meta.get("embargo_date") or "an unstated date"
+        return {"status": "embargoed",
+                "detail": f"Zenodo record {rec_id} ({title!r}) exists but is embargoed until "
+                          f"{until}; the API lists no downloadable files before then"}
+    if access in ("restricted", "closed"):
+        return {"status": "restricted",
+                "detail": f"Zenodo record {rec_id} ({title!r}) is {access} — access is by "
+                          "request to the depositor, not open"}
+    return {"status": "available",
+            "detail": f"Zenodo record {rec_id} ({title!r}) is {access or 'open'}, {n} file(s)"}
+
+
+def _probe_osf(guid: str) -> dict[str, Any]:
+    r = get(f"https://api.osf.io/v2/nodes/{guid}/", timeout=30)
+    if r.status_code in (404, 410):
+        return {"status": "not-found", "detail": f"OSF has no public node {guid}"}
+    if r.status_code == 403:
+        return {"status": "restricted", "detail": f"OSF node {guid} is private"}
+    attrs = ((r.json() or {}).get("data") or {}).get("attributes") or {}
+    title = str(attrs.get("title") or "")[:120]
+    if attrs.get("public"):
+        return {"status": "available", "detail": f"OSF node {guid} ({title!r}) is public"}
+    return {"status": "restricted", "detail": f"OSF node {guid} ({title!r}) is not public"}
 
 
 # Data repositories whose links in a README mean "the data lives over there".

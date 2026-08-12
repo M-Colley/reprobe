@@ -735,3 +735,36 @@ def test_lfs_size_accounting_failure_is_not_reported_as_no_data(tmp_path, monkey
     warns: list[str] = []
     git_host._pull_lfs(tmp_path, warns, ["d.bin"])
     assert any("readable pointer size" in w and "NOT pulled" in w for w in warns), warns
+
+
+def test_a_credential_prompt_clone_failure_is_reported_as_not_public(monkeypatch):
+    """git asks for a username for a private repo AND for one that never existed,
+    because hosts answer both the same way. Reporting its raw plumbing tells a
+    chair that OUR host lacks credentials; what they must record is that the
+    repository the paper cites cannot be reached by the public."""
+    monkeypatch.setattr(git_host, "_public_probe",
+                        lambda url: "unauthenticated GET returned HTTP 404")
+    msg = git_host._clone_failure(
+        "https://github.com/someone/ARena",
+        "fatal: could not read Username for 'https://github.com': terminal prompts disabled")
+    assert "not publicly accessible" in msg
+    assert "HTTP 404" in msg
+    assert "could not read Username" not in msg   # plumbing does not reach the report
+
+
+def test_an_ordinary_clone_failure_keeps_gits_own_message():
+    # Only the credential case is reinterpreted; everything else is passed through,
+    # because git's own wording is the most specific thing available.
+    msg = git_host._clone_failure("https://github.com/a/b",
+                                  "fatal: the remote end hung up unexpectedly")
+    assert msg.startswith("git clone failed:")
+    assert "remote end hung up" in msg
+
+
+def test_the_public_probe_never_raises(monkeypatch):
+    """It runs on a path that has already failed. A probe that raised would cost
+    the report the finding it exists to add."""
+    def boom(*a, **k):
+        raise RuntimeError("network is down")
+    monkeypatch.setattr(git_host, "get", boom)
+    assert "could not complete" in git_host._public_probe("https://github.com/a/b")

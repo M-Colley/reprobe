@@ -61,6 +61,12 @@ def run(
     timeout: Optional[int] = typer.Option(None, "--timeout", min=1,
                                           help="per-step wall-clock budget in seconds; overrides the "
                                                "config default, clamped to limits.yaml:max_timeout_s"),
+    reuse_downloads: bool = typer.Option(
+        False, "--reuse-downloads",
+        help="reuse pip/conda downloads across runs via a cache in the workroot. Makes a "
+             "re-run of the same artifact minutes instead of an hour. OFF by default because "
+             "the cache is shared between submissions: use it while iterating on one "
+             "artifact, not for a season of them"),
     dry_run: bool = typer.Option(False, "--dry-run", help="build argv but do not launch containers"),
 ):
     """Fetch, detect, run (sandboxed), and report on a single artifact."""
@@ -69,7 +75,7 @@ def run(
         ref, do_run=not no_run, functional=not no_functional, use_llm=not no_llm,
         allow_repo2docker=allow_repo2docker, allow_net=allow_net, allow_lfs=allow_lfs,
         install=not no_install, dry_run=dry_run, timeout_s=timeout,
-        data_sources=list(data or []),
+        data_sources=list(data or []), reuse_downloads=reuse_downloads,
     )
     _print_report_summary(report, Path(workroot) / report.submission_id / "out")
 
