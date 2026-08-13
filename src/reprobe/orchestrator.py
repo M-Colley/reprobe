@@ -658,7 +658,7 @@ class Orchestrator:
 
     def _diagnose(self, res: RunResult, llm_client, env_plan: EnvPlan, step,
                   logdir: Path | None = None, image_key: str | None = None) -> None:
-        if res.status in ("pass", "skipped") or llm_client is None:
+        if res.status in ("pass", "skipped"):
             return
         if res.diagnostics.get("infra"):
             # The harness established this failure itself (daemon gone, image
@@ -674,6 +674,18 @@ class Orchestrator:
             # (ran clean, produced nothing declared) is diagnosed from what it
             # actually printed rather than treated as having printed nothing.
             run_tail = _tail(res.log_path)
+        # Recognised signatures first, and INDEPENDENTLY of the LLM — these
+        # failures are exactly as diagnosable with --no-llm as with a model, and
+        # the old early-return meant a deterministic run got no diagnosis at all.
+        # When one matches, the model is not asked: we already know the cause, and
+        # a small local model's second opinion beside a known fact can only
+        # contradict it.
+        known = known_failure_diagnosis(run_tail, res.exit_code)
+        if known:
+            res.diagnostics["harness_diagnosis"] = known
+            return
+        if llm_client is None:
+            return
         # If a step failed and the dependency-install phase logged an error, feed
         # that in too — the real root cause (e.g. a version constraint) usually
         # lives in the install log, not the run log.
@@ -743,6 +755,74 @@ def _daemon_down(res: RunResult) -> bool:
     failure that makes every later step meaningless rather than informative."""
     diags = res.diagnostics if isinstance(res.diagnostics, dict) else {}
     return str(diags.get("harness_error", "")).startswith(DAEMON_DOWN_ERRORS)
+
+
+_DETERMINISTIC = "harness (deterministic — not an LLM guess)"
+
+#: R's error when a script calls rstudioapi outside the IDE. Fixed string, one
+#: cause: the PACKAGE is installed (it is on CRAN and installs like any other),
+#: what is absent is a running RStudio session — which no headless container has.
+_RSTUDIO_RE = re.compile(r"RStudio not running", re.I)
+
+#: argparse's usage error. exit 2 + a "usage:" block is argparse's signature and
+#: nothing else's; the second pattern separates "you gave me no arguments" from
+#: an unrelated exit 2.
+_USAGE_RE = re.compile(r"^usage:", re.M)
+_ARG_REQUIRED_RE = re.compile(
+    r"error: the following arguments are required:\s*(?P<names>.+)$", re.M)
+
+
+def known_failure_diagnosis(log_tail: str, exit_code: Optional[int]) -> Optional[dict[str, Any]]:
+    """Name a failure whose console output has exactly one possible cause.
+
+    These are worth recognising deterministically rather than leaving to the
+    advisory model: the signature is a fixed string, the cause admits no
+    ambiguity, and a chair reading `fail` learns nothing while a chair reading
+    "this script only runs inside RStudio" learns the finding. Both cases below
+    are real artifacts, not hypotheticals.
+
+    Deliberately narrow. A pattern that fires on the wrong artifact would state
+    the harness's guess with the authority of a fact, which is worse than the
+    generic failure it replaces — so each entry matches a message with a single
+    known producer, and anything else falls through to the LLM advisory."""
+    if not log_tail:
+        return None
+
+    if _RSTUDIO_RE.search(log_tail):
+        return {
+            "source": _DETERMINISTIC,
+            "likely_cause": (
+                "the script calls rstudioapi (typically "
+                "`setwd(dirname(getActiveDocumentContext()$path))`, to set the working "
+                "directory to the script's own location), which asks a RUNNING RStudio IDE "
+                "which file is open in its editor. The package itself installed fine — what "
+                "is missing is the IDE, and a headless container cannot provide one. The "
+                "artifact runs for its author because the author runs it inside RStudio; it "
+                "does not run for anyone using `Rscript`."),
+            "suggested_fixes": [
+                "drop the two rstudioapi lines: the harness already runs the script with the "
+                "working directory at the artifact root, which is what they were setting",
+                "if a path anchor is genuinely needed, `here::here(...)` resolves without an IDE",
+            ],
+        }
+
+    if exit_code == 2 and _USAGE_RE.search(log_tail):
+        m = _ARG_REQUIRED_RE.search(log_tail)
+        missing = f" ({m.group('names').strip()})" if m else ""
+        return {
+            "source": _DETERMINISTIC,
+            "likely_cause": (
+                f"the script requires command-line arguments{missing} and was invoked without "
+                "them — argparse printed its usage block and exited 2. Nothing in the deposit "
+                "states what to pass, so no harness can supply them: the missing piece is a "
+                "machine-readable invocation, not a dependency."),
+            "suggested_fixes": [
+                "declare the invocation in the manifest so it is reproducible by anyone: a step "
+                "with `args: [...]` is passed straight through to the script",
+                "or give the arguments defaults, so the documented entry point runs as deposited",
+            ],
+        }
+    return None
 
 
 def _no_log_diagnosis(res: RunResult) -> dict[str, Any]:
