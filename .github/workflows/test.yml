@@ -3,7 +3,13 @@
 name: test
 
 on:
+  # A branch in this repo with an open PR fires BOTH events, so every job ran
+  # twice on every push — six check runs for three jobs. Scope push to the trunk
+  # (the thing that must never go red) and let pull_request cover branches. The
+  # trade-off is deliberate: a branch pushed with no PR open gets no CI, which is
+  # the point at which nobody is waiting on the answer.
   push:
+    branches: [main]
   pull_request:
 
 jobs:
