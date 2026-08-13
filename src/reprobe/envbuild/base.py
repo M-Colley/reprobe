@@ -62,6 +62,15 @@ def _cran_install_command(packages: list[str], cran_repo: str) -> str:
     r_code = (
         "pkgs <- c(" + vec + "); "
         'repo <- "' + repo + '"; '
+        # Posit Package Manager decides source-vs-binary on the User-Agent as
+        # well as the `__linux__/<codename>` path, and R's default UA names no
+        # distribution — so the pinned snapshot served SOURCE tarballs and every
+        # R artifact rebuilt its whole tree. roads-chi25-data (2026-08-13) spent
+        # the full 2-hour install budget compiling brms/rstan/lme4 and was
+        # reported infra-error. This is the UA from Posit's own setup snippet; it
+        # is inert against a plain CRAN mirror, which ignores it.
+        'options(HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(), '
+        'paste(getRversion(), R.version$platform, R.version$arch, R.version$os))); '
         "have <- rownames(installed.packages()); "
         "need <- setdiff(pkgs, have); "
         "if (length(need)) { "
