@@ -1,6 +1,7 @@
 # reprobe working dirs and outputs
 /work/
 /out/
+/benchmarks-out/
 *.log
 
 # Python
