@@ -39,7 +39,7 @@ def _run(tmp_path, ref, spy=None, **kw):
 
 def test_example_pipeline_writes_reports_and_never_grants(tmp_path, spy_run_container):
     report = _run(tmp_path, EXAMPLE)
-    outdir = tmp_path / report.submission_id / "out"
+    outdir = tmp_path / report.submission_id / "report"
     for name in ("report.json", "report.md", "report.html"):
         assert (outdir / name).is_file(), f"{name} not written"
 
@@ -85,7 +85,7 @@ def test_unresolvable_ref_yields_renderable_fetch_failed_report(tmp_path):
     report = _run(tmp_path, str(tmp_path / "does-not-exist-anywhere"))
     assert report.verdict["overall"] == "fetch-failed"
     assert report.verdict["human_review_required"] is True
-    outdir = tmp_path / report.submission_id / "out"
+    outdir = tmp_path / report.submission_id / "report"
     for name in ("report.json", "report.md", "report.html"):
         assert (outdir / name).is_file(), f"{name} not written on fetch failure"
     html_text = (outdir / "report.html").read_text(encoding="utf-8")
@@ -407,7 +407,7 @@ def test_a_failed_code_fetch_still_reports_what_the_data_deposit_says(tmp_path, 
     assert any("2026-09-21" in n for n in report.not_verified)
 
     # and it must reach the rendered report, not just the JSON
-    outdir = tmp_path / report.submission_id / "out"
+    outdir = tmp_path / report.submission_id / "report"
     for name in ("report.md", "report.html"):
         assert "2026-09-21" in (outdir / name).read_text(encoding="utf-8"), name
 

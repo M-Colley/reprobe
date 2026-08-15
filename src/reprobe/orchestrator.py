@@ -114,7 +114,7 @@ class Orchestrator:
         self._merged_data_paths: set[str] = set()
         work = self.workroot / sid
         rundir = work / "run"
-        outdir = work / "out"
+        outdir = work / "report"
         logdir = work / "logs"
         # A fetch must land in a pristine tree, so re-running a submission (or a
         # batch --resume retry) never inherits the previous fetch's files.

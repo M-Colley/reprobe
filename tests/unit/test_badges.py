@@ -404,3 +404,36 @@ def test_a_source_with_genuinely_no_identifier_still_says_so():
     fetch = FetchResult(input="/local/path", resolved_type="local", src_dir="/x", pin=Pin())
     assert any("no archival persistent identifier found" in n
                for n in _decide(fetch, [])["acm"]["notes"])
+
+
+_BADGES = {"acm": {"available": "candidate", "functional": "not-met",
+                   "results_reproduced": "not-evaluated", "notes": []},
+           "fair": {"findable": False, "accessible": True,
+                    "interoperable": "partial", "reusable": "partial"}}
+
+
+def test_html_shows_why_a_step_failed():
+    """A failed step rendered as a bare "fail" tells a chair nothing. The markdown
+    report carried the log tail from the start; the HTML — the copy the dashboard
+    links to — did not, so the most-read report was the least informative."""
+    rep = _report(badges=_BADGES, steps=[RunResult(
+        runner="r", target="analysis.R", status="fail", exit_code=1,
+        diagnostics={"log_tail": "loading data...\nError: could not find function \"gather\"\nExecution halted"})])
+    out = html.render(rep)
+    assert "could not find function" in out
+    assert "Execution halted" in out
+
+
+def test_html_log_tail_cannot_break_out_of_its_element():
+    """Author stdout is untrusted: it must not close the <pre> it sits in."""
+    rep = _report(badges=_BADGES, steps=[RunResult(
+        runner="python", target="x.py", status="fail",
+        diagnostics={"log_tail": "</pre><script>alert(1)</script>"})])
+    out = html.render(rep)
+    assert "<script>alert(1)</script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_html_shows_no_log_block_when_there_is_nothing_to_show():
+    rep = _report(badges=_BADGES, steps=[RunResult(runner="r", target="ok.R", status="pass")])
+    assert "log tail" not in html.render(rep)

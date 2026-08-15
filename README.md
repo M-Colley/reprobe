@@ -127,7 +127,7 @@ CRAN-available ones — pinned to a dated snapshot (`r.cran_snapshot` in
 analysis still runs with `--network none`. Packages not on CRAN are reported, not
 faked.
 
-Outputs land in `work/<submission>/out/`: `report.json` (machine-readable),
+Outputs land in `work/<submission>/report/`: `report.json` (machine-readable),
 `report.md`, and a single-file `report.html`.
 
 ## What the badges mean here
