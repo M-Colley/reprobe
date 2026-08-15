@@ -72,6 +72,14 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  {% for k, v in r.provenance.items() %}<div class="muted">{{ k }}: <code>{{ v }}</code></div>{% endfor %}
 </div>{% endif %}
 
+{% if r.fix_list %}<div class="card"><b>What to change</b>
+ <div class="muted">Concrete changes, cheapest first. Deterministic items are facts about this run; advisory ones come from the local model and need a human eye.</div>
+ <ol>{% for f in r.fix_list %}
+  <li style="margin-top:6px"><code>{{ f.where }}</code>{% if f.source != 'deterministic' %} <span class="muted">(advisory)</span>{% endif %}<br>{{ f.why }}
+   <ul>{% for x in f.fixes %}<li>{{ x }}</li>{% endfor %}</ul></li>
+ {% endfor %}</ol>
+</div>{% endif %}
+
 <div class="card"><b>Steps</b>
  <table><tr><th>Target</th><th>Runner</th><th>Status</th><th>Time</th><th>Verified / not verified</th></tr>
  {% for s in r.steps %}

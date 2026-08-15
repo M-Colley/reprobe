@@ -289,6 +289,7 @@ class Orchestrator:
             badges_cfg=self.config.badges, functional_requested=functional_requested, ran=ran,
             install_error=install_err)
         report.verdict = badge_rules.verdict(results, ran, install_err)
+        report.fix_list = _fix_list(report, results)
         report.not_verified = sorted(
             {x for r in results for x in r.not_verified} | set(report.not_verified))
 
@@ -771,6 +772,50 @@ _USAGE_RE = re.compile(r"^usage:", re.M)
 _ARG_REQUIRED_RE = re.compile(
     r"error: the following arguments are required:\s*(?P<names>.+)$", re.M)
 
+#: R's error for a function whose package is installed but not attached. The
+#: single most common failure across the benchmark artifacts (7 of them), and the
+#: one most precisely fixable: the package IS present — the install phase put it
+#: there — so the only missing thing is a `library()` line.
+_NO_FUNCTION_RE = re.compile(r'could not find function "(?P<fn>[^"]+)"')
+
+#: Curated, not inferred. Every entry is an unambiguous export of one package in
+#: the families research R actually uses. A wrong entry would send an author to
+#: add the wrong line, so anything shared between packages is left out and falls
+#: through to the generic message below.
+_R_FUNCTION_OWNER = {
+    # tidyr — the reshape verbs, repeatedly used without attaching tidyr
+    "gather": "tidyr", "spread": "tidyr", "pivot_longer": "tidyr",
+    "pivot_wider": "tidyr", "drop_na": "tidyr", "replace_na": "tidyr",
+    "separate": "tidyr", "unite": "tidyr",
+    # easystats family — each function belongs to exactly one member package
+    "report": "report", "report_table": "report", "report_text": "report",
+    "bayesfactor_models": "bayestestR", "describe_posterior": "bayestestR",
+    "bayesfactor": "bayestestR", "rope": "bayestestR", "hdi": "bayestestR",
+    "model_parameters": "parameters", "standardize_parameters": "parameters",
+    "model_performance": "performance", "check_model": "performance",
+    "cohens_d": "effectsize", "eta_squared": "effectsize", "hedges_g": "effectsize",
+    "estimate_means": "modelbased", "estimate_contrasts": "modelbased",
+    # other staples of this corpus
+    "art": "ARTool", "emmeans": "emmeans", "lmer": "lme4", "glmer": "lme4",
+    "read_xlsx": "readxl", "read_excel": "readxl", "geom_signif": "ggsignif",
+}
+
+#: Offline by design: the analysis container runs with --network none, so any
+#: runtime fetch fails here. That is the point — an artifact that downloads its
+#: own code or data when it runs is not self-contained, and what it downloads can
+#: change after publication.
+_NO_NETWORK_RE = re.compile(
+    r"Could not resolve host(?:name)?|Failed to connect to [^\s]+ port|"
+    r"Temporary failure in name resolution|nodename nor servname provided", re.I)
+_URL_IN_LOG_RE = re.compile(r"https?://[^\s\"'\)\]]+")
+
+#: A directory the script writes into that git never carried: git does not track
+#: empty directories, so `plots/` exists for the author and for nobody else.
+_NO_DIR_RE = re.compile(
+    r"Cannot find directory '(?P<dir>[^']+)'|"
+    r"cannot change working directory|"
+    r"cannot open file '(?P<path>[^']+)': No such file or directory")
+
 
 def known_failure_diagnosis(log_tail: str, exit_code: Optional[int]) -> Optional[dict[str, Any]]:
     """Name a failure whose console output has exactly one possible cause.
@@ -806,6 +851,63 @@ def known_failure_diagnosis(log_tail: str, exit_code: Optional[int]) -> Optional
             ],
         }
 
+    if (m := _NO_FUNCTION_RE.search(log_tail)):
+        fn = m.group("fn")
+        owner = _R_FUNCTION_OWNER.get(fn)
+        where = (f"`{fn}()` is exported by **{owner}**" if owner
+                 else f"`{fn}()` belongs to a package that is installed but not attached")
+        fix = (f"add `library({owner})` near the other library() calls" if owner
+               else f"add the `library()` call for whichever package exports `{fn}()`, "
+                    "or namespace the call as `pkg::" + fn + "()`")
+        return {
+            "source": _DETERMINISTIC,
+            "likely_cause": (
+                f"{where}, and the script never attaches it. The package is present — the "
+                "install phase put it there, which is why nothing failed earlier — so this is "
+                "not a missing dependency. It works in the author's session because something "
+                "else attached the package first; in a clean one, nothing has."),
+            "suggested_fixes": [fix,
+                                "the same file may use other functions from that package; "
+                                "attaching it once at the top fixes them all"],
+        }
+
+    if _NO_NETWORK_RE.search(log_tail):
+        urls = _URL_IN_LOG_RE.findall(log_tail)
+        what = f" (it tried to reach {urls[0]})" if urls else ""
+        return {
+            "source": _DETERMINISTIC,
+            "likely_cause": (
+                f"the artifact fetches something over the network while it runs{what}. The "
+                "analysis container is offline by design (`--network none`), so the fetch "
+                "fails here — but the finding is not the failed request. An artifact that "
+                "downloads its own code or data at run time is not self-contained: what it "
+                "downloads can change after publication, and if that URL moves or goes "
+                "private the artifact stops working permanently. The deposit does not "
+                "contain what the results depend on."),
+            "suggested_fixes": [
+                "vendor it: commit the fetched file into the repository and load it locally, "
+                "which also pins the exact version that produced the published numbers",
+                "if it must stay remote, depend on an immutable reference (a tag or commit, "
+                "never a moving branch) — but a vendored copy survives the source disappearing",
+            ],
+        }
+
+    if (m := _NO_DIR_RE.search(log_tail)):
+        missing = m.group("dir") or m.group("path") or "the output directory"
+        return {
+            "source": _DETERMINISTIC,
+            "likely_cause": (
+                f"the script writes to `{missing}`, which does not exist in a fresh clone. "
+                "git does not track empty directories, so a folder that exists on the "
+                "author's machine is simply absent for everyone else — including every "
+                "reviewer, and this harness."),
+            "suggested_fixes": [
+                f'create it in the script: `dir.create("{missing}", showWarnings = FALSE)` '
+                "at the top, or `ggsave(..., create.dir = TRUE)` per call",
+                f'or commit `{missing}/.gitkeep` so a clone carries the directory',
+            ],
+        }
+
     if exit_code == 2 and _USAGE_RE.search(log_tail):
         m = _ARG_REQUIRED_RE.search(log_tail)
         missing = f" ({m.group('names').strip()})" if m else ""
@@ -823,6 +925,47 @@ def known_failure_diagnosis(log_tail: str, exit_code: Optional[int]) -> Optional
             ],
         }
     return None
+
+
+def _fix_list(report: Report, results: list[RunResult]) -> list[dict[str, Any]]:
+    """Every concrete change the author could make, in one ordered list.
+
+    The verdict answers "did it run". This answers "what do I change", and that
+    is the part an author acts on — but until now it was scattered one diagnosis
+    per step, several screens apart, in a report whose failures often share a
+    single root cause. A reader had to assemble it themselves.
+
+    Deterministic findings come first: they are facts about the run, not guesses.
+    The advisory model's suggestions follow, labelled, because a chair should be
+    able to tell which is which at a glance."""
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(where: str, why: str, fixes: list[str], source: str) -> None:
+        key = f"{where}|{why[:80]}"
+        if key in seen or not fixes:
+            return
+        seen.add(key)
+        items.append({"where": where, "why": why, "fixes": fixes, "source": source})
+
+    # Environment findings read off the files themselves — these need no run at
+    # all, so they are the cheapest things to fix and come first.
+    for w in (report.environment.get("warnings") or []):
+        if "requirements.txt line" in str(w):
+            add("requirements.txt", str(w),
+                ["delete that line — the file installs nothing until it is gone"], "deterministic")
+
+    for res in results:
+        d = res.diagnostics if isinstance(res.diagnostics, dict) else {}
+        known = d.get("harness_diagnosis")
+        if isinstance(known, dict) and known.get("suggested_fixes"):
+            add(res.target, str(known.get("likely_cause", "")),
+                [str(f) for f in known["suggested_fixes"]], "deterministic")
+        adv = d.get("llm_advisory")
+        if isinstance(adv, dict) and adv.get("suggested_fixes"):
+            add(res.target, str(adv.get("likely_cause", "")),
+                [str(f) for f in adv["suggested_fixes"]], "llm-advisory")
+    return items
 
 
 def _no_log_diagnosis(res: RunResult) -> dict[str, Any]:

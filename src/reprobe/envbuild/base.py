@@ -14,8 +14,10 @@ whether the environment was author-specified or harness-default.
 
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -278,6 +280,40 @@ def _conda_env_command(env_file: str, notebooks: bool) -> str:
     return " && ".join(parts)
 
 
+def lint_requirements(path: Path) -> list[str]:
+    """Findings readable off requirements.txt WITHOUT installing anything.
+
+    pip resolves a requirements file all-or-nothing: one unsatisfiable line and
+    NOTHING installs, so the step then dies on a `ModuleNotFoundError` for some
+    unrelated package that was never even attempted. That error names the wrong
+    package, and the real cause is a line the author can see.
+
+    Standard-library names are the case worth catching before the install phase
+    burns: `itertools` has never been on PyPI and never can be, and listing it is
+    a common and invisible mistake — invisible because an author with a working
+    environment never installs from the file they shipped."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    stdlib = getattr(sys, "stdlib_module_names", frozenset())
+    findings: list[str] = []
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        name = re.split(r"[<>=!~\[; ]", line, maxsplit=1)[0].strip().replace("_", "-").lower()
+        if name.replace("-", "_") in stdlib:
+            findings.append(
+                f"requirements.txt line {n} asks pip for `{name}`, which is part of the Python "
+                "standard library and has never been on PyPI. pip resolves the file "
+                "all-or-nothing, so this one line stops EVERY package in it from installing — "
+                "the run then fails on whichever import happens to come first, which names the "
+                "wrong package. Delete the line; `import " + name.replace("-", "_") +
+                "` works without it.")
+    return findings
+
+
 def _pip_command(req_file: str, conda_prefix: Optional[str]) -> str:
     """`pip install -r <file>`, into a built conda env when there is one.
 
@@ -354,6 +390,11 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
     elif dep:
         warnings.append(f"declared dependency file '{dep}' is not a supported type "
                         "(requirements.txt | environment.yml | renv.lock); it was NOT installed")
+    # Read the file before spending an install phase on it: one unsatisfiable
+    # line means nothing installs, and the resulting error names an innocent
+    # package. Cheap, offline, and it fires whether or not the file is declared.
+    if (src / "requirements.txt").is_file():
+        warnings.extend(lint_requirements(src / "requirements.txt"))
     if not cmds:
         # auto-detect common manifests (repo2docker-style conventions). Conda
         # first: when there is an env to build, pip has to install INTO it.

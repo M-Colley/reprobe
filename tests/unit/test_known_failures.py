@@ -86,3 +86,49 @@ def test_nothing_is_claimed_for_an_empty_log():
 def test_rstudio_is_recognised_whatever_the_exit_code(exit_code):
     # Rscript's exit code for a halted script is not something to depend on.
     assert diagnose(RSTUDIO_LOG, exit_code) is not None
+
+
+# --- classes the benchmark surfaced repeatedly --------------------------------
+
+def test_an_unattached_r_package_names_the_library_line_to_add():
+    """The most common failure across the benchmark (7 of them). The package is
+    INSTALLED — the install phase put it there — so this is not a missing
+    dependency, and saying "install X" would send an author to fix the one thing
+    that is not broken."""
+    d = diagnose('Error in gather(x) : could not find function "gather"\n', 1)
+    assert d is not None
+    assert "tidyr" in d["likely_cause"]
+    assert any("library(tidyr)" in f for f in d["suggested_fixes"])
+    assert "not a missing dependency" in d["likely_cause"]
+
+
+def test_an_unknown_function_is_named_without_inventing_a_package():
+    """The map is curated. A function not in it still gets the class named — but
+    a guessed package would be a wrong instruction stated as fact."""
+    d = diagnose('could not find function "some_private_helper"\n', 1)
+    assert d is not None
+    assert "some_private_helper" in d["likely_cause"]
+    assert "library(" in " ".join(d["suggested_fixes"])
+    for pkg in ("tidyr", "report", "bayestestR"):
+        assert f"library({pkg})" not in " ".join(d["suggested_fixes"])
+
+
+def test_a_runtime_download_is_reported_as_a_reproducibility_finding():
+    """roads-chi25-data sources its function library from a moving branch at run
+    time. The finding is not the failed request — it is that the deposit does not
+    contain what its results depend on."""
+    log = ("devtools::source_url(\"https://raw.githubusercontent.com/M-Colley/rCode/main/r.R\")\n"
+           "Could not resolve host: raw.githubusercontent.com\n")
+    d = diagnose(log, 1)
+    assert d is not None
+    assert "not self-contained" in d["likely_cause"]
+    assert "raw.githubusercontent.com" in d["likely_cause"]
+    assert any("vendor" in f for f in d["suggested_fixes"])
+
+
+def test_a_missing_output_directory_explains_why_git_lost_it():
+    d = diagnose("Error in `ggsave()`:\n! Cannot find directory 'plots'.\n", 1)
+    assert d is not None
+    assert "plots" in d["likely_cause"]
+    assert "does not track empty directories" in d["likely_cause"]
+    assert any("dir.create" in f for f in d["suggested_fixes"])
