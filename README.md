@@ -41,6 +41,15 @@ anything. `reprobe --no-llm` is fully functional and deterministic.
 >   locked-down machine you will need administrator / IT permission** to
 >   install Docker Desktop and turn virtualization on. Without WSL 2 **or** that
 >   permission, Docker will not start and no runs are possible.
+>
+>   Prefer WSL 2 for more than convention: on the Hyper-V backend we have seen
+>   the Docker VM die mid-run — `docker run` exits **125** with `error waiting
+>   for container: unexpected EOF`, every later engine call returns HTTP 500,
+>   and Windows logs nothing. It happened on light and heavy steps alike, at
+>   three different VM memory settings, so it is not a resource-tuning problem.
+>   A batch survives it (reprobe reports `infra-error` and makes no claim about
+>   the artifact, and `--resume` continues), but a long notebook can lose an
+>   hour. Quit Docker Desktop fully and relaunch to recover.
 > - **Linux** — the daemon must be running and your user must be allowed to use
 >   it: either be in the `docker` group, or use rootless Docker.
 > - **macOS** — Docker Desktop (or an equivalent daemon) must be running.
@@ -52,10 +61,12 @@ reprobe doctor --smoke     # self-check: config, Docker, base images, Ollama, sa
 ```
 
 The pinned Python/R analysis environments are published images —
-`ghcr.io/m-colley/reprobe-base-py:2026.1` and `…-base-r:2026.1`, built by
-[`images/build-images.sh`](images/build-images.sh). Authors can test their code
-against the exact same environment reviewers use (see
-[docs/chair-runbook.md](docs/chair-runbook.md)).
+`ghcr.io/m-colley/reprobe-base-py` and `…-base-r`, built by
+[`images/build-images.sh`](images/build-images.sh). **The tag in force is whatever
+`config/pins.yaml` pins** (`<year>.<revision>` — currently `2026.4`); that file is
+the single source of truth, so read it there rather than trusting a number quoted
+in prose. Authors can test their code against the exact same environment reviewers
+use (see [docs/chair-runbook.md](docs/chair-runbook.md)).
 
 ## Use
 
@@ -180,5 +191,6 @@ copy-pasteable author-feedback block, batch dashboard (+ `--resume`,
 `badges.csv`), a golden-report regression (`reprobe doctor --golden`), and the
 advisory LLM. Base images build via
 [`images/build-images.sh`](images/build-images.sh) and publish to
-`ghcr.io/m-colley/reprobe-base-{py,r}:2026.1`. Remaining: repo2docker fallback
+`ghcr.io/m-colley/reprobe-base-{py,r}` at the tag `config/pins.yaml` pins.
+Remaining: repo2docker fallback
 and Unity compile/build tiers — scoped in [docs/DESIGN.md §11](docs/DESIGN.md).
