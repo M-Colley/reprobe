@@ -132,3 +132,47 @@ def test_a_missing_output_directory_explains_why_git_lost_it():
     assert "plots" in d["likely_cause"]
     assert "does not track empty directories" in d["likely_cause"]
     assert any("dir.create" in f for f in d["suggested_fixes"])
+
+
+ONATTACH_CONFLICTED_LOG = """Error: package or namespace load failed for 'easystats':
+ .onAttach failed in attachNamespace() for 'easystats', details:
+  call: eval(mc$quietly, parent.frame(i))
+  error: object 'quietly' not found
+Execution halted
+"""
+
+
+def test_a_failed_attach_hook_is_not_reported_as_a_missing_package():
+    """Seen 3 times across the benchmark, and with no deterministic answer the
+    advisory model filled in with "update the easystats package" — confidently
+    wrong. The package is installed and R ran its hook; installing or updating it
+    changes nothing."""
+    d = diagnose(ONATTACH_CONFLICTED_LOG, 1)
+    assert d is not None
+    cause = d["likely_cause"]
+    assert "easystats" in cause
+    assert "neither a missing nor an out-of-date package" in cause
+    assert "conflicted" in cause
+    fixes = " ".join(d["suggested_fixes"])
+    assert "set_conflicts = FALSE" in fixes
+    assert "install" not in fixes.lower().replace("installing", "")   # never "install X"
+
+
+def test_the_conflicted_case_explains_the_ordering_that_fixes_it():
+    d = diagnose(ONATTACH_CONFLICTED_LOG, 1)
+    assert any("BEFORE" in f for f in d["suggested_fixes"])
+    assert "do not compose" in " ".join(d["suggested_fixes"])
+
+
+def test_an_attach_hook_failure_without_the_conflicted_fingerprint_stays_narrow():
+    """Attach hooks fail for many reasons. Without the `conflicted` fingerprint,
+    name the class and point at the evidence — do not assert a cause."""
+    log = ("Error: package or namespace load failed for 'somePkg':\n"
+           " .onAttach failed in attachNamespace() for 'somePkg', details:\n"
+           "  call: stop('no license found')\n  error: no license found\n")
+    d = diagnose(log, 1)
+    assert d is not None
+    assert "somePkg" in d["likely_cause"]
+    assert "not a missing package" in d["likely_cause"]
+    assert "conflicted" not in d["likely_cause"]
+    assert "set_conflicts" not in " ".join(d["suggested_fixes"])

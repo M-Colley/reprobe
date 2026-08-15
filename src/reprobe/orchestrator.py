@@ -772,6 +772,19 @@ _USAGE_RE = re.compile(r"^usage:", re.M)
 _ARG_REQUIRED_RE = re.compile(
     r"error: the following arguments are required:\s*(?P<names>.+)$", re.M)
 
+#: A package's own attach hook failing. Not a missing package — it is installed
+#: and R got as far as running its .onAttach — so "install it" and "update it"
+#: are both wrong, which is exactly what the advisory model suggested when this
+#: had no deterministic answer (seen 3 times across the benchmark).
+_ONATTACH_RE = re.compile(
+    r"\.onAttach failed in attachNamespace\(\) for ['‘\"](?P<pkg>[^'’\"]+)['’\"]")
+#: The `conflicted` fingerprint. That package replaces library()/require() with
+#: shims to track conflicts; a meta-package's .onAttach then attaches its own
+#: constituents THROUGH the shim, which evaluates a captured match.call() in a
+#: frame where the argument is not bound. Traced to colleyRstats_setup(), whose
+#: conflict_prefer() loop activates conflicted — but any caller does it.
+_CONFLICTED_RE = re.compile(r"mc\$quietly|object ['‘]quietly['’] not found")
+
 #: R's error for a function whose package is installed but not attached. The
 #: single most common failure across the benchmark artifacts (7 of them), and the
 #: one most precisely fixable: the package IS present — the install phase put it
@@ -848,6 +861,47 @@ def known_failure_diagnosis(log_tail: str, exit_code: Optional[int]) -> Optional
                 "drop the two rstudioapi lines: the harness already runs the script with the "
                 "working directory at the artifact root, which is what they were setting",
                 "if a path anchor is genuinely needed, `here::here(...)` resolves without an IDE",
+            ],
+        }
+
+    if (m := _ONATTACH_RE.search(log_tail)):
+        pkg = m.group("pkg")
+        if _CONFLICTED_RE.search(log_tail):
+            return {
+                "source": _DETERMINISTIC,
+                "likely_cause": (
+                    f"`{pkg}` is installed and R ran its attach hook, so this is neither a "
+                    f"missing nor an out-of-date package — installing or updating `{pkg}` will "
+                    "not change it. Something earlier in the script activated the `conflicted` "
+                    "package, which replaces `library()`/`require()` with its own shims. "
+                    f"`{pkg}` attaches its constituents from inside its `.onAttach`, that call "
+                    "reaches the shim, and the shim evaluates a captured `match.call()` in a "
+                    "frame where the argument is not bound — hence `object 'quietly' not "
+                    "found`. Attaching it on its own, before anything sets conflict "
+                    "preferences, works fine."),
+                "suggested_fixes": [
+                    f"attach `{pkg}` BEFORE whatever sets conflict preferences — `conflicted` "
+                    "and a meta-package's attach hook do not compose, and order is the whole "
+                    "difference",
+                    "or turn the preferences off at the call site: a setup helper that wraps "
+                    "`conflicted::conflict_prefer()` usually takes an argument for it "
+                    "(colleyRstats: `colleyRstats_setup(set_conflicts = FALSE)`)",
+                    f"or attach the member package you actually use instead of the meta-package "
+                    f"— `{pkg}` pulls in a whole family, and one named member avoids the hook",
+                ],
+            }
+        return {
+            "source": _DETERMINISTIC,
+            "likely_cause": (
+                f"`{pkg}` is installed — R found it and ran its `.onAttach` — and that hook "
+                "failed. This is not a missing package, so installing it again will not help. "
+                "Attach hooks fail because of what is already loaded in the session, so the "
+                "cause is usually something that ran earlier rather than the package itself."),
+            "suggested_fixes": [
+                f"attach `{pkg}` first, before the rest of the setup, and see whether it loads "
+                "on its own — that separates the package from the session it landed in",
+                "read the `details:` line in the error above: it names the call inside the "
+                "hook that failed, which is the specific thing to look up",
             ],
         }
 
