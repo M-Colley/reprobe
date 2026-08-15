@@ -19,7 +19,7 @@ check**. Everything else is fixed.
    > [!IMPORTANT]
    > **Never republish a tag with different bytes.** If you change an
    > `env.yaml`, bump `revision` and the `base_images.*` tags in the same edit,
-   > so `2026.1` always means one image. Reusing a tag silently gives two people
+   > so a published tag always means exactly one image. Reusing a tag silently gives two people
    > different environments under one name and breaks the promise that a stored
    > report re-runs years later — its recorded digest no longer exists.
 

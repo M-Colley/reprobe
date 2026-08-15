@@ -142,7 +142,7 @@ USER $MAMBA_USER          # non-root by default (uid 57439)
 WORKDIR /work
 ```
 
-`base-py` carries the AutoUI-typical stack pinned: `python=3.13, jupyter, nbconvert, papermill, numpy, pandas, scikit-learn, xgboost, catboost, lightgbm, shap, matplotlib, seaborn, statsmodels`. `base-r` mirrors via micromamba-managed `r-base=4.4.*, r-tidyverse, r-rmarkdown, r-knitr, r-renv, pandoc` (one solver governs both stacks). Images are tagged `ghcr.io/m-colley/reprobe-base-py:2026.1` (year.rev), digest recorded in every report. Built/cached images and Unity `Library/` live in named volumes for fast re-runs; digests still recorded so caching can't mask a change.
+`base-py` carries the AutoUI-typical stack pinned: `python=3.13, jupyter, nbconvert, papermill, numpy, pandas, scikit-learn, xgboost, catboost, lightgbm, shap, matplotlib, seaborn, statsmodels`. `base-r` mirrors via micromamba-managed `r-base=4.4.*, r-tidyverse, r-rmarkdown, r-knitr, r-renv, pandoc` (one solver governs both stacks). Images are tagged `ghcr.io/m-colley/reprobe-base-py:<year>.<rev>` from `config/pins.yaml` (2026.4 at the time of writing), digest recorded in every report. Built/cached images and Unity `Library/` live in named volumes for fast re-runs; digests still recorded so caching can't mask a change.
 
 ---
 
@@ -314,7 +314,7 @@ badges_claimed: [available, functional]    # author's claim; harness verifies
   },
   "environment": {
     "strategy": "pinned-base",            // pinned-base | repo2docker | author-image | besteffort
-    "image": "ghcr.io/m-colley/reprobe-base-py:2026.1@sha256:...",
+    "image": "ghcr.io/m-colley/reprobe-base-py:2026.4@sha256:...",
     "base_image_digest": "sha256:...", "resolved_deps_digest": "...",
     "env_provenance": "author-specified", "repo2docker_version": null
   },
