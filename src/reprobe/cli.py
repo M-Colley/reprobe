@@ -78,7 +78,7 @@ def run(
         install=not no_install, dry_run=dry_run, timeout_s=timeout,
         data_sources=list(data or []), reuse_downloads=reuse_downloads,
     )
-    _print_report_summary(report, Path(workroot) / report.submission_id / "out")
+    _print_report_summary(report, Path(workroot) / report.submission_id / "report")
 
 
 @app.command()
@@ -220,7 +220,7 @@ def batch(
         ref, data = row["url"], row["data"]
         console.print(f"[cyan]>[/cyan] {ref}" + (f"  [dim]+{len(data)} deposit(s)[/dim]" if data else ""))
         sid = submission_id(ref)
-        rep = _resumed_report(Path(workroot) / sid / "out" / "report.json") if resume else None
+        rep = _resumed_report(Path(workroot) / sid / "report" / "report.json") if resume else None
         if rep is not None:
             console.print("[dim]  resumed from existing report[/dim]")
         else:
@@ -237,7 +237,7 @@ def batch(
                                       "note": "harness crashed on this submission — no statement about the artifact"})
         reports.append(rep.model_dump(mode="json"))
         # dashboard hrefs are <sid>/report.html — make out/ a self-contained bundle
-        src_report = Path(workroot) / sid / "out" / "report.html"
+        src_report = Path(workroot) / sid / "report" / "report.html"
         if src_report.is_file():
             dst = outdir / sid / "report.html"
             dst.parent.mkdir(parents=True, exist_ok=True)

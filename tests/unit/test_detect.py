@@ -753,3 +753,23 @@ def test_extras_bypass_the_presence_check(tmp_path):
     assert '("", "ray[tune]")' in cmd, cmd          # empty module -> always install
     assert '("shap", "shap")' in cmd                # ordinary dist keeps its check
     assert "if not m or (u.find_spec(m) is None" in cmd
+
+
+def test_requirements_lint_catches_a_stdlib_module(tmp_path):
+    """pip resolves a requirements file all-or-nothing, so one stdlib name stops
+    EVERY package installing — and the run then fails on an unrelated import,
+    naming the wrong package. Reading the file costs nothing and needs no run."""
+    from reprobe.envbuild.base import lint_requirements
+    f = tmp_path / "requirements.txt"
+    f.write_text("pandas>=2.0\nitertools\nseaborn\n", encoding="utf-8")
+    out = lint_requirements(f)
+    assert len(out) == 1
+    assert "line 2" in out[0] and "itertools" in out[0]
+    assert "all-or-nothing" in out[0]
+
+
+def test_requirements_lint_leaves_real_packages_alone(tmp_path):
+    from reprobe.envbuild.base import lint_requirements
+    f = tmp_path / "requirements.txt"
+    f.write_text("pandas>=2.0\n# a comment\n-r other.txt\n\nscikit-learn\n", encoding="utf-8")
+    assert lint_requirements(f) == []

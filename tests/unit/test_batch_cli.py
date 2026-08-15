@@ -26,7 +26,7 @@ def _batch(tmp_path: Path, *extra: str):
 
 
 def _report_json(tmp_path: Path) -> Path:
-    hits = list((tmp_path / "work").glob("*/out/report.json"))
+    hits = list((tmp_path / "work").glob("*/report/report.json"))
     assert len(hits) == 1
     return hits[0]
 

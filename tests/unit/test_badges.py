@@ -404,3 +404,82 @@ def test_a_source_with_genuinely_no_identifier_still_says_so():
     fetch = FetchResult(input="/local/path", resolved_type="local", src_dir="/x", pin=Pin())
     assert any("no archival persistent identifier found" in n
                for n in _decide(fetch, [])["acm"]["notes"])
+
+
+_BADGES = {"acm": {"available": "candidate", "functional": "not-met",
+                   "results_reproduced": "not-evaluated", "notes": []},
+           "fair": {"findable": False, "accessible": True,
+                    "interoperable": "partial", "reusable": "partial"}}
+
+
+def test_html_shows_why_a_step_failed():
+    """A failed step rendered as a bare "fail" tells a chair nothing. The markdown
+    report carried the log tail from the start; the HTML — the copy the dashboard
+    links to — did not, so the most-read report was the least informative."""
+    rep = _report(badges=_BADGES, steps=[RunResult(
+        runner="r", target="analysis.R", status="fail", exit_code=1,
+        diagnostics={"log_tail": "loading data...\nError: could not find function \"gather\"\nExecution halted"})])
+    out = html.render(rep)
+    assert "could not find function" in out
+    assert "Execution halted" in out
+
+
+def test_html_log_tail_cannot_break_out_of_its_element():
+    """Author stdout is untrusted: it must not close the <pre> it sits in."""
+    rep = _report(badges=_BADGES, steps=[RunResult(
+        runner="python", target="x.py", status="fail",
+        diagnostics={"log_tail": "</pre><script>alert(1)</script>"})])
+    out = html.render(rep)
+    assert "<script>alert(1)</script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_html_shows_no_log_block_when_there_is_nothing_to_show():
+    rep = _report(badges=_BADGES, steps=[RunResult(runner="r", target="ok.R", status="pass")])
+    assert "log tail" not in html.render(rep)
+
+
+def test_the_fix_list_gathers_every_diagnosis_into_one_place():
+    """The verdict says whether it ran; this says what to change. Scattered one
+    diagnosis per step, several screens apart, it was being missed — and several
+    failures in one report often share a root cause that only shows when the
+    findings sit together."""
+    from reprobe.orchestrator import _fix_list
+
+    rep = _report(environment={"warnings": [
+        "requirements.txt line 2 asks pip for `itertools`, which is part of the Python "
+        "standard library ... all-or-nothing ..."]})
+    steps = [
+        RunResult(runner="r", target="a.R", status="fail", diagnostics={
+            "harness_diagnosis": {"likely_cause": "unattached package",
+                                  "suggested_fixes": ["add library(tidyr)"]}}),
+        RunResult(runner="r", target="b.R", status="fail", diagnostics={
+            "llm_advisory": {"likely_cause": "maybe the data path",
+                             "suggested_fixes": ["check the path"]}}),
+        RunResult(runner="r", target="c.R", status="pass"),
+    ]
+    items = _fix_list(rep, steps)
+    assert [i["where"] for i in items] == ["requirements.txt", "a.R", "b.R"]
+    # the file-level finding comes first: it needs no run at all to act on
+    assert items[0]["source"] == "deterministic"
+    # and the model's guess is labelled as one, so a chair can tell them apart
+    assert items[1]["source"] == "deterministic"
+    assert items[2]["source"] == "llm-advisory"
+
+
+def test_the_fix_list_does_not_repeat_one_finding_per_step():
+    from reprobe.orchestrator import _fix_list
+    diag = {"harness_diagnosis": {"likely_cause": "RStudio is not running",
+                                  "suggested_fixes": ["drop the rstudioapi lines"]}}
+    steps = [RunResult(runner="r", target="same.R", status="fail", diagnostics=diag),
+             RunResult(runner="r", target="same.R", status="fail", diagnostics=diag)]
+    assert len(_fix_list(_report(), steps)) == 1
+
+
+def test_the_fix_list_reaches_both_renderers():
+    rep = _report(badges=_BADGES, fix_list=[{
+        "where": "analysis.R", "why": "tidyr is installed but never attached",
+        "fixes": ["add library(tidyr)"], "source": "deterministic"}])
+    for text in (html.render(rep), markdown.render(rep)):
+        assert "What to change" in text
+        assert "add library(tidyr)" in text

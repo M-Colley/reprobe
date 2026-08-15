@@ -175,4 +175,9 @@ class Report(BaseModel):
     llm: dict[str, Any] = Field(default_factory=dict)
     badges: dict[str, Any] = Field(default_factory=dict)
     not_verified: list[str] = Field(default_factory=list)
+    # Concrete changes the author can make, gathered from every step's diagnosis
+    # into one ordered list. The verdict says WHETHER an artifact ran; this says
+    # WHAT TO DO about it, which is the part an author acts on — and scattered
+    # one-per-step through a long report, it was being missed.
+    fix_list: list[dict[str, Any]] = Field(default_factory=list)
     verdict: dict[str, Any] = Field(default_factory=dict)

@@ -56,7 +56,7 @@ check**. Everything else is fixed.
 
 ## During the review window
 
-- **One submission:** `reprobe run <url>` → read `work/<id>/out/report.html`.
+- **One submission:** `reprobe run <url>` → read `work/<id>/report/report.html`.
 - **Missing R packages** are installed automatically: reprobe detects the CRAN
   packages a repo needs and installs the CRAN-available ones (pinned to
   `r.cran_snapshot` in `pins.yaml`) in the sandboxed install phase. A package

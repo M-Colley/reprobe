@@ -43,7 +43,17 @@ r:
   # Package Manager snapshot freezes package versions so a run reproduces
   # year-over-year (like the pinned base images). Empty -> live CRAN mirror
   # (cloud.r-project.org), which the report flags as non-reproducible.
-  cran_snapshot: "https://packagemanager.posit.co/cran/2026-07-23"
+  #
+  # The `__linux__/<codename>/` segment is what makes P3M serve PRECOMPILED
+  # binaries; without it the same snapshot returns source tarballs and every
+  # artifact rebuilds its whole dependency tree. Observed 2026-08-13 on
+  # roads-chi25-data: 26 packages including brms/rstan/lme4 compiling from
+  # source blew the entire 2-hour install budget and the run was reported
+  # infra-error. The codename MUST match base_images.r (Ubuntu 24.04 = noble);
+  # if that image moves to a new Ubuntu, move this with it. A package with no
+  # binary for the platform still falls back to source, so this is a speed
+  # change, not a coverage one.
+  cran_snapshot: "https://packagemanager.posit.co/cran/__linux__/noble/2026-07-23"
 
 tools:
   repo2docker: "jupyter-repo2docker==2024.07.0"   # opt-in fallback builder only

@@ -247,6 +247,22 @@ def render(r: Report) -> str:
     if r.verdict.get("note"):
         L.append(f"- ℹ️ {_ml(r.verdict['note'])}")
     L.append("")
+
+    if r.fix_list:
+        # Last, next to the verdict, because it is what the reader leaves with:
+        # the verdict says whether it ran, this says what to change. Scattered one
+        # diagnosis per step it was being missed, and several of these failures
+        # share a root cause that only shows when they sit together.
+        L.append("## What to change")
+        L.append("*Concrete changes, cheapest first. Deterministic items are facts about this "
+                 "run; advisory ones come from the local model and need a human eye.*")
+        L.append("")
+        for i, f in enumerate(r.fix_list, 1):
+            tag = "" if f.get("source") == "deterministic" else " _(advisory)_"
+            L.append(f"{i}. **`{_ml(str(f.get('where', '')))}`**{tag} — {_ml(str(f.get('why', '')))}")
+            for x in f.get("fixes") or []:
+                L.append(f"   - 💡 {_ml(str(x))}")
+        L.append("")
     return "\n".join(L)
 
 
