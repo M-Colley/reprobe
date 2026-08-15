@@ -40,26 +40,49 @@ It is fine while iterating on one case.
 | `OSF 4wj86` | deposit, **no code** | must land on `not-run` with Available candidate — "nothing to execute" is not a failure |
 | `ammarjamal/ARena` + Zenodo | code 404s, data embargoed | must report *why* both halves are unreachable, including the embargo lift date. Re-check after **2026-09-21**, when the Zenodo embargo lifts |
 
-## Observed, 2026-08-13 (fetch + detect pass)
+## Observed, 2026-08-15 (full execution pass)
 
-All five `M-Colley` repos fetch clean, pin to a `git_sha`, and land Available
-**candidate** — a commit is not an archival identifier, which is the correct
-answer for a GitHub-only deposit.
+Every artifact pins to a `git_sha` (or none) and lands Available **candidate** —
+a commit is not an archival identifier, which is the right answer for a
+GitHub-only deposit. Nothing here earns a badge automatically; that is the point.
 
-| artifact | verdict | detected |
-| --- | --- | --- |
-| shed-some-fear-data | not-run | 1 R step |
-| bvi-auditory-hav | not-run | 1 R + 1 Python step |
-| roads-chi25-data | not-run | 3 R steps |
-| ehmi-optimization-chi25-data | not-run | 1 R step |
-| ehmi-for-all-chi26-data | not-run | 2 R steps |
-| PDRA_XAI_OS | not-run | 5 notebooks |
-| PerceivedRisk | not-run | 1 Python step, +1 deposit merged |
-| OSF 4wj86 | not-run | no code: 2 dataset, 5 document, 12 video |
-| ARena | fetch-failed | repo not publicly accessible; deposit embargoed |
+| artifact | verdict | Functional | why |
+| --- | --- | --- | --- |
+| shed-some-fear-data | **runs** | **candidate** | clean. The only artifact needing no human review, and the reference for what the others could be |
+| bvi-auditory-hav | runs-with-failures | not-met | R passes; the Python step needs positional CLI arguments the deposit documents nowhere |
+| roads-chi25-data | runs-with-failures | not-met | 3 scripts, all `Error: RStudio not running` |
+| ehmi-optimization-chi25-data | runs-with-failures | not-met | same, 1 script |
+| ehmi-for-all-chi26-data | runs-with-failures | not-met | same, 2 scripts — and three more defects behind it (see below) |
+| PerceivedRisk | runs-with-failures | not-met | OSF deposit merged (18 files, checksums verified); the deposited `Demographics.csv` headers do not match the columns the code selects |
+| OSF 4wj86 | not-run | not-evaluated | no code at all — 2 datasets, 5 PDFs, 12 videos. Correctly not a failure |
+| ARena | fetch-failed | — | repo not publicly reachable; Zenodo deposit embargoed until 2026-09-21 |
+| PDRA_XAI_OS | infra-error | not-evaluated | **not an artifact result** — see below |
 
-(`not-run` is what `--no-run` produces — it means "no code was executed", not
-"this artifact does not run". A full pass replaces these.)
+### What the failures are actually made of
+
+`ehmi-for-all-chi26-data` was driven all the way down by patching a local copy,
+one blocker at a time. Each fix revealed the next, which is why a single run only
+ever names the first:
+
+1. `setwd(dirname(getActiveDocumentContext()$path))` — needs a live RStudio IDE
+2. `colleyRstats_setup()` activates `conflicted`, whose `library()` shim breaks
+   `easystats`'s `.onAttach` (`object 'quietly' not found`)
+3. `gather()` called ~285 lines before `library(tidyr)`
+4. `dplyr::replace_values()` called with the old vector-pair signature
+
+Only (1) is visible without fixing (1). Two of the repos here —
+`bvi-auditory-hav` and `shed-some-fear-data` — already carry a guarded opener
+that handles both `Rscript` and RStudio, so the fix for (1) is a repo-local
+precedent rather than an invention.
+
+### PDRA_XAI_OS is blocked on the host, not on itself
+
+`PDRA_CatBoost_OS.ipynb` reproducibly kills the Docker VM: exit **125** with the
+engine gone afterwards (HTTP 500 on the pipe), twice, at 60 and 20 minutes. That
+is a container claiming its 8 GiB cap inside a 12 GiB VM, taking the VM with it
+rather than being OOM-killed cleanly. Raise Docker Desktop's memory (24 GiB has
+worked on this host) and re-run. The remaining four notebooks are correctly
+recorded as `skipped` — never attempted — rather than as four more failures.
 
 ## Not included
 
