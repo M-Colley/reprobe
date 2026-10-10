@@ -25,9 +25,12 @@ llm:
   enabled: true
   provider: ollama
   endpoint: "http://127.0.0.1:11434"
-  # Ollama runtime used by deploy/docker-compose.yml (keep its default in sync).
-  # Add the @sha256:... digest after first pull, like micromamba_base.
-  ollama_image: "ollama/ollama:0.12.5"
+  # Ollama runtime used by deploy/docker-compose.yml (keep its default in sync —
+  # tests/unit/test_pins_sync.py enforces it). The runtime must be new enough
+  # for `model`: Gemma 4 needs Ollama >= 0.20, and the 0.12.5 pinned before
+  # this one could not pull it at all, so the LLM was always unavailable.
+  # Digest is the multi-arch index from Docker Hub, so the tag cannot move.
+  ollama_image: "ollama/ollama:0.33.3@sha256:32931b46719f673c05fdbaa81ccb26da18ea4a1c57590a754874ab28ba269eb2"
   model: "gemma4:e4b"              # Gemma 4 e4b (effective-4B edge build) — offline via Ollama, CPU-OK
   keep_alive: "10m"
   # Read timeout per LLM call (connect is capped at 5s in code). With stream=false
@@ -54,6 +57,13 @@ r:
   # binary for the platform still falls back to source, so this is a speed
   # change, not a coverage one.
   cran_snapshot: "https://packagemanager.posit.co/cran/__linux__/noble/2026-07-23"
+
+install:
+  # Conda channels an artifact's environment.yml may use. Any other channel is
+  # dropped and reported: a bare name on anaconda.org is an arbitrary user's
+  # packages, and conda runs their post-link scripts in the install phase, which
+  # has network access. `defaults` is allowed but flagged for Anaconda's terms.
+  conda_channels: [conda-forge, bioconda, pytorch, nvidia, defaults]
 
 tools:
   repo2docker: "jupyter-repo2docker==2024.07.0"   # opt-in fallback builder only

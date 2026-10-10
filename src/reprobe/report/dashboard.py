@@ -61,7 +61,8 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 
 _CLS = {"granted": "granted", "candidate": "candidate", "not-met": "notmet", "not-evaluated": "noteval"}
 _VERDICT_CLS = {"runs": "granted", "runs-with-failures": "fail", "fetch-failed": "fail",
-                "infra-error": "fail", "nothing-executed": "noteval", "not-run": "noteval"}
+                "infra-error": "fail", "nothing-executed": "noteval", "not-run": "noteval",
+                "resource-limit": "candidate", "runs-with-warnings": "candidate"}
 
 
 def triage_flags(rep: dict[str, Any]) -> list[str]:
@@ -83,8 +84,15 @@ def triage_flags(rep: dict[str, Any]) -> list[str]:
         flags.append("not-met")
     if any((s or {}).get("status") == "timeout" for s in rep.get("steps") or []):
         flags.append("timeout")
+    if any((s or {}).get("status") == "resource-limit" for s in rep.get("steps") or []):
+        flags.append("resource-limit")
     if overall in ("infra-error", "nothing-executed"):
         flags.append(overall)
+    if rep.get("run_mode") == "dry-run":
+        flags.append("dry-run")
+    cmp_counts = ((rep.get("results_comparison") or {}).get("summary") or {}).get("counts") or {}
+    if cmp_counts.get("differs"):
+        flags.append("outputs-differ")
     return flags
 
 

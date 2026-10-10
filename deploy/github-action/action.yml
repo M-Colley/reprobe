@@ -4,10 +4,6 @@ inputs:
   submission:
     description: "git URL, Zenodo DOI/record, anonymous.4open.science link, or path"
     required: true
-  tiers:
-    description: "comma list, e.g. structural,compile (Unity tiers need a Unity seat)"
-    required: false
-    default: "structural"
   llm:
     description: "enable the local LLM advisory (true/false)"
     required: false
@@ -41,14 +37,26 @@ runs:
       run: reprobe doctor
     - name: Run
       shell: bash
+      # Inputs arrive through env, never as ${{ }} inside the script: Actions
+      # expands those into the script TEXT before bash parses it, so a
+      # submission URL taken from an issue or PR could inject shell. `read -a`
+      # splits args on whitespace without glob or command expansion.
+      env:
+        REPROBE_SUBMISSION: ${{ inputs.submission }}
+        REPROBE_LLM: ${{ inputs.llm }}
+        REPROBE_ARGS: ${{ inputs.args }}
       run: |
-        LLM_FLAG=""
-        [ "${{ inputs.llm }}" = "true" ] || LLM_FLAG="--no-llm"
-        reprobe run "${{ inputs.submission }}" $LLM_FLAG ${{ inputs.args }}
+        read -r -a extra <<< "$REPROBE_ARGS"
+        [ "$REPROBE_LLM" = "true" ] || extra+=(--no-llm)
+        reprobe run "$REPROBE_SUBMISSION" "${extra[@]}"
     - name: Upload report
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: reprobe-report
-        path: work/*/out/
+        # Reports land in work/<submission>/report/ (report.json/.md/.html and
+        # collected artifacts). A missing report is a failure, not a warning.
+        path: work/*/report/
+        if-no-files-found: error
 # Note: the host runner must have Docker available (the action launches sibling
 # sandboxed containers). For batch matrices, drive `reprobe batch` instead.

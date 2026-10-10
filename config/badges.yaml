@@ -25,7 +25,18 @@ acm:
     require_expected_output: true     # >= 1 declared expected_output produced (false: relaxed, noted)
 
   results_reproduced:
-    mode: not-evaluated               # requires comparing produced vs published results
+    mode: not-evaluated               # never proposed automatically; a human judges reproduction
+    # Evidence the report shows that human: every committed output the run
+    # regenerated, compared with the authors' copy (src/reprobe/compare.py).
+    # Floats match within numpy.isclose(rtol, atol); integers must match exactly. atol is
+    # tiny on purpose: it only absorbs noise around ZERO (a residual of 1e-16). A larger
+    # one makes every small value equal — p = 1e-10 and p = 9e-10 differ ninefold.
+    # A "differs" can be nondeterminism (unseeded RNG, library drift), so it is a
+    # finding to review — not a verdict, and never a badge decision.
+    rtol: 1.0e-6
+    atol: 1.0e-12
+    max_bytes: 50000000               # per file; larger files are listed, not read
+    max_files: 200
 
 fair:
   findable:

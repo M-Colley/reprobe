@@ -6,7 +6,7 @@
 # defaults MUST stay in sync with config/pins.yaml (llm.ollama_image / llm.model).
 services:
   ollama:
-    image: ${REPROBE_OLLAMA_IMAGE:-ollama/ollama:0.12.5}
+    image: ${REPROBE_OLLAMA_IMAGE:-ollama/ollama:0.33.3@sha256:32931b46719f673c05fdbaa81ccb26da18ea4a1c57590a754874ab28ba269eb2}
     container_name: reprobe-ollama
     ports:
       - "127.0.0.1:11434:11434"      # bind to loopback only
@@ -27,7 +27,7 @@ services:
   # one-shot: pull the model once `ollama` is healthy.
   # The fallback default must match pins.yaml llm.model.
   model-pull:
-    image: ${REPROBE_OLLAMA_IMAGE:-ollama/ollama:0.12.5}
+    image: ${REPROBE_OLLAMA_IMAGE:-ollama/ollama:0.33.3@sha256:32931b46719f673c05fdbaa81ccb26da18ea4a1c57590a754874ab28ba269eb2}
     depends_on:
       ollama:
         condition: service_healthy

@@ -52,6 +52,16 @@ Both proposals independently converged here, including the critical detail: **Do
 
 ## 2. Repository layout (final)
 
+> **As built:** the tree below is the design. These parts of it do not exist —
+> `reprobe.lock`; `fetch/doi.py` (DOI handling lives in `fetch/registry.py`);
+> `envbuild/{pinned_base,repo2docker_builder,lock}.py` (one `envbuild/base.py`;
+> the repo2docker builder is not implemented, and a plan never claims it ran);
+> `report/schema.py` (`schemas/report.schema.json` is hand-written and every kind
+> of report is validated against it in `tests/integration/test_report_schema.py`);
+> `runner-scripts/run_*` (runners build their commands inline). Added since:
+> `compare.py` (regenerated vs committed outputs) and `tests/sandbox/` (the
+> envelope checked against a real daemon in CI).
+
 ```
 reprobe/
 ├── README.md  LICENSE(MIT)  CHANGELOG.md
@@ -260,9 +270,28 @@ docker run --rm \
 
 Wrapped by a host-side **hard timeout** that `docker kill`s and records `status=timeout`.
 
+> **As built (differs from the sketch above — read `docker_exec.build_argv`, it is
+> the source of truth):**
+> - `/work` is a **read-write throwaway copy** of the source tree (`run/`), not
+>   `src:ro` + `_out:rw`: real analyses write next to their inputs. The pristine
+>   fetched tree (`src/`) is never mounted. Links pointing out of the tree are
+>   not copied in, and author-supplied `.reprobe_*` paths are dropped.
+> - No `--rm` and no `--stop-timeout`: the exited container is inspected for
+>   docker's `OOMKilled` flag, then removed by name on every path; containers
+>   carry a `reprobe.managed` label and a deadline label so a later run reaps
+>   anything a hard-killed orchestrator left behind.
+> - On a native Linux host the container runs as the **host user's uid:gid**
+>   (`limits.yaml: map_host_user`, never root), so the bind mount is writable;
+>   `--ulimit nproc` is then dropped (it counts the whole host session) and
+>   `--pids-limit` remains the per-container cap. `--cpus` is clamped to what the
+>   daemon has.
+> - A host-side watchdog enforces, besides the clock, a console-output cap
+>   (`log_max`) and a cap on bytes under `/work` (`work_max`). A step stopped by
+>   any budget — including an OOM kill — is `resource-limit`, not `fail`.
+
 **Network policy.** Default `--network none`. Sanctioned, explicit, time-boxed exceptions only: (a) **dependency-install phase** runs in a *separate* container with egress, then the actual run is `--network none` (recorded as a distinct phase); (b) **Unity activation** egress, then dropped; (c) per-submission opt-in `--allow-net <host>...` egress allowlist (A's escape hatch) for artifacts that must download data at runtime — this **downgrades badge confidence** and is flagged loudly. Default behavior when code attempts network under `none`: it fails fast and the report says `needs-network` rather than silently allowing egress.
 
-**Other guarantees:** no Docker socket in any runtime container; no host bind beyond the per-submission work dir; never `--privileged`; secrets passed via env to the *right* container only, never logged; outputs size-capped; logs captured to host files, never streamed into the orchestrator's eval path. **Optional `--runtime=runsc` (gVisor) toggle** in `limits.yaml` (from B) for institutions wanting kernel-level isolation of untrusted code.
+**Other guarantees:** no Docker socket in any runtime container; no host bind beyond the per-submission work dir; never `--privileged`; secrets passed via env to the *right* container only, never logged; console output and `/work` size-capped by the watchdog; logs captured to host files, never streamed into the orchestrator's eval path. **Not yet built:** the `--allow-net` per-host allowlist (today it grants full egress and says so in the report), and an allowlisting egress proxy for the install phase (it has the default bridge. The plan keeps the artifact's own code out of it — `install.R` is never run (its package lists are read statically), dependency files are sanitised (`envbuild/sanitize.py`: no `-e .`, `git+`/URL requirements, custom indexes, archive paths, non-allow-listed conda channels, or non-CRAN `renv.lock` sources — each drop is reported), harness Python runs `-I` and Rscript `--vanilla`, pip/micromamba never read the artifact's `HOME`, and import-inferred packages are installed wheels-only — but the build steps of third-party packages the artifact legitimately depends on (an sdist's `setup.py`, a conda post-link script) still run with network; closing that needs the egress proxy). **Optional `--runtime=runsc` (gVisor) toggle** in `limits.yaml` (from B) for institutions wanting kernel-level isolation of untrusted code.
 
 ---
 
@@ -352,7 +381,7 @@ Stance, stated plainly in `docs/badges.md`: **the harness grants Available, prop
 
 ```yaml
 - uses: m-colley/reprobe/deploy/github-action@main
-  with: { submission: "${{ inputs.url }}", tiers: "structural,compile", llm: "true" }
+  with: { submission: "${{ inputs.url }}" }   # Unity is structural-tier only; compile/build tiers are not implemented
   env:  { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }   # UNITY_* only if the org supplies its own seat
 ```
 

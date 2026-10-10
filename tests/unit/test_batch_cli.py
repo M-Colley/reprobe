@@ -48,7 +48,7 @@ def test_batch_resume_skips_completed_reports(tmp_path):
 
     # plant a marker; a resumed run must keep it, a fresh run must overwrite it
     data = json.loads(rep_path.read_text(encoding="utf-8"))
-    data["harness_version"] = "reprobe MARKER"
+    data["timestamp"] = "MARKER"
     rep_path.write_text(json.dumps(data), encoding="utf-8")
 
     res = _batch(tmp_path, "--resume")
@@ -72,6 +72,32 @@ def test_batch_resume_retries_fetch_failed(tmp_path):
     res = _batch(tmp_path, "--resume")
     assert res.exit_code == 0, res.output
     assert "resumed" not in res.output          # retried, not reused
+    assert "MARKER" not in rep_path.read_text(encoding="utf-8")
+
+
+import pytest
+
+
+@pytest.mark.parametrize("change", [
+    {"harness_version": "reprobe 0.0.1"},                       # another harness version
+    {"run_mode": "dry-run"},                                    # a plan, not a result
+    {"provenance": {"run_options": {"run_mode": "full"}}},     # made with other options
+    {"provenance": {"pins.yaml_sha256": "0000"}},              # made under other pins
+])
+def test_resume_reruns_a_report_made_under_other_conditions(tmp_path, change):
+    """A report in the workroot is only this season's result if it was made the
+    way this batch would make it; otherwise it is re-run, not folded in."""
+    assert _batch(tmp_path).exit_code == 0
+    rep_path = _report_json(tmp_path)
+    data = json.loads(rep_path.read_text(encoding="utf-8"))
+    data["timestamp"] = "MARKER"
+    for k, v in change.items():
+        data[k] = {**data.get(k, {}), **v} if isinstance(v, dict) else v
+    rep_path.write_text(json.dumps(data), encoding="utf-8")
+
+    res = _batch(tmp_path, "--resume")
+    assert res.exit_code == 0, res.output
+    assert "resumed" not in res.output
     assert "MARKER" not in rep_path.read_text(encoding="utf-8")
 
 
@@ -185,6 +211,9 @@ def test_batch_passes_each_rows_deposits_to_the_run(tmp_path, monkeypatch):
     seen = []
 
     class FakeOrch:
+        def _provenance(self):
+            return {}
+
         def run(self, ref, **kw):
             seen.append((ref, kw.get("data_sources")))
             return Report(submission_id="sid", harness_version="t", timestamp="",

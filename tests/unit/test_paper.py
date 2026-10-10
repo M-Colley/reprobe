@@ -5,6 +5,8 @@ session/API responses so the SSRF and cap behaviour is asserted, not assumed.
 """
 
 
+import os
+
 import pytest
 
 from reprobe import paper as P
@@ -150,7 +152,7 @@ class _Client:
         self.payload = payload
         self.prompt = ""
 
-    def generate_json(self, prompt, system=None):
+    def generate_json(self, prompt, system=None, schema=None):
         self.prompt = prompt
         return self.payload
 
@@ -159,10 +161,10 @@ def test_compare_results_normalizes_unknown_verdicts():
     from reprobe.llm import roles
     c = _Client({"claims": [
         {"claim": "F test", "verdict": "definitely-matches"},     # not in the vocabulary
-        {"claim": "p value", "verdict": "match"},
+        {"claim": "p value", "verdict": "match", "produced_value": "0.04"},
         {"no_claim_key": 1},                                      # dropped
     ], "confidence": 0.9})
-    out = roles.compare_results(c, paper="p", produced="q", coverage="full text")
+    out = roles.compare_results(c, paper="p", produced="p = 0.04", coverage="full text")
     assert [x["verdict"] for x in out["claims"]] == ["unclear", "match"]
     assert out["is_advisory"] is True and out["meets_threshold"] is True
 
@@ -213,3 +215,174 @@ def test_declared_paper_pdf_wins_even_inside_a_deposit_path(tmp_path):
     p.write_bytes(b"%PDF-1.4")
     assert find_pdf(tmp_path, {"paper": {"pdf": "dataset/manuscript.pdf"}},
                     exclude={"dataset/manuscript.pdf"}) == p
+
+
+# --------------------------------------------------------------------------- #
+# DOI discovery: badges are images, a CFF names the software unless told otherwise
+# --------------------------------------------------------------------------- #
+
+def test_a_zenodo_badge_image_is_not_part_of_its_doi(tmp_path):
+    (tmp_path / "README.md").write_text(
+        "[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.1234567.svg)]"
+        "(https://doi.org/10.5281/zenodo.1234567)\n", encoding="utf-8")
+    assert P.find_doi(tmp_path) == "10.5281/zenodo.1234567"
+
+
+def test_a_shields_badge_colour_is_not_part_of_its_doi(tmp_path):
+    (tmp_path / "README.md").write_text(
+        "![paper](https://img.shields.io/badge/DOI-10.1145/3613904.3641909-blue.svg)\n",
+        encoding="utf-8")
+    assert P.find_doi(tmp_path) == "10.1145/3613904.3641909"
+
+
+def test_the_paper_doi_beats_the_code_deposit_badge_above_it(tmp_path):
+    """A README's first DOI is usually the Zenodo badge for the CODE, which is the
+    wrong thing to compare results against."""
+    (tmp_path / "README.md").write_text(
+        "[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.99.svg)](https://doi.org/10.5281/zenodo.99)\n"
+        "Paper: https://doi.org/10.1145/3613904.3641909\n", encoding="utf-8")
+    assert P.find_doi(tmp_path) == "10.1145/3613904.3641909"
+
+
+def test_a_closing_paren_belongs_to_the_doi_only_when_it_closes_one(tmp_path):
+    (tmp_path / "README.md").write_text(
+        "See the study (doi 10.1016/S0140-6736(20)30183-5).\n", encoding="utf-8")
+    assert P.find_doi(tmp_path) == "10.1016/S0140-6736(20)30183-5"
+
+
+def test_cff_preferred_citation_is_the_paper_not_the_software(tmp_path):
+    (tmp_path / "CITATION.cff").write_text(
+        "cff-version: 1.2.0\ntitle: tool\ndoi: 10.5281/zenodo.99\n"
+        "preferred-citation:\n  type: article\n  title: the paper\n  doi: 10.1145/3613904.3641909\n",
+        encoding="utf-8")
+    assert P.find_doi(tmp_path) == "10.1145/3613904.3641909"
+
+
+def test_cff_identifiers_of_type_doi_count(tmp_path):
+    (tmp_path / "CITATION.cff").write_text(
+        "cff-version: 1.2.0\ntitle: tool\nidentifiers:\n"
+        "  - type: url\n    value: https://example.org\n"
+        "  - type: doi\n    value: 10.1145/3613904.3641909\n", encoding="utf-8")
+    assert P.find_doi(tmp_path) == "10.1145/3613904.3641909"
+
+
+def test_a_broken_cff_falls_back_to_a_plain_scan(tmp_path):
+    (tmp_path / "CITATION.cff").write_text("doi: 10.1145/3613904.3641909\n  bad: [unclosed\n",
+                                           encoding="utf-8")
+    assert P.find_doi(tmp_path) == "10.1145/3613904.3641909"
+
+
+@pytest.mark.parametrize("spelling", ["doi:10.1145/3613904.3641909", "DOI: 10.1145/3613904.3641909",
+                                      "https://www.doi.org/10.1145/3613904.3641909"])
+def test_a_manifest_doi_may_use_any_common_spelling(tmp_path, spelling):
+    assert P.find_doi(tmp_path, {"paper": {"doi": spelling}}) == "10.1145/3613904.3641909"
+
+
+# --------------------------------------------------------------------------- #
+# A manifest-declared PDF must stay inside the repository
+# --------------------------------------------------------------------------- #
+
+def test_a_manifest_cannot_point_the_paper_finder_at_a_host_pdf(tmp_path):
+    outside = tmp_path / "private.pdf"
+    outside.write_bytes(b"%PDF-1.4 secret")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for declared in (str(outside), "../private.pdf", "sub/../../private.pdf"):
+        assert P.find_pdf(repo, {"paper": {"pdf": declared}}) is None, declared
+
+
+def test_a_committed_symlink_cannot_smuggle_a_host_pdf_in(tmp_path):
+    outside = tmp_path / "private.pdf"
+    outside.write_bytes(b"%PDF-1.4 secret")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    try:
+        os.symlink(outside, repo / "paper.pdf")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not creatable on this platform/user")
+    assert P.find_pdf(repo, {"paper": {"pdf": "paper.pdf"}}) is None
+    assert P.find_pdf(repo) is None                       # nor by heuristic search
+
+
+def test_an_in_repo_declared_pdf_is_still_honoured(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "p.pdf").write_bytes(b"%PDF-1.4")
+    assert P.find_pdf(tmp_path, {"paper": {"pdf": "docs/p.pdf"}}) == tmp_path / "docs" / "p.pdf"
+
+
+# --------------------------------------------------------------------------- #
+# PDF parsing runs in a time-boxed child process
+# --------------------------------------------------------------------------- #
+
+def _pdf_with_text(text: str) -> bytes:
+    """A minimal one-page PDF with correct xref offsets."""
+    esc = text.replace("\\", "\\\\").replace("(", r"\(").replace(")", r"\)")
+    stream = f"BT /F1 12 Tf 72 720 Td ({esc}) Tj ET".encode()
+    objs = [b"<</Type/Catalog/Pages 2 0 R>>", b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R"
+            b"/Resources<</Font<</F1 5 0 R>>>>>>",
+            b"<</Length " + str(len(stream)).encode() + b">>\nstream\n" + stream + b"\nendstream",
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>"]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n".encode() + b"0000000000 65535 f \n"
+    out += b"".join(f"{o:010d} 00000 n \n".encode() for o in offsets)
+    out += (f"trailer\n<</Size {len(objs) + 1}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").encode()
+    return bytes(out)
+
+
+pypdf = pytest.importorskip("pypdf")
+
+
+def test_a_real_pdf_is_read_through_the_child_process(tmp_path):
+    f = tmp_path / "paper.pdf"
+    f.write_bytes(_pdf_with_text("F(1,16) = 11.12, p = .004"))
+    text, warnings = P.pdf_text(f)
+    assert "11.12" in text and "p = .004" in text
+    assert not warnings
+
+
+def test_a_pdf_that_hangs_the_parser_costs_a_warning_not_the_run(tmp_path, monkeypatch):
+    import subprocess
+
+    f = tmp_path / "paper.pdf"
+    f.write_bytes(_pdf_with_text("x"))
+
+    def hang(*a, **k):
+        raise subprocess.TimeoutExpired(a[0], k.get("timeout", 0))
+    monkeypatch.setattr(P.subprocess, "run", hang)
+    text, warnings = P.pdf_text(f)
+    assert text == "" and any("was stopped" in w and "NOT read" in w for w in warnings)
+
+
+def test_a_corrupt_pdf_is_a_warning_not_an_exception(tmp_path):
+    f = tmp_path / "paper.pdf"
+    f.write_bytes(b"%PDF-1.4\n" + os.urandom(2000))
+    text, warnings = P.pdf_text(f)
+    assert text == "" and any("NOT read" in w for w in warnings)
+
+
+def test_pdf_parsing_is_isolated_from_the_calling_environment(tmp_path, monkeypatch):
+    """`python -I` ignores PYTHON* variables and the cwd, so a hostile
+    sitecustomize / pypdf shadow in the working directory is never imported."""
+    (tmp_path / "pypdf.py").write_text("raise SystemExit('shadowed pypdf was imported')\n",
+                                       encoding="utf-8")
+    f = tmp_path / "paper.pdf"
+    f.write_bytes(_pdf_with_text("isolated 3.14"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    text, _ = P.pdf_text(f)
+    assert "isolated 3.14" in text
+
+
+def test_a_match_that_quotes_no_number_is_not_evidence():
+    from reprobe.llm import roles
+    c = _Client({"claims": [{"claim": "p value", "verdict": "match"},
+                            {"claim": "effect", "verdict": "mismatch", "produced_value": "large"}],
+                 "confidence": 0.9})
+    out = roles.compare_results(c, paper="p", produced="p = 0.04", coverage="full text")
+    assert [x["verdict"] for x in out["claims"]] == ["unclear", "unclear"]
+    assert all(x["why"].startswith("[harness]") for x in out["claims"])

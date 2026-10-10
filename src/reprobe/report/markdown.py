@@ -25,6 +25,13 @@ def render(r: Report) -> str:
     L.append("")
     L.append(f"*{r.harness_version} · {r.timestamp}*")
     L.append("")
+    if getattr(r, "run_mode", "full") == "dry-run":
+        L.append("> ⚠️ **Dry run** — no container was launched (any that were planned had their "
+                 "sandbox flags checked). Nothing below is a result about the artifact's code.")
+        L.append("")
+    elif getattr(r, "run_mode", "full") == "no-run":
+        L.append("> ℹ️ **No-run** — fetched and inspected only; no code was executed.")
+        L.append("")
 
     src = r.source
     L.append("## Source")
@@ -125,14 +132,17 @@ def render(r: Report) -> str:
     avail_line = {
         "granted": "The artifact is archivally deposited and was retrieved and verified — the ACM "
                    "*Artifact Available* criteria are met.",
-        "candidate": "The artifact could be retrieved, but is not yet deposited under an archival "
-                     "persistent identifier — the notes below say exactly what is still needed for "
-                     "the *Available* badge.",
+        # Reason-neutral on purpose: "candidate" also covers an archival deposit
+        # whose bytes could not be verified, and telling that author they have
+        # not deposited archivally was untrue.
+        "candidate": "The artifact could be retrieved, but the *Available* badge could not be "
+                     "granted automatically — the notes below say exactly why and what would "
+                     "change that.",
     }.get(acm.get("available"))
     if avail_line:
         fb.append(avail_line)
     func_line = {
-        "candidate": "All declared analysis steps ran to completion in the harness sandbox; a human "
+        "candidate": "The primary analysis steps ran to completion in the harness sandbox; a human "
                      "reviewer will confirm the *Functional* badge.",
         "not-met": "The automated run did not complete as declared — see the step table in the full "
                    "report for what failed.",
@@ -159,6 +169,15 @@ def render(r: Report) -> str:
         if s.diagnostics.get("harness_error"):
             L.append(f"- ⚠️ **harness error** — no statement about the artifact: "
                      f"{_ml(s.diagnostics['harness_error'])}")
+        if s.status == "resource-limit":
+            L.append(f"- ⏱️ **stopped at the sandbox's {_ml(s.diagnostics.get('limit'))} cap "
+                     f"({_ml(s.diagnostics.get('cap'))})** — the budget ran out; this says nothing "
+                     "about whether the analysis is correct")
+        elif s.status == "timeout":
+            L.append(f"- ⏱️ **stopped at the {_ml(s.diagnostics.get('timeout_s'))}s time budget** — "
+                     "the budget ran out; this says nothing about whether the analysis is correct")
+        if s.status == "skipped" and s.diagnostics.get("reason"):
+            L.append(f"- ℹ️ not run: {_ml(s.diagnostics['reason'])}")
         if s.claims:
             L.append("- **Verified claims:**")
             for c in s.claims:
@@ -171,8 +190,10 @@ def render(r: Report) -> str:
             L.append(f"- **Expected outputs produced:** {', '.join(s.expected_met)}")
         adv = s.diagnostics.get("llm_advisory")
         if adv:
-            L.append(f"- **LLM diagnosis** _(advisory, {r.llm.get('model', 'local LLM (model not recorded)')})_: "
-                     f"{_ml(adv.get('likely_cause', ''))}")
+            low = "" if adv.get("meets_threshold", True) else \
+                f"; {_ml(adv.get('threshold_note') or 'below the confidence threshold')}"
+            L.append(f"- **LLM diagnosis** _(advisory, {r.llm.get('model', 'local LLM (model not recorded)')}"
+                     f"{low})_: {_ml(adv.get('likely_cause', ''))}")
             for fix in adv.get("suggested_fixes", []):
                 L.append(f"  - 💡 {_ml(fix)}")
         hdiag = s.diagnostics.get("harness_diagnosis")
@@ -199,6 +220,8 @@ def render(r: Report) -> str:
             L.append(f"- {_ml(k)}: {_ml(v)}")
         L.append("")
 
+    _render_comparison(L, getattr(r, "results_comparison", None))
+
     rc = r.llm.get("results_check") or {}
     if rc:
         L.append("## Results vs the paper (LLM-advisory)")
@@ -212,14 +235,20 @@ def render(r: Report) -> str:
             L.append("- **Claims:** " + " · ".join(f"{v} {k}" for k, v in sorted(counts.items())))
             if rc.get("overall"):
                 L.append(f"- **Overall:** {_ml(rc['overall'])}")
+            if rc.get("threshold_note"):
+                L.append(f"- ⚠️ {_ml(rc['threshold_note'])} — the mismatches below are not "
+                         "counted as findings")
             L.append("")
             L.append("| Claim | Paper | Reproduced | Verdict |")
             L.append("|---|---|---|---|")
             _mark = {"match": "✓ match", "mismatch": "✗ MISMATCH",
                      "unclear": "? unclear", "not-reported": "– not reported"}
             for c in rc.get("claims", []):
-                L.append(f"| {_ml(c.get('claim', ''))} | {_ml(c.get('paper_value', '—'))} "
-                         f"| {_ml(c.get('produced_value', '—'))} "
+                produced = _ml(c.get("produced_value", "—"))
+                if c.get("produced_value_found") is False:
+                    produced += " _(not in the run output)_"
+                L.append(f"| {_md_cell(c.get('claim', ''))} | {_md_cell(c.get('paper_value', '—'))} "
+                         f"| {produced.replace('|', '&#124;')} "
                          f"| {_mark.get(c.get('verdict'), c.get('verdict', '?'))} |")
         for w in rc.get("warnings", []) or []:
             L.append(f"  - ⚠️ {_ml(w)}")
@@ -264,6 +293,44 @@ def render(r: Report) -> str:
                 L.append(f"   - 💡 {_ml(str(x))}")
         L.append("")
     return "\n".join(L)
+
+
+def _md_cell(v: Any) -> str:
+    return _ml(v).replace("|", "&#124;").replace("\n", " ")
+
+
+_CMP_MARK = {"identical": "✓ identical", "equivalent": "≈ equivalent", "differs": "✗ differs",
+             "not-compared": "– not compared"}
+
+
+def _render_comparison(L: list[str], rc: Any) -> None:
+    """Committed outputs the run regenerated, file by file. Deterministic, unlike
+    the paper comparison — but still evidence for a human, never a badge."""
+    if not rc:
+        return
+    rows = rc.get("files") or []
+    summary = rc.get("summary") or {}
+    L.append("## Regenerated outputs vs the committed ones")
+    L.append(f"- {_ml(summary.get('headline', ''))}")
+    L.append(f"- Tolerance: floats within rtol={rc.get('rtol')}, atol={rc.get('atol')}; "
+             "integers exactly. Byte-different files that match within tolerance are *equivalent*.")
+    capped = [x for x in rows if x.get("reason") == "over-file-cap"]
+    shown = [x for x in rows if x.get("reason") != "over-file-cap"]
+    if shown:
+        L.append("")
+        L.append("| File | Kind | Result | Detail |")
+        L.append("|---|---|---|---|")
+        for x in shown:
+            L.append(f"| `{_md_cell(x.get('path', ''))}` | {_md_cell(x.get('kind', ''))} "
+                     f"| {_CMP_MARK.get(x.get('status'), _md_cell(x.get('status')))} "
+                     f"| {_md_cell(x.get('detail', ''))} |")
+    if capped:
+        L.append(f"- …and {len(capped)} more file(s) past the per-run file cap, not compared")
+    L.append("")
+    L.append("*A difference can come from nondeterminism (unseeded random numbers, thread "
+             "scheduling, library versions) as well as from an error; it is a finding to review, "
+             "not a verdict.*")
+    L.append("")
 
 
 def _fence(text: str) -> str:

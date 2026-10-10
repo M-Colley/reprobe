@@ -64,8 +64,11 @@ def test_report_json_roundtrip():
 def test_markdown_feedback_for_authors_block():
     md = markdown.render(_report())
     assert "## Feedback for authors" in md
-    # candidate/candidate report: both status sentences must be present
-    assert "not yet deposited under an archival persistent identifier" in md
+    # candidate/candidate report: both status sentences must be present. The
+    # Available one is reason-neutral — "candidate" also covers an archival
+    # deposit whose bytes could not be verified, which IS deposited.
+    assert "could not be granted automatically" in md
+    assert "not yet deposited" not in md
     assert "a human" in md and "Functional" in md
 
 
@@ -86,3 +89,30 @@ def test_markdown_neutralizes_untrusted_html():
     md = markdown.render(r)
     assert "<script>" not in md and "&lt;script&gt;" in md
     assert "<img" not in md
+
+
+def test_dry_run_and_budget_and_comparison_are_rendered_in_both_formats():
+    from reprobe.models import RunResult
+    r = _report()
+    r.run_mode = "dry-run"
+    r.steps = [RunResult(runner="jupyter", target="fit.ipynb", status="resource-limit",
+                         diagnostics={"limit": "memory", "cap": "8g"})]
+    r.results_comparison = {
+        "rtol": 1e-6, "atol": 1e-9,
+        "summary": {"total": 2, "counts": {"equivalent": 1, "differs": 1},
+                    "headline": "2 regenerated: 1 equivalent, 1 differs"},
+        "files": [{"path": "out/a.csv", "kind": "tabular", "status": "equivalent", "detail": "within tol"},
+                  {"path": "out/b|x.csv", "kind": "tabular", "status": "differs", "detail": "3 cells"},
+                  {"path": "z.bin", "kind": "binary", "status": "not-compared",
+                   "reason": "over-file-cap", "detail": "cap"}],
+    }
+    md = markdown.render(r)
+    assert "**Dry run**" in md
+    assert "memory cap (8g)" in md
+    assert "## Regenerated outputs vs the committed ones" in md
+    assert "out/b&#124;x.csv" in md                     # a pipe cannot break the table
+    assert "1 more file(s) past the per-run file cap" in md
+    page = html.render(r)
+    assert "Dry run" in page and "Regenerated outputs" in page and "memory cap (8g)" in page
+    flags = dashboard.triage_flags(r.model_dump(mode="json"))
+    assert {"dry-run", "resource-limit", "outputs-differ"} <= set(flags)

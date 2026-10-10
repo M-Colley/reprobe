@@ -40,7 +40,7 @@ def ctx(tmp_path, monkeypatch):
 
 
 def _check(ctx, **kw):
-    ctx["o"]._results_check(ctx["report"], ctx["steps"], ctx["src"], ctx["work"],
+    ctx["o"]._results_check(ctx["report"], ctx["steps"], ctx["src"], ctx["work"] / "run",
                             kw.get("manifest", {}), ctx["fetch"], object())
     return ctx["report"]
 
@@ -96,7 +96,7 @@ def test_mismatched_claims_are_counted_and_surfaced_for_a_human(ctx, monkeypatch
         {"claim": "accuracy", "paper_value": "0.92", "produced_value": "0.81", "verdict": "mismatch"},
         {"claim": "n", "paper_value": "35", "produced_value": "35", "verdict": "match"},
         {"claim": "f1", "paper_value": "0.7", "produced_value": "-", "verdict": "not-reported"},
-    ]})
+    ], "meets_threshold": True})
     rep = _check(ctx)
     section = rep.llm["results_check"]
     assert section["status"] == "compared"
@@ -152,3 +152,20 @@ def test_produced_text_skips_a_file_too_large_to_fence(ctx):
     ctx["steps"][0].expected_met = ["big.csv"]
     text = ctx["o"]._produced_text(ctx["steps"], rundir)
     assert "produced file big.csv" not in text
+
+
+def test_a_low_confidence_mismatch_is_shown_but_not_made_a_finding(ctx, monkeypatch):
+    """Below llm.confidence_threshold the comparison stays visible in its own
+    section, but it may not put a statement about published numbers into the
+    report's findings."""
+    monkeypatch.setattr(paper_mod, "locate",
+                        lambda *a, **k: Paper(source="repo-pdf", ref="p.pdf",
+                                              text="accuracy of 0.92", coverage="full text"))
+    monkeypatch.setattr(llm_roles, "compare_results", lambda *a, **k: {
+        "claims": [{"claim": "accuracy", "paper_value": "0.92", "produced_value": "0.81",
+                    "verdict": "mismatch"}],
+        "meets_threshold": False, "threshold_note": "confidence 0.3 is below threshold 0.6"})
+    rep = _check(ctx)
+    assert rep.llm["results_check"]["counts"] == {"mismatch": 1}
+    assert not any("look inconsistent" in n for n in rep.not_verified)
+    assert "below threshold" in rep.llm["results_check"]["threshold_note"]

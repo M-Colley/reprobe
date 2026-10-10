@@ -6,8 +6,12 @@ daemon needed, nothing executed) and no LLM, then compares the stable,
 machine-independent slice of each report against ``tests/golden/expected.json``.
 
 This is the yearly "did my pins/badges/config edit break the harness?" gate:
-it checks the pipeline's *shape*, not real execution (dry-run fabricates
-exit 0, so run statuses here document dry-run semantics, not artifact truth).
+it checks the pipeline's *shape* (detection, run plan, environment plan and its
+install commands), not real execution. A dry run launches nothing, so its steps
+are `skipped` and its verdict `not-run` — those are the recorded values, and they
+document dry-run semantics, not artifact truth. Verdict and badge logic is
+covered against simulated container results in tests/integration and
+tests/unit/test_badges.py.
 
 Deliberately excluded from the compared slice because they vary by machine:
 image names/digests, env provenance (base-image fallback), durations, paths,

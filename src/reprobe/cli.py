@@ -32,7 +32,7 @@ from . import __version__
 from .config import installed_non_editably, load_config
 from .docker_exec import docker_available, image_present, pull_image, run_container
 from .models import ContainerSpec
-from .orchestrator import Orchestrator, fresh_dir, submission_id
+from .orchestrator import Orchestrator, fresh_dir, run_options, submission_id
 
 app = typer.Typer(add_completion=False, help="Reusable artifact-reproducibility harness for AutoUI open data.")
 console = Console()
@@ -201,8 +201,9 @@ def batch(
     reuse_downloads: bool = typer.Option(False, "--reuse-downloads",
                                          help="share pip/conda downloads across the season — see "
                                               "`reprobe run --help` for why this is off by default"),
-    resume: bool = typer.Option(False, "--resume", help="reuse existing per-submission reports; "
-                                "only fetch-failed/infra-error submissions are retried"),
+    resume: bool = typer.Option(False, "--resume", help="reuse existing per-submission reports made "
+                                "by this harness version, config and these options; fetch-failed/"
+                                "infra-error submissions are retried"),
 ):
     """Run a whole review season and emit a sortable dashboard."""
     import shutil
@@ -220,7 +221,16 @@ def batch(
         ref, data = row["url"], row["data"]
         console.print(f"[cyan]>[/cyan] {ref}" + (f"  [dim]+{len(data)} deposit(s)[/dim]" if data else ""))
         sid = submission_id(ref)
-        rep = _resumed_report(Path(workroot) / sid / "report" / "report.json") if resume else None
+        expected = {
+            "harness_version": f"reprobe {_v}",
+            "config": {k: v for k, v in orch._provenance().items() if k.endswith("_sha256")},
+            "run_options": run_options(
+                run_mode="full" if not no_run else "no-run", functional=not no_functional,
+                use_llm=not no_llm, install=not no_install, allow_lfs=allow_lfs, timeout_s=timeout,
+                data_sources=data, reuse_downloads=reuse_downloads),
+        }
+        rep = _resumed_report(Path(workroot) / sid / "report" / "report.json", expected) \
+            if resume else None
         if rep is not None:
             console.print("[dim]  resumed from existing report[/dim]")
         else:
@@ -391,10 +401,15 @@ def version():
 
 
 # ---------------------------------------------------------------------- #
-def _resumed_report(report_json: Path):
+def _resumed_report(report_json: Path, expected: Optional[dict] = None):
     """The existing report for --resume, or None to (re-)run. Fetch-failed and
     infra-error verdicts return None so transient failures are retried; an
-    unreadable file also returns None (never abort the season on a bad cache)."""
+    unreadable file also returns None (never abort the season on a bad cache).
+
+    A report is only reused when it was made the way this batch would make it:
+    same harness version, same config files, same run options. A --dry-run or
+    --no-run report, or one from last year's pins, sitting in the workroot was
+    otherwise folded into this season's dashboard as if it were a result."""
     from .models import Report
 
     if not report_json.is_file():
@@ -403,6 +418,16 @@ def _resumed_report(report_json: Path):
         data = json.loads(report_json.read_text(encoding="utf-8"))
         if (data.get("verdict") or {}).get("overall") in ("fetch-failed", "infra-error"):
             return None
+        if data.get("run_mode", "full") == "dry-run":
+            return None
+        if expected is not None:
+            prov = data.get("provenance") or {}
+            if data.get("harness_version") != expected.get("harness_version"):
+                return None
+            if any(prov.get(k) != v for k, v in (expected.get("config") or {}).items()):
+                return None
+            if prov.get("run_options") != expected.get("run_options"):
+                return None
         return Report.model_validate(data)
     except Exception:
         return None
@@ -501,7 +526,19 @@ def _print_report_summary(report, outdir: Path) -> None:
     console.print(f"[green]reports[/green]: {outdir / 'report.html'} · {outdir / 'report.md'} · {outdir / 'report.json'}")
 
 
+def _exit_on_sigterm(signum, frame):  # noqa: ARG001 — signal handler signature
+    # SystemExit unwinds through run_container's `finally`, which kills and
+    # removes the running author-code container. Python's default SIGTERM
+    # action skips every finally block, so a cancelled CI job or `kill` left the
+    # container running with nothing enforcing its timeout.
+    raise SystemExit(143)
+
+
 def main() -> None:
+    import signal
+
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _exit_on_sigterm)
     app()
 
 

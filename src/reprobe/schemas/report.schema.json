@@ -3,74 +3,297 @@
   "$id": "https://autoui.org/schemas/report.schema.json",
   "title": "reprobe report",
   "type": "object",
-  "required": ["schema_version", "submission_id", "harness_version", "timestamp", "source", "badges", "verdict"],
+  "required": [
+    "schema_version",
+    "submission_id",
+    "harness_version",
+    "timestamp",
+    "source",
+    "badges",
+    "verdict"
+  ],
   "properties": {
-    "schema_version": { "type": "string" },
-    "submission_id": { "type": "string" },
-    "harness_version": { "type": "string" },
-    "timestamp": { "type": "string" },
+    "schema_version": {
+      "type": "string"
+    },
+    "submission_id": {
+      "type": "string"
+    },
+    "harness_version": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string"
+    },
     "source": {
       "type": "object",
       "properties": {
-        "input": { "type": "string" },
-        "resolved_type": { "type": "string" },
-        "pin": { "type": "object", "properties": {
-          "kind": { "enum": ["version_doi", "git_sha", "swhid", "git_tag", "none"] },
-          "value": { "type": "string" } } },
-        "fetch_layer": { "type": "string" },
-        "anonymized": { "type": "boolean" },
-        "checksum_verified": { "type": "boolean" },
-        "warnings": { "type": "array", "items": { "type": "string" } }
+        "input": {
+          "type": "string"
+        },
+        "resolved_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pin": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "version_doi",
+                "git_sha",
+                "swhid",
+                "git_tag",
+                "none"
+              ]
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        },
+        "fetch_layer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "anonymized": {
+          "type": "boolean"
+        },
+        "checksum_verified": {
+          "type": "boolean"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "environment": {
       "type": "object",
       "properties": {
-        "strategy": { "enum": ["pinned-base", "repo2docker", "author-image", "besteffort"] },
-        "image": { "type": "string" },
-        "env_provenance": { "enum": ["author-specified", "harness-default", "repo2docker-built"] }
+        "strategy": {
+          "enum": [
+            "pinned-base",
+            "repo2docker",
+            "author-image",
+            "besteffort"
+          ]
+        },
+        "image": {
+          "type": "string"
+        },
+        "env_provenance": {
+          "enum": [
+            "author-specified",
+            "harness-default",
+            "repo2docker-built",
+            "fallback-generic"
+          ]
+        }
       }
     },
-    "detect": { "type": "object" },
+    "detect": {
+      "type": "object"
+    },
     "steps": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "runner": { "type": "string" },
-          "target": { "type": "string" },
-          "status": { "enum": ["pass", "fail", "partial", "skipped", "error", "timeout"] },
-          "tier_reached": { "type": ["string", "null"] },
-          "exit_code": { "type": ["integer", "null"] },
-          "duration_s": { "type": "number" },
-          "claims": { "type": "array", "items": { "type": "string" } },
-          "not_verified": { "type": "array", "items": { "type": "string" } },
-          "expected_met": { "type": "array", "items": { "type": "string" } }
+          "runner": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "partial",
+              "skipped",
+              "error",
+              "timeout",
+              "resource-limit"
+            ]
+          },
+          "tier_reached": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "duration_s": {
+            "type": "number"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "not_verified": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expected_met": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "executed": {
+            "type": "boolean"
+          }
         }
       }
     },
-    "unity": { "type": ["object", "null"] },
-    "llm": { "type": "object" },
+    "unity": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "llm": {
+      "type": "object"
+    },
     "badges": {
       "type": "object",
       "properties": {
         "acm": {
           "type": "object",
           "properties": {
-            "available": { "enum": ["granted", "candidate", "not-met"] },
-            "functional": { "enum": ["candidate", "not-met", "not-evaluated"] },
-            "results_reproduced": { "enum": ["not-evaluated"] }
+            "available": {
+              "enum": [
+                "granted",
+                "candidate",
+                "not-met"
+              ]
+            },
+            "functional": {
+              "enum": [
+                "candidate",
+                "not-met",
+                "not-evaluated"
+              ]
+            },
+            "results_reproduced": {
+              "enum": [
+                "not-evaluated"
+              ]
+            }
           }
         },
-        "fair": { "type": "object" }
+        "fair": {
+          "type": "object"
+        }
       }
     },
-    "not_verified": { "type": "array", "items": { "type": "string" } },
+    "not_verified": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "verdict": {
       "type": "object",
       "properties": {
-        "overall": { "type": "string" },
-        "human_review_required": { "type": "boolean" }
+        "overall": {
+          "enum": [
+            "not-run",
+            "structural-only",
+            "runs",
+            "runs-with-warnings",
+            "runs-with-failures",
+            "resource-limit",
+            "infra-error",
+            "nothing-executed",
+            "fetch-failed"
+          ]
+        },
+        "human_review_required": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "run_mode": {
+      "enum": [
+        "full",
+        "dry-run",
+        "no-run"
+      ]
+    },
+    "provenance": {
+      "type": "object"
+    },
+    "fix_list": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "results_comparison": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "summary": {
+          "type": "object"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "kind",
+              "status",
+              "detail"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "tabular",
+                  "json",
+                  "text",
+                  "binary"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "identical",
+                  "equivalent",
+                  "differs",
+                  "not-compared"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        }
       }
     }
   }

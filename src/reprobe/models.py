@@ -16,7 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field
 # editing this list — it is advisory, used for routing and reporting only.
 ArtifactKind = Literal["python", "jupyter", "r", "rmarkdown", "unity", "custom"]
 
-RunStatus = Literal["pass", "fail", "partial", "skipped", "error", "timeout"]
+# "timeout" and "resource-limit" are the sandbox's budget running out (wall
+# clock; memory / output / disk), not the artifact failing — reported apart from
+# "fail" so an analysis that needs more than a review laptop is not called broken.
+RunStatus = Literal["pass", "fail", "partial", "skipped", "error", "timeout", "resource-limit"]
 
 
 # --------------------------------------------------------------------------- #
@@ -54,6 +57,13 @@ class RawRunOutput(BaseModel):
     image: Optional[str] = None
     argv_redacted: list[str] = Field(default_factory=list)
     error: Optional[str] = None         # harness-side error (e.g. image missing)
+    # The kernel OOM-killed a process at the --memory cap (docker inspect
+    # State.OOMKilled). None = could not be determined (daemon gone, dry run).
+    oom_killed: Optional[bool] = None
+    # The host-side watchdog stopped the container for exceeding a budget that is
+    # not wall-clock: "output" (log bytes) or "disk" (bytes written under /work).
+    limit_exceeded: Optional[str] = None
+    dry_run: bool = False
 
 
 class Capabilities(BaseModel):
@@ -148,6 +158,13 @@ class EnvPlan(BaseModel):
     env_provenance: Literal["author-specified", "harness-default", "repo2docker-built",
                             "fallback-generic"] = "harness-default"
     install_commands: list[str] = Field(default_factory=list)   # run in a gated-egress phase
+    # Parallel to install_commands: who asked for each command. A failed install
+    # is the ARTIFACT's finding when its own declared file does not install, and
+    # the harness's when something reprobe chose to add does not.
+    #   "author-declared"  — requirements.txt / environment.yml / renv.lock / install.R list
+    #   "harness-detected" — packages reprobe inferred from imports / library() calls
+    #   "harness-record"   — pip freeze / installed.packages() / micromamba list
+    install_origins: list[str] = Field(default_factory=list)
     # Prefix of a conda env the install phase built from the artifact's own
     # environment.yml. When set, author code runs with THAT interpreter, not the
     # base image's.
@@ -166,6 +183,10 @@ class Report(BaseModel):
     submission_id: str
     harness_version: str
     timestamp: str
+    # "full" | "dry-run" (containers planned and checked, none launched) |
+    # "no-run" (--no-run: fetch + detect only). Recorded so no consumer, and no
+    # `batch --resume`, can mistake a plan for a result.
+    run_mode: str = "full"
     source: dict[str, Any] = Field(default_factory=dict)
     provenance: dict[str, Any] = Field(default_factory=dict)   # pins + config hashes for later re-runs
     environment: dict[str, Any] = Field(default_factory=dict)
@@ -180,4 +201,8 @@ class Report(BaseModel):
     # WHAT TO DO about it, which is the part an author acts on — and scattered
     # one-per-step through a long report, it was being missed.
     fix_list: list[dict[str, Any]] = Field(default_factory=list)
+    # Committed outputs the run regenerated, compared file by file against the
+    # authors' copies (see compare.py). Evidence for the human reviewer only —
+    # it never sets results_reproduced.
+    results_comparison: Optional[dict[str, Any]] = None
     verdict: dict[str, Any] = Field(default_factory=dict)

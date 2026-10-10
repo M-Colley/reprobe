@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shlex
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,12 +19,14 @@ from . import __version__
 from .config import Config, load_config
 from .detect import detect as detect_artifacts
 from .detect.manifest import declared_data_sources
-from .docker_exec import DAEMON_DOWN_ERRORS, run_container
+from .docker_exec import DAEMON_DOWN_ERRORS, reap_orphans, run_container
 from .docker_exec import image_digest as _image_digest
 from .envbuild import plan as plan_env
+from .envbuild.base import INSTALL_HOME, describe_install_command
 from .fetch import FetchError
 from .fetch import configure as configure_fetchers
 from .fetch import fetch as fetch_ref
+from .fetch.base import RefusedSource
 from .llm import from_config as llm_from_config
 from .llm import roles as llm_roles
 from .models import (
@@ -49,6 +53,19 @@ def _slug(ref: str) -> str:
     # and can re-expose a leading "-", and a directory named "-github-com-..." is
     # read as flags by every tool that later touches work/ (`rm -github-com-...`).
     return s[-28:].strip("-") or "submission"
+
+
+def run_options(*, run_mode: str = "full", functional: bool = True, use_llm: bool = True,
+                install: bool = True, allow_net: Optional[list[str]] = None, allow_lfs: bool = False,
+                allow_repo2docker: bool = False, timeout_s: Optional[int] = None,
+                data_sources: Optional[list[str]] = None, reuse_downloads: bool = False) -> dict[str, Any]:
+    """The run options that change what a report can say, in one canonical form.
+    Recorded in every report's provenance and compared by `batch --resume`, so a
+    report made under other conditions is re-run rather than reused."""
+    return {"run_mode": run_mode, "functional": functional, "use_llm": use_llm,
+            "install": install, "allow_net": sorted(allow_net or []), "allow_lfs": allow_lfs,
+            "allow_repo2docker": allow_repo2docker, "timeout_s": timeout_s,
+            "data_sources": list(data_sources or []), "reuse_downloads": reuse_downloads}
 
 
 def submission_id(ref: str) -> str:
@@ -119,11 +136,23 @@ class Orchestrator:
         # A fetch must land in a pristine tree, so re-running a submission (or a
         # batch --resume retry) never inherits the previous fetch's files.
         srcdir = fresh_dir(work, work / "src", "src")
+        # Logs and collected artifacts are per run too: an old install log was
+        # being fed to the diagnoser, and an old .executed.ipynb sat in
+        # report/artifacts/ beside this run's as if this run had made it.
+        logdir = fresh_dir(work, logdir, "logs")
+        shutil.rmtree(outdir / "artifacts", ignore_errors=True)
         for d in (srcdir, outdir, logdir):
             d.mkdir(parents=True, exist_ok=True)
 
         report = Report(submission_id=sid, harness_version=f"reprobe {__version__}", timestamp=_now())
+        report.run_mode = "dry-run" if dry_run else ("full" if do_run else "no-run")
         report.provenance = self._provenance()
+        # What was asked for, so `batch --resume` can tell a report made under the
+        # same conditions from one that only shares a submission id.
+        report.provenance["run_options"] = run_options(
+            run_mode=report.run_mode, functional=functional, use_llm=use_llm, install=install,
+            allow_net=allow_net, allow_lfs=allow_lfs, allow_repo2docker=allow_repo2docker,
+            timeout_s=timeout_s, data_sources=data_sources, reuse_downloads=reuse_downloads)
 
         llm_client = None
         if use_llm:
@@ -196,7 +225,13 @@ class Orchestrator:
         if do_run and detect_res.steps:
             ran = True
             rundir = fresh_dir(work, rundir, "run")
-            shutil.copytree(srcdir, rundir)
+            self._copy_run_tree(srcdir, rundir, report)
+            if not dry_run:
+                reaped = reap_orphans()
+                if reaped:
+                    report.environment.setdefault("notes", []).append(
+                        f"removed {len(reaped)} container(s) left behind by an earlier, interrupted "
+                        "reprobe run before starting this one")
             self._dataset_phase(manifest_meta, rundir, report, dry_run=dry_run)
             self._install_phase(env_plan, rundir, logdir, install=install, dry_run=dry_run,
                                 report=report, reuse_downloads=reuse_downloads)
@@ -284,18 +319,21 @@ class Orchestrator:
         # An install phase that never finished makes every downstream step
         # unjudgeable, so both the badge and the verdict have to hear about it.
         install_err = badge_rules.install_error(report.environment)
+        declared_err = badge_rules.declared_env_error(report.environment)
         report.badges = badge_rules.decide(
             fetch_res, results, detect_res,
-            badges_cfg=self.config.badges, functional_requested=functional_requested, ran=ran,
-            install_error=install_err)
-        report.verdict = badge_rules.verdict(results, ran, install_err)
+            badges_cfg=self.config.badges, functional_requested=functional_requested,
+            ran=ran and not dry_run, install_error=install_err, declared_env_error=declared_err)
+        report.verdict = badge_rules.verdict(results, ran, install_err, declared_err, dry_run=dry_run)
         report.fix_list = _fix_list(report, results)
         report.not_verified = sorted(
             {x for r in results for x in r.not_verified} | set(report.not_verified))
 
         # -- (6) RESULTS CHECK vs THE PAPER (advisory) ------------------- #
-        if llm_client is not None and ran and results:
-            self._results_check(report, results, srcdir, work, manifest_meta,
+        if ran and not dry_run and results:
+            self._regenerated_outputs(report, results, srcdir, rundir)
+        if llm_client is not None and ran and not dry_run and results:
+            self._results_check(report, results, srcdir, rundir, manifest_meta,
                                 fetch_res, llm_client)
 
         # -- (7) LLM SUMMARY (advisory) --------------------------------- #
@@ -361,24 +399,43 @@ class Orchestrator:
         ``read_csv`` and the data half has nothing to run. Sources come from
         ``--data`` and from the manifest's ``data_sources``; the operator's are
         merged first, so a deposit can never displace what the chair asked for."""
-        specs = list(specs or []) + declared_data_sources(srcdir)
-        if not specs:
+        # Who named a source decides what it may be. The operator's `--data` may
+        # point at a local directory or an ssh git remote; a source the AUTHOR
+        # wrote into their manifest may not — `data_sources: [{source: ~/.ssh}]`
+        # would otherwise copy the chair's own directory into the sandbox, whose
+        # install phase has network. Author sources are fetched `untrusted`.
+        tagged = [(str(sp), False) for sp in (specs or [])]
+        tagged += [(str(sp), True) for sp in declared_data_sources(srcdir)]
+        if not tagged:
             return
         from .fetch.data_source import fetch_data_source, merge_into, parse_ref
 
         records: list[dict[str, Any]] = []
         notes: list[str] = []
         merged: set[str] = self._merged_data_paths
-        for i, spec in enumerate(specs):
-            url, into = parse_ref(str(spec))
+        for i, (spec, untrusted) in enumerate(tagged):
+            url, into = parse_ref(spec)
             if not url:
                 continue
-            rec: dict[str, Any] = {"input": url, "into": into or "."}
+            rec: dict[str, Any] = {"input": url, "into": into or ".",
+                                   "declared_by": "author's manifest" if untrusted else "operator"}
             stage = fresh_dir(work, work / f"data{i:02d}", f"data{i:02d}")
+            skipped_links: list[str] = []
             try:
-                fr = fetch_data_source(url, stage)
-                copied, collisions = merge_into(stage, srcdir, into)
+                fr = fetch_data_source(url, stage, untrusted=untrusted)
+                copied, collisions = merge_into(stage, srcdir, into, skipped=skipped_links)
             except FetchError as e:
+                if isinstance(e, RefusedSource):
+                    # A decision, not a failure: the author's manifest named a source
+                    # reprobe will not fetch on an author's say-so. The chair can still
+                    # supply it deliberately.
+                    rec.update(status="refused", error=str(e))
+                    records.append(rec)
+                    # `e` already names the source and the rule; repeating the URL buried it
+                    notes.append(f"a data source named in the artifact's manifest was NOT fetched: {e}. "
+                                 "If it is legitimate, supply it yourself with `--data`; until then "
+                                 "the artifact was checked without it")
+                    continue
                 rec.update(status="failed", error=str(e))
                 records.append(rec)
                 notes.append(f"data source '{url}' could not be fetched ({e}) — the artifact was "
@@ -390,6 +447,11 @@ class Orchestrator:
             rec.update(status="ok", resolved_type=fr.resolved_type, pin=fr.pin.model_dump(),
                        files=len(copied), collisions=collisions,
                        checksum_verified=fr.checksum_verified, warnings=fr.warnings)
+            if skipped_links:
+                rec["skipped_links"] = skipped_links
+                notes.append(f"data source '{url}': {len(skipped_links)} symbolic link(s) in the "
+                             f"deposit were not copied ({', '.join(skipped_links[:5])}"
+                             f"{', …' if len(skipped_links) > 5 else ''})")
             records.append(rec)
             if not copied:
                 notes.append(f"data source '{url}' contributed no files")
@@ -448,6 +510,11 @@ class Orchestrator:
             try:
                 assert_safe_url(source)
                 target = safe_join(rundir, path)
+                first = Path(path.replace("\\", "/")).parts[:1]
+                if first and first[0].casefold().startswith(".reprobe_"):
+                    # the harness's own scratch names: a planted .reprobe_deps/
+                    # sitecustomize.py would sit on the run phase's PYTHONPATH
+                    raise FetchError(f"'{path}' is a path reserved for the harness")
             except FetchError as e:
                 results.append({"path": path, "source": source, "status": "refused"})
                 notes.append(f"'{path}': {e}")
@@ -483,15 +550,18 @@ class Orchestrator:
         # install phase relaxes the rootfs/tmpfs hardening because installing &
         # compiling packages must write and exec — but it is still egress-only,
         # resource-capped, socket-free, and ephemeral.
-        groups: dict[str, list[str]] = {"python": [], "r": []}
-        for c in env_plan.install_commands:
-            groups["r" if c.strip().startswith("Rscript") else "python"].append(c)
-
+        #
+        # What runs here with network: the package managers, and the build steps of
+        # the third-party packages they fetch (sdist setup.py, conda post-link
+        # scripts) from the indexes the plan allows. What must NOT: the artifact's
+        # own code. The plan therefore never executes install.R, drops `-e .`,
+        # git+/URL requirements and custom indexes, runs pip as `python -I` (no
+        # cwd on sys.path), and R without the author's .Rprofile — see envbuild.
         relaxed = {**self.config.limits_for("python"),
                    "read_only_rootfs": False, "tmpfs_noexec": False, "tmpfs_size": "4g",
                    # compiling a large source dependency tree can exceed the 30-min
-                   # author-code cap; give the harness-controlled install phase (no
-                   # author code runs here) more wall-clock and build space. An hour
+                   # author-code cap; give the harness-controlled install phase (the
+                   # artifact's own code is not run here) more wall-clock and build space. An hour
                    # was still short: PerceivedRisk (2026-08) spends the whole of it
                    # inside `micromamba create` — an environment.yml whose pip section
                    # reaches ultralytics, which pulls torch's CUDA wheels, ~8 GB of
@@ -499,11 +569,28 @@ class Orchestrator:
                    # before the first pip call of the import-scan install, so the step
                    # fails on exactly the import that install exists to supply.
                    "timeout_s": 7200}
-        prep = ("set -e; mkdir -p /work/.reprobe_deps /work/.reprobe_Rlib; export HOME=/work; "
-                "export R_LIBS_USER=/work/.reprobe_Rlib; export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; ")
+        # R_PROFILE_USER/R_ENVIRON_USER: every Rscript here runs in /work, where an
+        # author's .Rprofile (renv projects always ship one) would otherwise run —
+        # in the one phase that has network egress.
+        #
+        # HOME is NOT /work here. Everything that reads user config reads it from HOME —
+        # ~/.R/Makevars (make runs $(shell …) whenever a source package compiles),
+        # ~/.pydistutils.cfg, ~/.condarc, pip's cache — and /work is the artifact's
+        # own tree. The outputs go where they are told (/work/.reprobe_deps,
+        # /work/.reprobe_Rlib, the conda prefix); only config and caches use HOME.
+        # PYTHONPATH is not exported either: every harness Python runs -I, and an
+        # installer's own subprocess must not import from /work/.reprobe_deps.
+        #
+        # pip reads ~/.config/pip/pip.conf, so an author's config could point it at
+        # their own index; PIP_CONFIG_FILE=/dev/null is pip's documented way to load
+        # no config files at all.
+        prep = (f"set -e; mkdir -p /work/.reprobe_deps /work/.reprobe_Rlib {INSTALL_HOME}; "
+                f"export HOME={INSTALL_HOME}; export R_LIBS_USER=/work/.reprobe_Rlib; "
+                "export R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null R_MAKEVARS_USER=/dev/null; "
+                "export PIP_CONFIG_FILE=/dev/null PIP_DISABLE_PIP_VERSION_CHECK=1; ")
 
-        # Package downloads land under HOME=/work, i.e. inside the run dir, which
-        # is wiped before every run — so re-running one submission re-downloads
+        # Package downloads land in a container-local HOME, which is gone when the
+        # container exits — so re-running one submission re-downloads
         # gigabytes it already had. --reuse-downloads points pip and micromamba at
         # a workroot-level cache instead, turning a 34-minute env build into
         # minutes on the second attempt.
@@ -516,10 +603,12 @@ class Orchestrator:
         # not take on unasked. Use it while iterating on ONE artifact; leave it off
         # for a season of submissions.
         cache_mounts: list[Mount] = []
+        cache_roots: list[Path] = []
         if reuse_downloads:
             cache = Path(self.workroot) / ".package-cache"
             for sub in ("pip", "conda", "renv"):
                 (cache / sub).mkdir(parents=True, exist_ok=True)
+            cache_roots.append(cache.resolve())
             cache_mounts.append(Mount(source=cache.resolve().as_posix(),
                                       target="/reprobe-cache", read_only=False))
             prep += ("export PIP_CACHE_DIR=/reprobe-cache/pip; "
@@ -531,39 +620,86 @@ class Orchestrator:
                 "other submissions in this workroot, so the bytes installed were not all "
                 "fetched fresh for this review")
 
+        origins = list(env_plan.install_origins)
+        if len(origins) != len(env_plan.install_commands):
+            origins = ["unknown"] * len(env_plan.install_commands)
+        by_key: dict[str, list[tuple[int, str, str]]] = {"python": [], "r": []}
+        for i, (c, o) in enumerate(zip(env_plan.install_commands, origins, strict=True)):
+            by_key["r" if c.strip().startswith("Rscript") else "python"].append((i, c, o))
+
         install_results: dict[str, Any] = {}
-        for key, cmds in groups.items():
-            if not cmds:
+        for key, items in by_key.items():
+            if not items:
                 continue
             image = (env_plan.image if env_plan.env_provenance == "fallback-generic"
                      else self.config.base_image(key) or env_plan.image)
-            spec = ContainerSpec(image=image, command=["bash", "-c", prep + " ; ".join(cmds)],
+            spec = ContainerSpec(image=image, command=["bash", "-c", prep + _attributed_script(items)],
                                  workdir="/work",
                                  mounts=[Mount(source=rundir.as_posix(), target="/work", read_only=False),
                                          *cache_mounts],
                                  network="egress")
             log_path = logdir / f"install-{key}.log"
             raw = run_container(spec, relaxed, log_path, allow_egress=True, dry_run=dry_run,
-                                work_root=rundir)
-            ok = raw.exit_code == 0
+                                work_root=rundir, extra_roots=cache_roots)
+            if raw.dry_run:
+                install_results[key] = {"ok": True, "dry_run": True, "exit_code": None}
+                continue
+            marks = _install_failures(log_path, items)
+            failures = [f for f in marks if f["origin"] != "harness-record"]
+            ok = (not raw.timed_out and not raw.error and not raw.limit_exceeded and not raw.oom_killed
+                  and (raw.exit_code == 0 or (bool(marks) and not failures)))
             # Carry WHY it failed, not just that it did: a timeout is the harness
-            # running out of clock, and the verdict logic has to be able to say so
-            # rather than reprint an exit code the reader cannot interpret.
-            install_results[key] = {"exit_code": raw.exit_code, "ok": ok,
-                                    "timed_out": bool(raw.timed_out)}
-            note = f"install[{key}] ({'ok' if ok else 'failed/skipped'}; egress phase)"
+            # running out of clock, a failed command is attributed to whoever asked
+            # for it, and the verdict has to be able to say which.
+            row: dict[str, Any] = {"exit_code": raw.exit_code, "ok": ok,
+                                   "timed_out": bool(raw.timed_out), "failures": failures}
+            if raw.error:
+                row["error"] = raw.error
+            if raw.limit_exceeded:
+                row["limit_exceeded"] = raw.limit_exceeded
+            if raw.oom_killed:
+                row["oom_killed"] = True
+            # The import-scan install never FAILS (a mis-detected local module must not
+            # fail the phase) — it prints what pip could not get. If that is because
+            # the index was unreachable, it is a failure of the harness's install.
+            missing = _detected_install_missing(log_path)
+            if missing:
+                row["incomplete"] = missing
+                if ok and _network_trouble(log_path):
+                    ok = row["ok"] = False
+                    row["network_error"] = True
+            if not ok and not row.get("network_error") and _network_trouble(log_path):
+                row["network_error"] = True
+            if not ok and not failures and not (raw.timed_out or raw.error or raw.limit_exceeded
+                                                or raw.oom_killed or row.get("network_error")):
+                # a non-zero exit that no command explains: the container, or its shell,
+                # died — a failure of ours, which must not be left looking like "no
+                # finding" (and so, downstream, like the artifact's)
+                row["unattributed"] = True
+            install_results[key] = row
+            note = f"install[{key}] ({'ok' if ok else 'failed'}; egress phase)"
             report.environment.setdefault("notes", []).append(note)
             if not ok:
-                cause = ("was killed at the install-phase wall-clock limit" if raw.timed_out
-                         else f"failed (exit {raw.exit_code})")
-                report.not_verified.append(
-                    f"dependency install ({key}) {cause}; the steps below ran against an "
-                    "environment the harness never finished building, so their failures are "
-                    "ours and not the artifact's")
+                declared = [f for f in failures if f["origin"] == "author-declared"]
+                if declared and not (raw.timed_out or raw.error or row.get("network_error")):
+                    report.not_verified.append(
+                        f"the artifact's declared environment ({key}) did not install: "
+                        + "; ".join(f"{f.get('what') or f['command'][:100]} exited {f['exit_code']}"
+                                    for f in declared)
+                        + " — the steps below ran without it")
+                else:
+                    cause = ("was killed at the install-phase wall-clock limit" if raw.timed_out
+                             else f"failed (exit {raw.exit_code})")
+                    report.not_verified.append(
+                        f"dependency install ({key}) {cause}; the steps below ran against an "
+                        "environment the harness never finished building, so their failures are "
+                        "ours and not the artifact's")
         report.environment["install_results"] = install_results
-        # Hash the install logs (they end with pip freeze / installed.packages()) so
-        # two runs of the same deposit are comparable without re-solving.
-        digest = _hash_install_logs(logdir)
+        # Hash what the install phase RESOLVED (the pip freeze / installed.packages()
+        # / micromamba list sections), never the whole log: the log carries a random
+        # container name and the host path, so its hash differed on every run and
+        # could not say whether two runs installed the same versions.
+        digest = _hash_resolved_versions(logdir)
         if digest:
             env_plan.resolved_deps_digest = digest
             report.environment["resolved_deps_digest"] = digest
@@ -574,14 +710,15 @@ class Orchestrator:
         the paper: machine-readable outputs first (a declared .csv/.json/.txt is
         the author saying "these are my numbers"), then the console output, which
         for many analyses is where the statistics are actually printed."""
-        from .runners.base import _tail
+        from .runners.base import _tail, expand_expected
 
         parts: list[str] = []
         budget = 12_000
         for res in results:
-            for rel in res.expected_met or []:
-                p = rundir / rel
-                if p.suffix.lower() not in (".csv", ".tsv", ".json", ".txt", ".md", ".yml", ".yaml"):
+            for rel in expand_expected(res.expected_met or [], res.artifacts or [])[:50]:
+                p = _inside(rundir, rel)
+                if p is None or p.suffix.lower() not in (".csv", ".tsv", ".json", ".txt", ".md",
+                                                         ".yml", ".yaml"):
                     continue
                 try:
                     if p.is_file() and p.stat().st_size <= 200_000:
@@ -599,7 +736,7 @@ class Orchestrator:
         return "\n\n".join(parts)[:12_000]
 
     def _results_check(self, report: Report, results: list[RunResult], srcdir: Path,
-                       work: Path, manifest_meta: dict[str, Any], fetch_res: FetchResult,
+                       rundir: Path, manifest_meta: dict[str, Any], fetch_res: FetchResult,
                        llm_client) -> None:
         """Advisory comparison of the paper's claims against the run's output.
 
@@ -609,7 +746,10 @@ class Orchestrator:
         having to do it from scratch."""
         from . import paper as paper_mod
 
-        rundir = work / "run"
+        # rundir is the tree THIS run used — fresh_dir may have fallen back to
+        # run-1 when Windows locked the old one, and reading work/"run" then
+        # compared the paper against the previous run's outputs.
+        work = rundir.parent
         try:
             found = paper_mod.locate(srcdir, work, manifest_meta=manifest_meta,
                                      pin_value=fetch_res.pin.value or "",
@@ -651,10 +791,15 @@ class Orchestrator:
             for c in advice["claims"]:
                 counts[c["verdict"]] = counts.get(c["verdict"], 0) + 1
             section["counts"] = counts
-            if counts.get("mismatch"):
+            if counts.get("mismatch") and advice.get("meets_threshold"):
                 report.not_verified.append(
                     f"{counts['mismatch']} paper claim(s) look inconsistent with the re-run "
                     "(LLM-advisory — a human must confirm)")
+            elif counts.get("mismatch"):
+                # Below the configured confidence the comparison is shown in its own
+                # section for transparency, but it does not get to put a statement
+                # about someone's published numbers into the report's findings.
+                section["threshold_note"] = advice.get("threshold_note")
         report.llm["results_check"] = section
 
     def _diagnose(self, res: RunResult, llm_client, env_plan: EnvPlan, step,
@@ -715,18 +860,97 @@ class Orchestrator:
             res.diagnostics["llm_advisory"] = adv
 
     def _collect_artifacts(self, results: list[RunResult], rundir: Path, outdir: Path) -> None:
+        from .runners.base import expand_expected
+
         art_dir = outdir / "artifacts"
         for res in results:
-            keep = set(res.expected_met) | {a for a in res.artifacts if a.endswith(".executed.ipynb")}
+            keep = set(expand_expected(res.expected_met, res.artifacts)) \
+                | {a for a in res.artifacts if a.endswith(".executed.ipynb")}
             for rel in keep:
-                src = rundir / rel
-                if src.is_file():
-                    dst = art_dir / rel
-                    dst.parent.mkdir(parents=True, exist_ok=True)
+                # /work is writable by author code, which can plant a link there to
+                # any host path (`x.executed.ipynb -> /proc/self/environ`). Only a
+                # regular file that really lives in the run tree is collected.
+                src = _inside(rundir, rel)
+                if src is None or not src.is_file():
+                    continue
+                dst = art_dir / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(src, dst, follow_symlinks=False)
+                except OSError:
+                    pass
+
+    def _copy_run_tree(self, srcdir: Path, rundir: Path, report: Report) -> None:
+        """Copy the fetched tree into the throwaway run dir — without following links.
+
+        ``copytree`` follows symlinks by default, so a committed ``leak -> ~/.aws``
+        copied the host directory INTO the sandbox, and the install phase has
+        network. In-tree relative links are kept as links; anything pointing out
+        of the tree is dropped and named in the report. Author-supplied
+        ``.reprobe_*`` paths go too: they are the harness's own scratch names, and
+        a committed ``.reprobe_deps/sitecustomize.py`` would sit on PYTHONPATH."""
+        dropped: list[str] = []
+        root = srcdir.resolve()
+
+        def ignore(d: str, names: list[str]) -> set[str]:
+            out = set()
+            for n in names:
+                p = Path(d) / n
+                if Path(d).resolve() == root and n.casefold().startswith(".reprobe_"):
+                    out.add(n)
+                    dropped.append(f"{n} (reserved harness path)")
+                elif p.is_symlink():
                     try:
-                        shutil.copy2(src, dst)
-                    except OSError:
-                        pass
+                        target = p.resolve()
+                        inside = target.is_relative_to(root) and not os.path.isabs(os.readlink(p))
+                    except (OSError, RuntimeError):
+                        inside = False
+                    if not inside:
+                        out.add(n)
+                        dropped.append(f"{p.relative_to(srcdir).as_posix()} (link out of the tree)")
+            return out
+
+        try:
+            shutil.copytree(srcdir, rundir, symlinks=True, ignore=ignore)
+        except shutil.Error as e:
+            # e.g. Windows without symlink privilege: the in-tree links that could
+            # not be recreated are named, everything else was copied.
+            for src, _dst, why in (e.args[0] if e.args and isinstance(e.args[0], list) else []):
+                dropped.append(f"{Path(src).name} (not copied: {why})")
+        if dropped:
+            report.environment.setdefault("warnings", []).append(
+                f"{len(dropped)} path(s) in the artifact were not copied into the run: "
+                + ", ".join(dropped[:10]) + (" …" if len(dropped) > 10 else ""))
+
+    def _regenerated_outputs(self, report: Report, results: list[RunResult], srcdir: Path,
+                             rundir: Path) -> None:
+        """Compare every committed file this run regenerated against the committed
+        copy — the most direct reproduction evidence an automated run can give.
+        Evidence for the human reviewer only: it never sets a badge."""
+        from . import compare
+
+        # Only a step that FINISHED can have regenerated a file. A crashed or
+        # timed-out step that truncated out.csv left a half-written file, and
+        # comparing it reported "regenerated with different values".
+        regenerated = sorted({a for r in results for a in r.artifacts
+                              if r.executed and r.status in ("pass", "partial")
+                              and (srcdir / a).is_file()})
+        if not regenerated:
+            return
+        cfg = ((self.config.badges.get("acm") or {}).get("results_reproduced") or {})
+        rows = compare.compare_outputs(
+            srcdir, rundir, regenerated,
+            rtol=float(cfg.get("rtol", 1e-6)), atol=float(cfg.get("atol", 1e-12)),
+            max_bytes=int(cfg.get("max_bytes", 50_000_000)), max_files=int(cfg.get("max_files", 200)))
+        summary = compare.summarize(rows)
+        report.results_comparison = {"summary": summary, "files": rows,
+                                     "rtol": cfg.get("rtol", 1e-6), "atol": cfg.get("atol", 1e-12)}
+        n_diff = sum(1 for r in rows if r.get("status") == "differs")
+        if n_diff:
+            report.not_verified.append(
+                f"{n_diff} committed output(s) were regenerated with different values — see "
+                "results_comparison; nondeterminism (unseeded RNG, library versions) is one "
+                "possible cause, so a human must judge")
 
     def _provenance(self) -> dict[str, Any]:
         prov: dict[str, Any] = {
@@ -962,7 +1186,9 @@ def _fix_list(report: Report, results: list[RunResult]) -> list[dict[str, Any]]:
             add(res.target, str(known.get("likely_cause", "")),
                 [str(f) for f in known["suggested_fixes"]], "deterministic")
         adv = d.get("llm_advisory")
-        if isinstance(adv, dict) and adv.get("suggested_fixes"):
+        # Below the configured confidence, advice stays visible in its step's own
+        # section but is never promoted into the author's to-do list.
+        if isinstance(adv, dict) and adv.get("suggested_fixes") and adv.get("meets_threshold", True):
             add(res.target, str(adv.get("likely_cause", "")),
                 [str(f) for f in adv["suggested_fixes"]], "llm-advisory")
     return items
@@ -974,6 +1200,8 @@ def _no_log_diagnosis(res: RunResult) -> dict[str, Any]:
     concrete action — no cause is invented."""
     if res.status == "timeout":
         limit = res.diagnostics.get("timeout_s")
+        ceiling = res.diagnostics.get("max_timeout_s") or 21600
+        suggest = min(int(limit or 1800) * 2, int(ceiling))
         return {
             "source": "harness (deterministic — not an LLM guess)",
             "likely_cause": (
@@ -982,8 +1210,9 @@ def _no_log_diagnosis(res: RunResult) -> dict[str, Any]:
                 "kernel never reached a printing cell — a long fit/search, a blocking prompt, "
                 "or a network call that hangs under --network none."),
             "suggested_fixes": [
-                f"re-run this step with a larger budget: `reprobe run <ref> --timeout {int(limit or 1800) * 2}`",
-                "inspect the partially-executed notebook collected under out/artifacts/ — "
+                f"re-run this step with a larger budget: `reprobe run <ref> --timeout {suggest}` "
+                f"(the ceiling is limits.yaml:max_timeout_s = {ceiling}s)",
+                "inspect the partially-executed notebook collected under report/artifacts/ — "
                 "papermill checkpoints after every cell, so the last completed cell is the stall point",
             ],
         }
@@ -1034,16 +1263,141 @@ def _env_section(p: EnvPlan) -> dict[str, Any]:
     }
 
 
-def _hash_install_logs(logdir: Path) -> Optional[str]:
+_MARK = "[reprobe-install]"
+_MARK_RE = re.compile(r"^\[reprobe-install\] (begin|failed) (\d+) (\S+)(?: exit (\d+))?\s*$", re.M)
+
+
+def _attributed_script(items: list[tuple[int, str, str]]) -> str:
+    """The install commands as one bash script that records, per command, who
+    asked for it and whether it failed.
+
+    One exit code for a whole ``set -e`` chain cannot say whether the artifact's
+    own requirements.txt failed (a finding about the artifact) or a package
+    reprobe guessed from an import did (ours). Each command runs in its own
+    subshell, so one failure no longer stops the rest — the steps then run with
+    as much of the environment as could be built, and the log says what was not."""
+    lines = ["__rc=0"]
+    for i, cmd, origin in items:
+        # `echo;` first: a command whose last output has no newline would otherwise
+        # glue the marker onto that line, and the line-anchored parser would miss it
+        lines.append(f"echo; echo '{_MARK} begin {i} {origin}'")
+        # A fresh `bash -ec`, not `( set -e; … )`: bash IGNORES errexit inside a subshell
+        # that is part of an `||` list, so `false; echo after` carried on past its
+        # first failure. A new process honours -e whatever list its parent is in.
+        lines.append(f"bash -ec {shlex.quote(cmd)} || {{ __e=$?; echo; "
+                     f"echo \"{_MARK} failed {i} {origin} exit $__e\"; "
+                     "[ $__rc -ne 0 ] || __rc=$__e; }")
+    lines.append("exit $__rc")
+    return "\n".join(lines)
+
+
+def _log_lines(path: Path, max_line: int = 65_536):
+    """Lines of a log in constant memory. The install log is the container's
+    uncapped-by-line stdout (the byte cap is 1 GiB), written by third-party package
+    builds; reading it whole — as the parsers once did, up to four times — let a
+    hostile build make the host allocate gigabytes. A line longer than ``max_line``
+    comes back in pieces."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            while True:
+                line = fh.readline(max_line)
+                if not line:
+                    return
+                yield line.rstrip("\r\n")
+    except OSError:
+        return
+
+
+def _install_failures(log_path: Path, items: list[tuple[int, str, str]]) -> list[dict[str, Any]]:
+    cmd_by_index = {i: c for i, c, _ in items}
+    out = []
+    for line in _log_lines(log_path):
+        m = _MARK_RE.match(line)
+        if m and m.group(1) == "failed":
+            idx = int(m.group(2))
+            cmd = cmd_by_index.get(idx, "")
+            out.append({"index": idx, "origin": m.group(3), "exit_code": int(m.group(4) or 0),
+                        "command": cmd, "what": describe_install_command(cmd) if cmd else ""})
+    return out
+
+
+_DETECTED_MISSING_RE = re.compile(r"^reprobe: pip could NOT install \(reported, not faked\): (.*)$")
+
+
+def _detected_install_missing(log_path: Path) -> list[str]:
+    """Distributions the import-scan install said pip could not get (its last line)."""
+    import ast
+
+    last = ""
+    for line in _log_lines(log_path):
+        m = _DETECTED_MISSING_RE.match(line)
+        if m:
+            last = m.group(1).strip()
+    if not last or last == "none":
+        return []
+    try:
+        names = ast.literal_eval(last)
+    except (ValueError, SyntaxError):
+        return []
+    return [n for n in names if isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._\[\],-]*", n)][:50] \
+        if isinstance(names, list) else []
+
+
+def _network_trouble(log_path: Path, tail_bytes: int = 262_144) -> bool:
+    """Whether the END of the log reads like a network failure (the cause of a
+    failed install is at the end; a gigabyte of earlier output is not read)."""
+    try:
+        with log_path.open("rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - tail_bytes))
+            text = fh.read().decode("utf-8", errors="replace").lower()
+    except OSError:
+        return False
+    return any(m in text for m in badge_rules._NETWORK_MARKERS)
+
+
+def _hash_resolved_versions(logdir: Path) -> Optional[str]:
+    """sha256 over the version listings the install phase printed (the
+    ``harness-record`` sections), normalised to LF — the part of the log that
+    names what was installed, and nothing that changes from run to run."""
     h = hashlib.sha256()
     found = False
     for log in sorted(logdir.glob("install-*.log")):
-        try:
-            h.update(log.read_bytes())
+        section = None                  # sha256 of the listing being read, or None
+        idx = -1
+        for line in _log_lines(log):
+            m = _MARK_RE.match(line)
+            if m:
+                kind, i, origin = m.group(1), int(m.group(2)), m.group(3)
+                if section is not None:
+                    if kind == "failed" and i == idx:
+                        # the listing itself FAILED: what it printed is an error message,
+                        # and hashing it would call that "the resolved versions"
+                        section = None
+                        continue
+                    h.update(section.digest())
+                    found = True
+                    section = None
+                if kind == "begin" and origin == "harness-record":
+                    section, idx = hashlib.sha256(), i
+                continue
+            if section is not None:
+                section.update(line.rstrip().encode("utf-8", "replace") + b"\n")
+        if section is not None:             # the log ended inside a listing
+            h.update(section.digest())
             found = True
-        except OSError:
-            pass
     return f"sha256:{h.hexdigest()[:32]}" if found else None
+
+
+def _inside(root: Path, rel: str) -> Optional[Path]:
+    """root/rel if it is a real (non-link) path inside root, else None."""
+    p = root / rel
+    try:
+        if p.is_symlink() or not p.resolve().is_relative_to(root.resolve()):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return p
 
 
 def _unity_section(res: RunResult) -> dict[str, Any]:

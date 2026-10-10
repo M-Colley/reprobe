@@ -13,6 +13,7 @@ from .base import (
     checksum_verdict,
     download,
     get,
+    maybe_unzip,
     new_checksum_stats,
     record_download,
     safe_join,
@@ -57,8 +58,9 @@ class ZenodoFetcher:
                 warnings.append(f"{key}: {note}")
         verified = checksum_verdict(stats, warnings) if files else False
 
-        # auto-unzip a single archive for convenience
-        _maybe_unzip(dest, warnings)
+        # auto-unzip a single archive for convenience — through the shared helper,
+        # so a Zenodo zip gets the same bomb/member caps as every other deposit
+        maybe_unzip(dest, warnings)
 
         return FetchResult(
             input=ref, resolved_type="zenodo", src_dir=str(dest),
@@ -70,13 +72,3 @@ class ZenodoFetcher:
                       "checksums": stats},
         )
 
-
-def _maybe_unzip(dest: Path, warnings: list[str]) -> None:
-    import zipfile
-    zips = list(dest.glob("*.zip"))
-    if len(zips) == 1:
-        try:
-            with zipfile.ZipFile(zips[0]) as z:
-                z.extractall(dest)
-        except Exception as e:
-            warnings.append(f"could not extract {zips[0].name}: {e}")

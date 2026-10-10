@@ -34,7 +34,29 @@ def spy_run_container(monkeypatch):
 
 def _run(tmp_path, ref, spy=None, **kw):
     o = Orchestrator(workroot=tmp_path)
-    return o.run(str(ref), use_llm=False, dry_run=True, **kw)
+    kw.setdefault("dry_run", True)
+    return o.run(str(ref), use_llm=False, **kw)
+
+
+def _simulate(monkeypatch, run_phase, install_phase=None):
+    """Replace the container layer with canned results so the orchestrator runs
+    for real (not as a dry run) without a daemon. ``run_phase(spec, log_path)``
+    returns the RawRunOutput of an offline step; the install phase succeeds
+    unless ``install_phase`` says otherwise."""
+    from reprobe.models import RawRunOutput
+
+    def fake(spec, limits, log_path, **kw):
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        if spec.network == "egress":
+            if install_phase is not None:
+                return install_phase(spec, log_path)
+            Path(log_path).write_text("installed\n", encoding="utf-8")
+            return RawRunOutput(exit_code=0, duration_s=0.1, image=spec.image, log_path=str(log_path))
+        return run_phase(spec, log_path)
+
+    monkeypatch.setattr(orch_mod, "run_container", fake)
+    monkeypatch.setattr(orch_mod, "reap_orphans", lambda: [])
+    monkeypatch.setattr(orch_mod, "_image_digest", lambda image: None)
 
 
 def test_example_pipeline_writes_reports_and_never_grants(tmp_path, spy_run_container):
@@ -94,16 +116,15 @@ def test_unresolvable_ref_yields_renderable_fetch_failed_report(tmp_path):
 
 
 def test_broken_python_fixture_fails_cleanly(tmp_path, monkeypatch):
-    """Dry-run fabricates exit 0, so force a nonzero exit to prove a failing
-    step yields a clean FAIL verdict — never a traceback out of run()."""
-    real = orch_mod.run_container
+    """A failing step yields a clean FAIL verdict — never a traceback out of run()."""
+    from reprobe.models import RawRunOutput
 
-    def failing(spec, limits, log_path, **kw):
-        raw = real(spec, limits, log_path, **kw)
-        return raw.model_copy(update={"exit_code": 1})
+    def failing(spec, log_path):
+        Path(log_path).write_text("Traceback ...\nZeroDivisionError\n", encoding="utf-8")
+        return RawRunOutput(exit_code=1, duration_s=0.1, image=spec.image, log_path=str(log_path))
 
-    monkeypatch.setattr(orch_mod, "run_container", failing)
-    report = _run(tmp_path, BROKEN)
+    _simulate(monkeypatch, failing)
+    report = _run(tmp_path, BROKEN, dry_run=False)
     statuses = {s.status for s in report.steps if s.executed}
     assert statuses and statuses <= {"fail", "partial", "error"}
     assert report.verdict["overall"] in ("runs-with-failures", "infra-error")
@@ -218,19 +239,16 @@ def test_daemon_loss_stops_the_pipeline_instead_of_inventing_more_failures(tmp_p
     for name in ("01_prep.py", "02_fit.py", "03_plot.py"):
         (src / name).write_text("print('hi')\n", encoding="utf-8")
 
-    real = orch_mod.run_container
     attempted: list[str] = []
 
-    def fake(spec, limits, log_path, **kw):
-        if spec.network == "egress":                  # dependency-install phase
-            return real(spec, limits, log_path, **kw)
+    def fake(spec, log_path):
         attempted.append(spec.image)
         return RawRunOutput(exit_code=125, duration_s=12.5, image=spec.image,
                             log_path=str(log_path),
                             error="docker-daemon-lost: the Docker daemon stopped responding")
 
-    monkeypatch.setattr(orch_mod, "run_container", fake)
-    report = _run(tmp_path / "wk", src)
+    _simulate(monkeypatch, fake)
+    report = _run(tmp_path / "wk", src, dry_run=False)
 
     assert len(attempted) == 1, f"kept launching containers after the daemon vanished: {attempted}"
     statuses = [s.status for s in report.steps]
@@ -416,3 +434,206 @@ def test_no_data_probe_when_no_deposit_was_supplied(tmp_path):
     report = _run(tmp_path, str(tmp_path / "no-such-repo"))
     assert report.verdict["overall"] == "fetch-failed"
     assert "data_sources" not in report.source
+
+
+def test_a_dry_run_report_says_it_is_a_dry_run(tmp_path, spy_run_container):
+    """A dry run once wrote "ran to completion (exit 0)", verdict `runs` and a
+    Functional candidate — a fabricated result that `batch --resume` then reused."""
+    report = _run(tmp_path, EXAMPLE)
+    assert report.run_mode == "dry-run"
+    assert report.verdict["overall"] == "not-run" and "dry run" in report.verdict["note"]
+    assert report.badges["acm"]["functional"] == "not-evaluated"
+    executed = [s for s in report.steps if s.runner != "unity"]
+    assert executed and all(s.status == "skipped" and not s.executed and not s.claims
+                            for s in executed)
+    assert spy_run_container, "the argv must still be built and checked"
+
+
+def test_symlinks_out_of_the_tree_never_reach_the_run_dir(tmp_path, monkeypatch):
+    """copytree follows links by default: a committed `leak -> ~/.aws` copied the
+    host directory into the sandbox, where the install phase has network."""
+    import os
+
+    secret = tmp_path / "host-secret"
+    secret.mkdir()
+    (secret / "id_rsa").write_text("PRIVATE", encoding="utf-8")
+    src = tmp_path / "artifact"
+    src.mkdir()
+    (src / "run.py").write_text("print(1)\n", encoding="utf-8")
+    (src / ".reprobe_deps").mkdir()
+    (src / ".reprobe_deps" / "sitecustomize.py").write_text("import os\n", encoding="utf-8")
+    try:
+        os.symlink(secret, src / "leak", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not creatable on this platform/user")
+
+    from reprobe.models import Report
+    o = Orchestrator(workroot=tmp_path / "wk")
+    report = Report(submission_id="x", harness_version="t", timestamp="")
+    rundir = tmp_path / "wk" / "run"
+    o._copy_run_tree(src, rundir, report)
+    assert (rundir / "run.py").is_file()
+    assert not (rundir / "leak").exists() and not (rundir / "leak").is_symlink()
+    assert not (rundir / ".reprobe_deps").exists()
+    warning = " ".join(report.environment["warnings"])
+    assert "leak" in warning and ".reprobe_deps" in warning
+
+
+def test_install_failures_are_attributed_to_whoever_asked(tmp_path, monkeypatch):
+    """One exit code for the whole install chain could not say whether the
+    artifact's requirements.txt failed or a package reprobe guessed did."""
+    from reprobe.models import EnvPlan, RawRunOutput, Report
+
+    def install(spec, log_path):
+        script = spec.command[-1]
+        assert "[reprobe-install] begin 0 author-declared" in script
+        Path(log_path).write_text(
+            "[reprobe-install] begin 0 author-declared\nERROR: No matching distribution found for itertools\n"
+            "[reprobe-install] failed 0 author-declared exit 1\n"
+            "[reprobe-install] begin 1 harness-record\npandas==2.2.0\n", encoding="utf-8")
+        return RawRunOutput(exit_code=1, duration_s=1.0, image=spec.image, log_path=str(log_path))
+
+    _simulate(monkeypatch, run_phase=None, install_phase=install)
+    o = Orchestrator(workroot=tmp_path)
+    plan = EnvPlan(image="img", install_commands=["python -I -m pip install -r requirements.txt",
+                                                  "python -I -m pip freeze"],
+                   install_origins=["author-declared", "harness-record"])
+    report = Report(submission_id="x", harness_version="t", timestamp="")
+    rundir, logdir = tmp_path / "run", tmp_path / "logs"
+    rundir.mkdir()
+    logdir.mkdir()
+    o._install_phase(plan, rundir, logdir, install=True, dry_run=False, report=report)
+
+    row = report.environment["install_results"]["python"]
+    assert not row["ok"] and row["failures"][0]["origin"] == "author-declared"
+    from reprobe.report import badges
+    assert badges.install_error(report.environment) is None
+    assert "requirements.txt" in badges.declared_env_error(report.environment)
+    assert any("declared environment (python) did not install" in n for n in report.not_verified)
+    # only the version listing feeds the digest, so it is stable across runs
+    assert report.environment["resolved_deps_digest"].startswith("sha256:")
+
+
+def test_resolved_deps_digest_ignores_the_volatile_parts_of_the_log(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d, name in ((a, "reprobe-111"), (b, "reprobe-222")):
+        d.mkdir()
+        (d / "install-python.log").write_text(
+            f"$ docker run --name {name} -v {d}:/work ...\n\n"
+            "[reprobe-install] begin 0 author-declared\nCollecting pandas (took 3.2s)\n"
+            "[reprobe-install] begin 1 harness-record\npandas==2.2.0\nnumpy==2.0.1\n",
+            encoding="utf-8")
+    assert orch_mod._hash_resolved_versions(a) == orch_mod._hash_resolved_versions(b)
+
+
+def test_regenerated_committed_outputs_are_compared_with_the_authors_copy(tmp_path, monkeypatch):
+    from reprobe.models import RawRunOutput
+
+    art = tmp_path / "artifact"
+    (art / "results").mkdir(parents=True)
+    (art / "analyze.py").write_text("print(1)\n", encoding="utf-8")
+    (art / "results" / "means.csv").write_text("group,mean\na,3.2100000000\nb,4.5\n", encoding="utf-8")
+    (art / "results" / "counts.csv").write_text("group,n\na,35\nb,40\n", encoding="utf-8")
+
+    def rerun(spec, log_path):
+        work = Path(spec.mounts[0].source)
+        # float noise in one file, a real change in the other
+        (work / "results" / "means.csv").write_text("group,mean\na,3.2100000000001\nb,4.5\n",
+                                                    encoding="utf-8")
+        (work / "results" / "counts.csv").write_text("group,n\na,35\nb,41\n", encoding="utf-8")
+        Path(log_path).write_text("done\n", encoding="utf-8")
+        return RawRunOutput(exit_code=0, duration_s=0.1, image=spec.image, log_path=str(log_path))
+
+    _simulate(monkeypatch, rerun)
+    report = _run(tmp_path / "wk", art, dry_run=False)
+    rows = {r["path"]: r["status"] for r in report.results_comparison["files"]}
+    assert rows == {"results/counts.csv": "differs", "results/means.csv": "equivalent"}
+    assert report.badges["acm"]["results_reproduced"] == "not-evaluated"   # evidence, not a badge
+    assert any("regenerated with different values" in n for n in report.not_verified)
+
+
+def _manifest_artifact(tmp_path, source):
+    art = tmp_path / "artifact"
+    art.mkdir()
+    (art / "run.py").write_text("print(1)\n", encoding="utf-8")
+    (art / "autoui-repro.yml").write_text(
+        f"version: 1\ndata_sources:\n  - {{ source: {source!r}, into: loot }}\nrun:\n  steps: [run.py]\n",
+        encoding="utf-8")
+    return art
+
+
+def test_a_manifest_cannot_pull_a_host_directory_into_the_sandbox(tmp_path):
+    """`data_sources: [{source: <host path>}]` once reached the catch-all local
+    fetcher, copying the chair's own directory into a tree whose install phase has
+    network. Only the operator's --data may name a local path."""
+    secret = tmp_path / "host-secret"
+    secret.mkdir()
+    (secret / "id_rsa").write_text("PRIVATE", encoding="utf-8")
+    art = _manifest_artifact(tmp_path, str(secret))
+
+    report = Orchestrator(workroot=tmp_path / "wk").run(str(art), use_llm=False, dry_run=True)
+    src = tmp_path / "wk" / report.submission_id / "src"
+    run = tmp_path / "wk" / report.submission_id / "run"
+    assert not (src / "loot").exists() and not (run / "loot").exists()
+    rec = report.source["data_sources"][0]
+    assert rec["status"] == "refused" and rec["declared_by"] == "author's manifest"
+    assert any("supply it yourself with `--data`" in w for w in report.source["warnings"])
+
+
+@pytest.mark.parametrize("source", ["git@github.com:a/b.git", "ssh://git@host/x.git",
+                                    "http://169.254.169.254/latest", ".", "..", "file:///etc"])
+def test_manifest_sources_that_reach_credentials_or_internals_are_refused(tmp_path, source):
+    art = _manifest_artifact(tmp_path, source)
+    report = Orchestrator(workroot=tmp_path / "wk").run(str(art), use_llm=False, dry_run=True)
+    assert report.source["data_sources"][0]["status"] == "refused"
+
+
+def test_the_operators_own_data_flag_may_still_name_a_local_directory(tmp_path):
+    deposit = tmp_path / "deposit"
+    deposit.mkdir()
+    (deposit / "p01.csv").write_text("a\n", encoding="utf-8")
+    art = tmp_path / "artifact"
+    art.mkdir()
+    (art / "run.py").write_text("print(1)\n", encoding="utf-8")
+    report = Orchestrator(workroot=tmp_path / "wk").run(
+        str(art), use_llm=False, dry_run=True, data_sources=[f"{deposit}::dataset"])
+    rec = report.source["data_sources"][0]
+    assert rec["status"] == "ok" and rec["declared_by"] == "operator"
+
+
+def test_the_install_script_attributes_failures_and_keeps_going_under_real_bash(tmp_path):
+    """`_attributed_script` leans on bash semantics: `set -e` in the parent, a
+    failing subshell inside an `||` list, and the first failing exit code surviving
+    to the end. Run it for real instead of trusting a reading of it."""
+    import shutil
+    import subprocess
+
+    if shutil.which("bash") is None:
+        pytest.skip("needs bash")
+    items = [(0, "echo declared-ok", "author-declared"),
+             (1, "echo declared-bad && exit 7", "author-declared"),
+             (2, "echo detected-after", "harness-detected"),
+             (3, "echo record-bad; exit 3", "harness-record")]
+    script = "set -e; " + orch_mod._attributed_script(items)
+    log = tmp_path / "install-python.log"
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    log.write_text(r.stdout + r.stderr, encoding="utf-8")
+
+    assert "detected-after" in r.stdout, "a failing command stopped the commands after it"
+    assert r.returncode == 7, "the first failure's exit code must be the phase's"
+    failures = orch_mod._install_failures(log, items)
+    assert [(f["index"], f["origin"], f["exit_code"]) for f in failures] == \
+        [(1, "author-declared", 7), (3, "harness-record", 3)]
+    assert failures[0]["command"] == "echo declared-bad && exit 7"
+
+
+def test_a_fully_successful_install_script_exits_zero(tmp_path):
+    import shutil
+    import subprocess
+
+    if shutil.which("bash") is None:
+        pytest.skip("needs bash")
+    items = [(0, "true", "author-declared"), (1, "echo x", "harness-detected")]
+    r = subprocess.run(["bash", "-c", "set -e; " + orch_mod._attributed_script(items)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and "failed" not in r.stdout

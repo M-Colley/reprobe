@@ -212,7 +212,7 @@ def test_conda_env_and_requirements_txt_do_not_shadow_each_other(tmp_path):
     p = plan_env(det, {"environment": {"dependencies": "environment.yml"}}, _cfg(), tmp_path)
 
     pip = [c for c in p.install_commands if "pip install" in c]
-    assert pip and all(c.startswith("/work/.reprobe_env/bin/pip") for c in pip), pip
+    assert pip and all("/work/.reprobe_env/bin/python -I -m pip install" in c for c in pip), pip
     assert not any("--target=/work/.reprobe_deps" in c for c in p.install_commands)
 
 
@@ -298,7 +298,7 @@ def test_resolved_versions_recorded_in_install_log(tmp_path):
     (tmp_path / "requirements.txt").write_text("pandas\n")
     det = DetectResult(artifact_types=["python"])
     p = plan_env(det, {}, _cfg(), tmp_path)
-    assert any(c.startswith("pip freeze") for c in p.install_commands)
+    assert any("-m pip freeze" in c for c in p.install_commands)
 
 
 # --------------------------------------------------------------------------- #
@@ -394,9 +394,11 @@ def test_install_command_quotes_untrusted_dep_filename(tmp_path):
     weird = "a b;c.txt"                       # valid filename, shell-hostile if raw
     (tmp_path / weird).write_text("numpy\n")
     cmds, _, _ = _install_commands({"dependencies": weird}, tmp_path, r_needed=False)
-    pip = next(c for c in cmds if c.startswith("pip install"))
-    assert "'a b;c.txt'" in pip                # shlex-quoted
-    assert "-r a b;c.txt" not in pip           # never the raw injectable form
+    pip = next(c for c in cmds if "pip install" in c)
+    # The name is not interpolated at all: pip reads a sanitised copy the command
+    # writes from base64, so there is nothing for a shell to mis-split.
+    assert weird not in pip and ";c.txt" not in pip
+    assert "base64 -d" in pip and "-r /work/.reprobe_req/requirements.txt" in pip
 
 
 # --------------------------------------------------------------------------- #
@@ -443,7 +445,7 @@ def test_cran_command_generated_for_detected_packages(tmp_path):
     det = signatures.scan(tmp_path)
     p = plan_env(det, {}, _cfg(), tmp_path)
     cran = next(c for c in p.install_commands if "install.packages" in c)
-    assert cran.startswith("Rscript -e '") and 'c("brms")' in cran
+    assert cran.startswith("Rscript --vanilla -e '") and 'c("brms")' in cran
 
 
 def test_cran_command_honors_declared_packages(tmp_path):
@@ -518,7 +520,7 @@ def test_cran_command_is_single_quote_injection_safe(tmp_path):
     p = plan_env(det, {"environment": {"r_packages": hostile}}, _cfg(), tmp_path)
     cran = next(c for c in p.install_commands if "install.packages" in c)
     assert 'c("dplyr")' in cran, cran            # only the legitimate name survives
-    assert cran.startswith("Rscript -e '") and cran.endswith("'")
+    assert cran.startswith("Rscript --vanilla -e '") and cran.endswith("'")
     assert cran.count("'") == 2                  # no break-out of the -e argument
     for bad in ("touch /pwned", "`", "$(", "\n"):
         assert bad not in cran

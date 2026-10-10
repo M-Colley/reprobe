@@ -149,17 +149,59 @@ def test_figshare_prefers_the_computed_md5_over_the_supplied_one(tmp_path, monke
 
 # --- Dryad ------------------------------------------------------------------
 
+def _dryad_api(monkeypatch, files, *, version=3):
+    """The v2 API as Dryad serves it: dataset record -> version -> file listing."""
+    calls: list[str] = []
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        if url.endswith("/files"):
+            return _Resp({"_embedded": {"stash:files": files}, "_links": {}})
+        return _Resp({"versionNumber": version,
+                      "_links": {"stash:version": {"href": "/api/v2/versions/77"}}})
+    monkeypatch.setattr(dryad_mod, "get", fake_get)
+    return calls
+
+
+def _dryad_file(path="a.csv", digest="abc", digest_type="md5"):
+    return {"path": path, "digest": digest, "digestType": digest_type,
+            "_links": {"stash:download": {"href": f"/api/v2/files/1/download/{path}"}}}
+
+
 def test_dryad_encodes_the_doi_into_the_dataset_endpoint(tmp_path, monkeypatch):
+    calls = _dryad_api(monkeypatch, [_dryad_file()])
     seen: list = []
     _stub_download(dryad_mod, monkeypatch, record=seen)
     res = dryad_mod.DryadFetcher().fetch("https://datadryad.org/stash/dataset/doi:10.5061/dryad.abc123",
                                          tmp_path / "d")
-    assert "doi%3A10.5061%2Fdryad.abc123" in seen[0][0]
+    assert "doi%3A10.5061%2Fdryad.abc123" in calls[0]
     assert res.pin.kind == "version_doi" and res.pin.value == "10.5061/dryad.abc123"
     assert any("latest published version" in w for w in res.warnings)
+    assert res.metadata["version"] == 3 and res.metadata["version_id"] == "77"
+
+
+def test_dryad_verifies_the_digest_dryad_records(tmp_path, monkeypatch):
+    """A Dryad DOI names the dataset, not its bytes. The per-file digest is the
+    evidence, so it is passed to the download and only a verified set counts."""
+    _dryad_api(monkeypatch, [_dryad_file(digest="deadbeef", digest_type="sha-256")])
+    seen: list = []
+    _stub_download(dryad_mod, monkeypatch, record=seen, note="checksum verified")
+    res = dryad_mod.DryadFetcher().fetch("10.5061/dryad.abc123", tmp_path / "d")
+    assert seen[0][2]["expected_digest"] == ("sha256", "deadbeef")
+    assert res.checksum_verified is True
+
+
+def test_dryad_unverifiable_files_do_not_verify_the_deposit(tmp_path, monkeypatch):
+    f = _dryad_file()
+    f.pop("digest")
+    _dryad_api(monkeypatch, [f])
+    _stub_download(dryad_mod, monkeypatch, note="downloaded (no checksum provided)")
+    res = dryad_mod.DryadFetcher().fetch("10.5061/dryad.abc123", tmp_path / "d")
+    assert res.checksum_verified is False
 
 
 def test_dryad_download_failure_is_an_error_not_an_empty_success(tmp_path, monkeypatch):
+    _dryad_api(monkeypatch, [_dryad_file()])
     _stub_download(dryad_mod, monkeypatch, ok=False, note="404")
     with pytest.raises(FetchError, match="Dryad download failed"):
         dryad_mod.DryadFetcher().fetch("10.5061/dryad.abc123", tmp_path / "d")
@@ -167,24 +209,86 @@ def test_dryad_download_failure_is_an_error_not_an_empty_success(tmp_path, monke
 
 # --- Dataverse --------------------------------------------------------------
 
+def _dv_api(monkeypatch, *, files=None, version_state=(1, 0)):
+    """The native API's dataset-version record, plus doi.org's handle answer."""
+    seen_get: list = []
+    entry = {"label": "a.csv", "dataFile": {"id": 5, "checksum": {"type": "MD5", "value": "abc"}}}
+
+    def fake_get_json(url, **kw):
+        seen_get.append((url, kw))
+        return {"data": {"versionNumber": version_state[0], "versionMinorNumber": version_state[1],
+                         "files": [entry] if files is None else files}}
+    monkeypatch.setattr(dv_mod, "get_json", fake_get_json)
+    return seen_get
+
+
 def test_dataverse_downloads_from_the_host_in_the_reference(tmp_path, monkeypatch):
     """Any institution can run a Dataverse; hardcoding Harvard would fetch the
     wrong dataset (or nothing) for every other install."""
+    seen_get = _dv_api(monkeypatch)
+    monkeypatch.setattr(dv_mod, "assert_safe_url", lambda url: None)
+    monkeypatch.setattr(dv_mod, "resolve_doi", lambda doi: "https://darus.uni-stuttgart.de/dataset.xhtml")
     seen: list = []
-    _stub_download(dv_mod, monkeypatch, record=seen)
+    _stub_download(dv_mod, monkeypatch, record=seen, note="checksum verified")
     res = dv_mod.DataverseFetcher().fetch(
         "https://darus.uni-stuttgart.de/dataset.xhtml?persistentId=doi:10.18419/darus-1", tmp_path / "d")
-    assert seen[0][0].startswith("https://darus.uni-stuttgart.de/api/access/dataset/")
+    assert seen_get[0][0].startswith("https://darus.uni-stuttgart.de/api/datasets/")
+    assert seen[0][0].startswith("https://darus.uni-stuttgart.de/api/access/datafile/5")
+    assert seen[0][2]["restrict_public"] is True             # every request is SSRF-guarded
+    assert seen[0][2]["expected_digest"] == ("md5", "abc")
     assert res.pin.kind == "version_doi" and res.pin.value == "10.18419/darus-1"
+    assert res.checksum_verified is True
+
+
+def test_dataverse_a_doi_that_points_elsewhere_is_not_an_archival_pin(tmp_path, monkeypatch):
+    """`dataverse.<anything>` can serve its own bytes and verify them against its
+    own API under someone else's DOI. The pin is only archival when doi.org says
+    the DOI belongs to THIS install."""
+    _dv_api(monkeypatch)
+    monkeypatch.setattr(dv_mod, "assert_safe_url", lambda url: None)
+    monkeypatch.setattr(dv_mod, "resolve_doi", lambda doi: "https://elsewhere.example/dataset")
+    _stub_download(dv_mod, monkeypatch)
+    res = dv_mod.DataverseFetcher().fetch(
+        "https://dataverse.evil.example/dataset.xhtml?persistentId=doi:10.18419/darus-1", tmp_path / "d")
+    assert res.pin.kind == "none"
+    assert any("does not resolve to" in w for w in res.warnings)
 
 
 def test_dataverse_a_handle_pid_is_not_claimed_as_a_doi(tmp_path, monkeypatch):
     """Pin kinds drive the Available badge, so a Handle must not be filed as a DOI."""
+    _dv_api(monkeypatch)
+    monkeypatch.setattr(dv_mod, "assert_safe_url", lambda url: None)
     _stub_download(dv_mod, monkeypatch)
     res = dv_mod.DataverseFetcher().fetch(
         "https://data.dataverse.org/dataset.xhtml?persistentId=hdl:1902.1/XYZ", tmp_path / "d")
     assert res.pin.kind == "none"
     assert res.pin.value == "hdl:1902.1/XYZ"
+
+
+def test_dataverse_honours_an_explicit_version(tmp_path, monkeypatch):
+    seen_get = _dv_api(monkeypatch, version_state=(2, 1))
+    monkeypatch.setattr(dv_mod, "assert_safe_url", lambda url: None)
+    monkeypatch.setattr(dv_mod, "resolve_doi", lambda doi: None)
+    _stub_download(dv_mod, monkeypatch)
+    res = dv_mod.DataverseFetcher().fetch(
+        "https://data.dataverse.org/dataset.xhtml?persistentId=doi:10.7910/DVN/ABC123&version=2.1", tmp_path / "d")
+    assert "/versions/2.1" in seen_get[0][0]
+    assert res.metadata["version"] == "2.1"
+
+
+def test_dataverse_refuses_an_internal_host_before_any_request(tmp_path, monkeypatch):
+    seen_get = _dv_api(monkeypatch)
+    with pytest.raises(FetchError):
+        dv_mod.DataverseFetcher().fetch(
+            "http://dataverse@169.254.169.254/dataset.xhtml?persistentId=doi:10.7/x", tmp_path / "d")
+    assert not seen_get
+
+
+def test_dataverse_does_not_match_a_userinfo_or_suffix_trick():
+    f = dv_mod.DataverseFetcher(extra_hosts=("darus.uni-stuttgart.de",))
+    assert not f.can_handle("http://dataverse@169.254.169.254/dataset.xhtml?persistentId=doi:10.7/x")
+    assert not f.can_handle("https://darus.uni-stuttgart.de.evil.example/dataset.xhtml?persistentId=doi:1/x")
+    assert f.can_handle("https://darus.uni-stuttgart.de/dataset.xhtml?persistentId=doi:10.7/x")
 
 
 # --- Software Heritage ------------------------------------------------------
@@ -199,16 +303,112 @@ def test_swh_pins_the_swhid_even_when_the_bytes_cannot_be_cooked(tmp_path, monke
     res = swh_mod.SoftwareHeritageFetcher().fetch(swhid, tmp_path / "d")
     assert res.pin.kind == "swhid" and res.pin.value == swhid
     assert any("cooking in progress" in w for w in res.warnings)
+    assert res.checksum_verified is False
 
 
-def test_swh_a_non_directory_swhid_is_pinned_but_not_retrieved(tmp_path, monkeypatch):
+def test_swh_a_snapshot_swhid_is_pinned_but_not_retrieved(tmp_path, monkeypatch):
     called = []
     monkeypatch.setattr(swh_mod, "post", lambda u, **k: called.append(u))
-    swhid = "swh:1:rev:" + "b" * 40
+    swhid = "swh:1:snp:" + "b" * 40
     res = swh_mod.SoftwareHeritageFetcher().fetch(swhid, tmp_path / "d")
     assert res.pin.value == swhid
-    assert not called, "a revision SWHID was sent to the flat-directory vault"
+    assert not called, "a snapshot SWHID was sent to the flat-directory vault"
     assert any("not a directory SWHID" in w for w in res.warnings)
+
+
+def test_swh_a_revision_is_resolved_to_its_directory_before_the_vault(tmp_path, monkeypatch):
+    directory = "c" * 40
+    posted: list = []
+    monkeypatch.setattr(swh_mod, "get", lambda u, **k: _Resp({"directory": directory}))
+    monkeypatch.setattr(swh_mod, "post", lambda u, **k: posted.append(u) or _Resp({}))
+    monkeypatch.setattr(swh_mod.time, "sleep", lambda s: None)
+    res = swh_mod.SoftwareHeritageFetcher().fetch("swh:1:rev:" + "b" * 40, tmp_path / "d")
+    assert posted and f"swh:1:dir:{directory}" in posted[0]
+    assert res.metadata["directory"] == f"swh:1:dir:{directory}"
+    assert any("revision object itself was not re-hashed" in w for w in res.warnings)
+
+
+def test_swh_an_unresolvable_revision_keeps_its_pin_and_says_why(tmp_path, monkeypatch):
+    monkeypatch.setattr(swh_mod, "get", lambda u, **k: (_ for _ in ()).throw(RuntimeError("503")))
+    posted: list = []
+    monkeypatch.setattr(swh_mod, "post", lambda u, **k: posted.append(u))
+    res = swh_mod.SoftwareHeritageFetcher().fetch("swh:1:rev:" + "b" * 40, tmp_path / "d")
+    assert res.pin.kind == "swhid" and not posted
+    assert any("could not resolve" in w for w in res.warnings)
+
+
+def _fake_swh_model(monkeypatch, computed):
+    """Stand-in for swh.model.from_disk, so the tests need neither the package nor
+    the network."""
+    import sys
+    import types
+
+    class _Node:
+        def swhid(self):
+            return computed
+
+    class _Directory:
+        @staticmethod
+        def from_disk(path, max_content_length=None):
+            return _Node()
+
+    mod = types.ModuleType("swh.model.from_disk")
+    mod.Directory = _Directory
+    for name in ("swh", "swh.model"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "swh.model.from_disk", mod)
+
+
+def test_swh_verification_compares_the_tree_hash_to_the_swhid(tmp_path, monkeypatch):
+    want = "swh:1:dir:" + "a" * 40
+    root = tmp_path / "tree"
+    root.mkdir()
+    meta: dict = {}
+    _fake_swh_model(monkeypatch, want)
+    assert swh_mod.verify_directory(root, want, [], meta) is True
+    assert meta["swhid_verification"] == "verified"
+
+    warnings: list[str] = []
+    _fake_swh_model(monkeypatch, "swh:1:dir:" + "f" * 40)
+    assert swh_mod.verify_directory(root, want, warnings, meta) is False
+    assert meta["swhid_verification"] == "mismatch"
+    assert any("SWHID MISMATCH" in w for w in warnings)
+
+
+def test_swh_verification_agrees_with_gits_own_tree_hash(tmp_path):
+    """A SWHID directory id is, by specification, the git tree hash of the
+    directory. Git is the independent oracle: the reference implementation
+    (`reprobe[swh]`) must reproduce what git says, and disagree with anything else."""
+    pytest.importorskip("swh.model.from_disk")
+    import shutil
+
+    from reprobe.fetch.base import run_git
+
+    repo = tmp_path / "repo"
+    (repo / "sub").mkdir(parents=True)
+    (repo / "a.txt").write_text("hi\n", encoding="utf-8")
+    (repo / "sub" / "b.py").write_text("x = 1\n", encoding="utf-8")
+    assert run_git(["init", "-q", "."], cwd=repo).returncode == 0
+    assert run_git(["-c", "core.autocrlf=false", "add", "-A"], cwd=repo).returncode == 0
+    tree = run_git(["write-tree"], cwd=repo).stdout.strip()
+    assert len(tree) == 40
+    clean = tmp_path / "clean"
+    shutil.copytree(repo, clean, ignore=shutil.ignore_patterns(".git"))
+
+    meta: dict = {}
+    assert swh_mod.verify_directory(clean, f"swh:1:dir:{tree}", [], meta) is True
+    assert meta["swhid_verification"] == "verified"
+    assert swh_mod.verify_directory(clean, "swh:1:dir:" + "0" * 40, [], {}) is False
+
+
+def test_swh_without_the_optional_package_never_claims_verification(tmp_path, monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "swh.model.from_disk", None)      # import raises ImportError
+    warnings: list[str] = []
+    meta: dict = {}
+    assert swh_mod.verify_directory(tmp_path, "swh:1:dir:" + "a" * 40, warnings, meta) is False
+    assert "reprobe[swh]" in meta["swhid_verification"]
+    assert any("NOT checked" in w for w in warnings)
 
 
 def test_swh_vault_error_is_a_warning_not_a_failed_fetch(tmp_path, monkeypatch):

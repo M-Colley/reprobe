@@ -84,7 +84,7 @@ check**. Everything else is fixed.
   The ceiling is `limits.yaml:max_timeout_s` (6 h) — raise that if you genuinely
   need more, since it is policy. The report records any non-default budget,
   because a run with one is not comparable to a default run. Before reaching for
-  more time, check the collected `*.executed.ipynb` under `out/artifacts/`: it is
+  more time, check the collected `*.executed.ipynb` under `report/artifacts/`: it is
   checkpointed cell by cell, so the last completed cell is the stall point, and
   a notebook stuck on a network call will never finish under `--network none`.
 - **A report warns the artifact declares NO dependency manifest.** That is a
@@ -92,8 +92,29 @@ check**. Everything else is fixed.
   library its code imports came from reprobe's base image, so a passing step does
   not show the artifact specifies its own environment. Worth raising with authors
   even when every step is green.
+- **A report says entries were "NOT applied" from a dependency file.** The
+  install phase has network access, so it only takes plain package requirements
+  from public indexes. Editable installs (`-e .`), `git+`/URL requirements,
+  `--index-url`, conda channels outside `install.conda_channels` in `pins.yaml`,
+  and `renv.lock` packages sourced from GitHub/a URL are dropped and named, with
+  the reason. If the analysis then fails on a missing package, that is the
+  artifact depending on something that cannot be installed safely — say so to the
+  authors. To admit another conda channel for your institution, add it to
+  `install.conda_channels` (a config change, not a code change).
 - **Interrupted batch?** Re-run with `--resume`: finished reports are reused
-  as-is; only `fetch-failed` / `infra-error` submissions are retried.
+  as-is; only `fetch-failed` / `infra-error` submissions are retried. A report
+  is only reused if it was made by the same harness version, the same config
+  files, and the same run options as this batch — and never if it was a
+  `--dry-run`. Change `pins.yaml` mid-season and everything re-runs.
+- **A step says `resource-limit`.** The sandbox's budget ran out — memory
+  (docker OOM-killed it at `limits.yaml: memory`), console output (`log_max`) or
+  disk under `/work` (`work_max`). Like a timeout, that is not a defect of the
+  analysis: raise the cap for that submission and re-run.
+- **Linux hosts:** containers run as *your* uid:gid (`limits.yaml:
+  map_host_user`), so the bind-mounted run dir is writable and the host can
+  delete what a step wrote. It is never mapped to root. With **rootless Docker**
+  the mapping is skipped (container uids land in a subuid range); make the
+  workroot writable by that range, or run rootful.
 - **Author reply:** every `report.md` ends its badge section with a
   copy-pasteable **Feedback for authors** block — paste it into your decision
   email instead of composing from scratch.

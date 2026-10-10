@@ -98,13 +98,62 @@ def _raw(exit_code=0, **kw):
     return RawRunOutput(exit_code=exit_code, duration_s=0.1, **kw)
 
 
-@pytest.mark.parametrize("code", [125, 126, 127])
+@pytest.mark.parametrize("code", [126, 127])
 def test_launcher_exit_codes_are_harness_errors_not_author_fails(tmp_path, code):
     ctx = _ctx(tmp_path, RunStep(target="run.py", kind="python"))
     res = PythonScriptRunner().interpret(_raw(exit_code=code), ctx)
     assert res.status == "error"
     assert "could not start" in res.diagnostics["harness_error"]
     assert "log_tail" in res.diagnostics
+
+
+def test_125_is_the_harness_only_when_the_docker_cli_says_so(tmp_path):
+    ctx = _ctx(tmp_path, RunStep(target="run.py", kind="python"))
+    cli = tmp_path / "cli.log"
+    cli.write_text("$ docker run ...\n\ndocker: Error response from daemon: invalid mount\n",
+                   encoding="utf-8")
+    res = PythonScriptRunner().interpret(_raw(exit_code=125, log_path=str(cli)), ctx)
+    assert res.status == "error" and "could not start" in res.diagnostics["harness_error"]
+
+    # The author's own sys.exit(125): docker passes it through, says nothing itself.
+    own = tmp_path / "own.log"
+    own.write_text("$ docker run ...\n\nTraceback ...\nSystemExit: 125\n", encoding="utf-8")
+    res = PythonScriptRunner().interpret(_raw(exit_code=125, log_path=str(own)), ctx)
+    assert res.status == "fail"
+
+
+def test_oom_kill_and_watchdog_limits_are_resource_limits_not_failures(tmp_path):
+    ctx = _ctx(tmp_path, RunStep(target="fit.py", kind="python"))
+    res = PythonScriptRunner().interpret(_raw(exit_code=137, oom_killed=True), ctx)
+    assert res.status == "resource-limit"
+    assert res.diagnostics["limit"] == "memory" and res.diagnostics["cap"] == "8g"
+    res = PythonScriptRunner().interpret(_raw(exit_code=None, limit_exceeded="output"), ctx)
+    assert res.status == "resource-limit" and res.diagnostics["limit"] == "output"
+    # A plain 137 with no OOM flag is still the artifact's (something it ran killed it).
+    res = PythonScriptRunner().interpret(_raw(exit_code=137, oom_killed=False), ctx)
+    assert res.status == "fail"
+
+
+def test_dry_run_is_skipped_not_passed(tmp_path):
+    ctx = _ctx(tmp_path, RunStep(target="run.py", kind="python"))
+    res = PythonScriptRunner().interpret(
+        RawRunOutput(exit_code=None, duration_s=0.0, dry_run=True, argv_redacted=["docker", "run"]), ctx)
+    assert res.status == "skipped" and res.executed is False and not res.claims
+    assert "dry run" in res.diagnostics["reason"]
+
+
+@pytest.mark.parametrize("declared, produced, met", [
+    ("./results/out.csv", "results/out.csv", True),      # ./ prefix
+    ("results//out.csv", "results/out.csv", True),       # doubled slash
+    ("figures/*.png", "figures/fig1.png", True),         # glob
+    ("results/", "results/sub/table.csv", True),         # directory
+    ("results", "results/table.csv", True),              # directory, no slash
+    ("results/out.csv", "results/out.csv.bak", False),   # prefix is not a match
+    ("figures/*.png", "figures/fig1.pdf", False),
+])
+def test_declared_outputs_match_by_path_not_by_string(declared, produced, met):
+    from reprobe.runners.base import match_expected
+    assert (match_expected([declared], [produced]) == [declared]) is met
 
 
 def test_timeout_keeps_the_log_tail_and_the_partial_output(tmp_path):

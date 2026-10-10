@@ -55,7 +55,9 @@ anything. `reprobe --no-llm` is fully functional and deterministic.
 > - **macOS** — Docker Desktop (or an equivalent daemon) must be running.
 
 ```bash
-pip install -e .            # Python 3.11+; needs Docker available for runs
+pip install -e .            # Python 3.11.4+; needs Docker available for runs
+pip install -e '.[paper,swh]'   # optional: read a paper PDF (results-vs-paper), and verify
+                                # Software Heritage deposits against their SWHID
 reprobe pull               # fetch the pinned base images (published, no login needed)
 reprobe doctor --smoke     # self-check: config, Docker, base images, Ollama, sandbox
 ```
@@ -124,12 +126,20 @@ still follows the primary source's pin alone. Authors can declare the same thing
 permanently with `data_sources:` in the manifest; when neither is present and the
 README links a data repository, the report says so and prints the command.
 
-**Declared environments are built, not assumed.** A `requirements.txt` is
-pip-installed and an `environment.yml` is built with micromamba (the pinned base
-*is* a micromamba image) during the sandboxed **install phase**; the analysis then
-runs with that interpreter, still under `--network none`. The report states what
-building it does *not* reproduce — conda `activate` hooks, environment variables,
-and exact versions, since channels resolve fresh with no lock file.
+**Declared environments are built, not assumed — and not obeyed blindly.** A
+`requirements.txt` is pip-installed and an `environment.yml` is built with
+micromamba (the pinned base *is* a micromamba image) during the sandboxed
+**install phase**; the analysis then runs with that interpreter, still under
+`--network none`. That phase is the only one with network, so it is not handed
+the artifact's files as written: they are reduced to plain package requirements
+(editable installs, `git+`/URL requirements, custom indexes, non-allow-listed
+conda channels and non-CRAN `renv.lock` sources are dropped), `install.R` is never
+executed (the packages it names are read and installed from the pinned snapshot),
+and every dropped line is named in the report with its reason. Packages reprobe
+*inferred* from imports are installed as wheels only. The report states what
+building the environment does *not* reproduce — conda `activate` hooks,
+environment variables, and exact versions, since channels resolve fresh with no
+lock file.
 
 Missing R packages are handled automatically: reprobe detects the CRAN packages a
 repo needs (`library()`/`require()`/`pkg::` and `DESCRIPTION`) and installs the
@@ -138,8 +148,20 @@ CRAN-available ones — pinned to a dated snapshot (`r.cran_snapshot` in
 analysis still runs with `--network none`. Packages not on CRAN are reported, not
 faked.
 
-Outputs land in `work/<submission>/report/`: `report.json` (machine-readable),
+Outputs land in `work/<submission>/report/`: `report.json` (machine-readable,
+validated against [report.schema.json](src/reprobe/schemas/report.schema.json)),
 `report.md`, and a single-file `report.html`.
+
+The **verdict** says what the run showed, and whose failure a failure was:
+
+| verdict | meaning |
+|---|---|
+| `runs` | every executed step passed; no planned step went unexecuted |
+| `runs-with-warnings` | passed, but something needs a human: a declared output never appeared, or a planned step had no runner |
+| `runs-with-failures` | the artifact's code failed — or its own declared environment did not install |
+| `resource-limit` | a step ran out of the sandbox's budget (time, memory, console output, disk). **Not** a failure of the code: re-run with a larger budget |
+| `infra-error` | the harness failed (daemon lost, image missing, an install reprobe chose did not complete) — no statement about the artifact |
+| `not-run` | `--no-run` or `--dry-run`: nothing executed. A dry-run report is labelled as one and never resumed |
 
 ## What the badges mean here
 
@@ -147,7 +169,7 @@ Outputs land in `work/<submission>/report/`: `report.json` (machine-readable),
 |---|---|
 | **ACM Artifact Available** | *Granted automatically* — but only on an **archival** persistent ID (Zenodo version DOI, Software Heritage SWHID). A bare GitHub commit is reproducibly pinned yet not archival, so it becomes a *candidate* with a "deposit this in Zenodo" note. No code is executed for this badge. |
 | **ACM Artifacts Evaluated — Functional** | *Proposed as a candidate* for a human when declared steps pass and produce a declared output. Never auto-granted. Opt-in. |
-| **ACM Results Reproduced** | Not auto-granted; reprobe surfaces produced artifacts to help the human reviewer. |
+| **ACM Results Reproduced** | Not auto-granted. As evidence for the human reviewer, every committed output the run regenerated is compared with the authors' copy — byte-identical, *equivalent* within a numeric tolerance (`badges.yaml: results_reproduced.rtol/atol`), or *differs*, with the largest difference and where it is. |
 | **FAIR** | Scored from fetch metadata (persistent ID, license, formats, manifest). |
 
 The cardinal rule: **the harness grants only *Available* automatically and

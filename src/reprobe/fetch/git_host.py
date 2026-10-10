@@ -12,7 +12,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ..models import FetchResult, Pin
-from .base import _MAX_LFS_TOTAL_BYTES, FetchError, assert_safe_url, get, run_git
+from .base import (
+    _MAX_LFS_TOTAL_BYTES,
+    FetchError,
+    _resolve_public,
+    assert_safe_url,
+    probe_status,
+    run_git,
+)
 
 _HOSTS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org")
 
@@ -43,11 +50,11 @@ def _clone_failure(url: str, stderr: str) -> str:
 def _public_probe(url: str) -> str:
     """What an unauthenticated GET sees. Best-effort: this runs on a path that has
     already failed, so it must never raise and never be the reason a report is
-    lost. ``assert_safe_url`` keeps the SSRF guard on a submitter-supplied URL."""
+    lost. ``probe_status`` SSRF-checks every redirect hop of a submitter-supplied
+    URL, so the status echoed here is never an internal service's."""
     probe = url[:-4] if url.endswith(".git") else url
     try:
-        assert_safe_url(probe)
-        return f"unauthenticated GET returned HTTP {get(probe, timeout=20).status_code}"
+        return f"unauthenticated GET returned HTTP {probe_status(probe, timeout=20)}"
     except Exception as e:                       # noqa: BLE001 - diagnosis only
         return f"unauthenticated check could not complete: {type(e).__name__}"
 
@@ -194,6 +201,26 @@ def _reject_unsafe_clone_url(url: str) -> None:
             f"refusing git ref {url!r}: only http(s)://, git://, ssh:// or git@host:path URLs are cloned")
 
 
+def _untrusted_clone_config(url: str) -> list[str]:
+    """``git -c`` options that hold an author-chosen clone to the public host
+    ``check_untrusted_ref`` approved.
+
+    git resolves and connects by itself, so the Python-side DNS pin does not
+    reach it. Instead: refuse redirects (a public host could 302 git to an
+    internal one), and hand libcurl the addresses we validated
+    (``http.curloptResolve``, git >= 2.37; older git ignores the key and keeps
+    only the redirect fence) so the name cannot rebind between check and clone."""
+    p = urlparse(url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        raise FetchError(f"refusing author-declared git source {url!r}: only http(s) is cloned")
+    port = p.port or (443 if p.scheme == "https" else 80)
+    infos = _resolve_public(p.hostname, port)         # raises on any internal address
+    addrs = sorted({str(ai[4][0]) for ai in infos})
+    pinned = ",".join(f"[{a}]" if ":" in a else a for a in addrs)
+    return ["-c", "http.followRedirects=false",
+            "-c", f"http.curloptResolve={p.hostname}:{port}:{pinned}"]
+
+
 def _reject_unsafe_ref(want_ref: str) -> None:
     """A checkout ref must never look like an option (argument injection into
     ``git checkout``); legitimate branch/tag/commit refs never start with '-'."""
@@ -226,7 +253,8 @@ class GitHostFetcher:
             return False
         return any(h in r for h in self.hosts) and r.startswith(("http://", "https://", "git@"))
 
-    def fetch(self, ref: str, dest: Path, *, allow_lfs: bool = False) -> FetchResult:
+    def fetch(self, ref: str, dest: Path, *, allow_lfs: bool = False,
+              untrusted: bool = False) -> FetchResult:
         url, want_ref = ref, None
         m = re.match(r"^(.*?)(?:@([^@/]+))$", ref)
         # only treat trailing @ref as a pin when it's not part of an scp-like git@ URL
@@ -239,10 +267,11 @@ class GitHostFetcher:
         _reject_unsafe_clone_url(url)
         if want_ref:
             _reject_unsafe_ref(want_ref)
+        guard = _untrusted_clone_config(url) if untrusted else []
 
         dest.mkdir(parents=True, exist_ok=True)
         # `--` ends option parsing so a URL/dest can never be read as a flag.
-        clone = run_git(["clone", "--quiet", "--", url, str(dest)])
+        clone = run_git([*guard, "clone", "--quiet", "--", url, str(dest)])
         if clone.returncode != 0:
             raise FetchError(_clone_failure(url, clone.stderr))
 

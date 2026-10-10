@@ -12,13 +12,16 @@ those, ``interpret(None, ctx)`` does the work.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import os
+import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
 from ..config import Config
+from ..docker_exec import docker_cli_failed
 from ..models import (
     Capabilities,
     ContainerSpec,
@@ -90,10 +93,67 @@ def snapshot(rundir: Path) -> dict[str, float]:
         for f in files:
             p = Path(root) / f
             try:
-                idx[p.relative_to(rundir).as_posix()] = p.stat().st_mtime  # forward slashes, cross-platform
+                # lstat: /work is writable by author code, which can plant a link
+                # to any host path; following it would stat (and later copy) the
+                # host file. A link is recorded as itself and never collected.
+                idx[p.relative_to(rundir).as_posix()] = p.lstat().st_mtime  # forward slashes, cross-platform
             except OSError:
                 pass
     return idx
+
+
+def _enforced_timeout(limits: dict) -> int:
+    """The wall-clock budget docker_exec actually enforces: the request, clamped to
+    ``max_timeout_s``. Reporting the request said "stopped at 99999s" for a step
+    that was stopped at the 21600s ceiling."""
+    default = int(limits.get("timeout_s", 1800))
+    return max(1, min(default, int(limits.get("max_timeout_s") or default)))
+
+
+def _norm_rel(p: str) -> str:
+    """A declared output path in the form snapshot() records: POSIX, relative,
+    no ./ or // noise. "./results/out.csv" and "results//out.csv" are the file
+    the run wrote as "results/out.csv" — matching only exact strings reported it
+    as never produced."""
+    p = posixpath.normpath(str(p).replace("\\", "/"))
+    return "" if p in (".", "") else p.lstrip("/")
+
+
+def match_expected(expected: list[str], produced: list[str]) -> list[str]:
+    """The declared outputs (as declared) that this run produced: by normalised
+    path, by glob (``figures/*.png``), or — for a directory (``results/``) — by any
+    file produced under it."""
+    return [exp for exp in expected if _matching(exp, produced)]
+
+
+def _matching(exp: str, produced: list[str]) -> list[str]:
+    """The produced paths that satisfy one declared output: the exact file, any file
+    under it (a directory), or — only if neither exists — a glob. A literal comes
+    first because ``data[1].csv`` is a legal file name, not a character class."""
+    n = _norm_rel(exp)
+    if not n:
+        return []
+    exact = [q for q in produced if q == n or q.startswith(n + "/")]
+    if exact:
+        return exact
+    if any(ch in n for ch in "*?["):
+        return [q for q in produced if fnmatch.fnmatchcase(q, n)]
+    return []
+
+
+def expand_expected(expected_met: list[str], produced: list[str]) -> list[str]:
+    """The concrete files behind the declared outputs a step met — a directory or a
+    glob stands for the files this run produced under it. Collection and the
+    paper comparison need files, not the pattern the author wrote."""
+    out: list[str] = []
+    for exp in expected_met:
+        # an entry in expected_met was verified as produced; if the produced list does
+        # not say which files stand behind it, a literal path stands for itself
+        hits = _matching(exp, produced) or ([_norm_rel(exp)] if not any(c in exp for c in "*?") else [])
+        for q in hits:
+            if q and q not in out:
+                out.append(q)
+    return out
 
 
 class BaseRunner:
@@ -139,13 +199,22 @@ class BaseRunner:
         # An expected output counts ONLY if THIS run created or modified it — a
         # committed-but-unchanged output file does not count (it would otherwise
         # falsely inflate the Functional signal for repos that commit their figures).
-        produced_set = set(produced)
-        return [exp for exp in ctx.step.expected_outputs if exp in produced_set]
+        return match_expected(list(ctx.step.expected_outputs), produced)
 
     def interpret(self, raw: Optional[RawRunOutput], ctx: RunContext) -> RunResult:
         caps = self.capabilities()
         if raw is None:                       # host-only runners override this
             raise NotImplementedError(f"{self.id} returned no ContainerSpec but did not override interpret()")
+
+        if raw.dry_run:
+            # The argv was built and checked; nothing was launched. Saying anything
+            # else — even "pass" — puts a fabricated result into a report.
+            return RunResult(
+                runner=self.id, target=ctx.step.target, status="skipped", executed=False,
+                diagnostics={"reason": "dry run — the container was not launched",
+                             "argv": raw.argv_redacted},
+                not_verified=list(caps.cannot_verify),
+            )
 
         if raw.error:
             # docker_exec sets `error` only for conditions it established itself
@@ -177,15 +246,31 @@ class BaseRunner:
                 runner=self.id, target=ctx.step.target, status="timeout",
                 exit_code=raw.exit_code, duration_s=raw.duration_s, log_path=raw.log_path,
                 artifacts=self._produced(ctx),
-                diagnostics={"timeout_s": ctx.limits.get("timeout_s"),
+                diagnostics={"timeout_s": _enforced_timeout(ctx.limits),
                              "log_tail": _tail(raw.log_path)},
                 not_verified=list(caps.cannot_verify),
             )
-        if raw.exit_code in (125, 126, 127):
-            # docker-launcher reserved codes: 125 = docker run itself failed,
-            # 126/127 = command not executable/found. Blame the harness/image,
-            # not the author's code (126/127 CAN also come from an author
-            # script invoking a missing binary — hence the hedged wording).
+        if raw.limit_exceeded or (raw.oom_killed and raw.exit_code != 0):
+            # The sandbox's budget ran out, like a timeout: the kernel killed the
+            # step at the --memory cap, or the watchdog stopped it for console
+            # output / disk use. An analysis that needs 20 GB is not a broken
+            # analysis, so this is reported apart from "fail".
+            which = raw.limit_exceeded or "memory"
+            cap = {"memory": ctx.limits.get("memory"), "output": ctx.limits.get("log_max", "1g"),
+                   "disk": ctx.limits.get("work_max", "60g")}.get(which)
+            return RunResult(
+                runner=self.id, target=ctx.step.target, status="resource-limit",
+                exit_code=raw.exit_code, duration_s=raw.duration_s, log_path=raw.log_path,
+                artifacts=self._produced(ctx),
+                diagnostics={"limit": which, "cap": cap, "log_tail": _tail(raw.log_path)},
+                not_verified=list(caps.cannot_verify),
+            )
+        if raw.exit_code in (126, 127) or (raw.exit_code == 125 and docker_cli_failed(raw.log_path)):
+            # docker-launcher reserved codes: 125 = docker run itself failed (only
+            # when the CLI says so — an artifact may exit 125 itself, and docker
+            # passes that through), 126/127 = command not executable/found. Blame
+            # the harness/image, not the author's code (126/127 CAN also come from
+            # an author script invoking a missing binary — hence the hedged wording).
             return RunResult(
                 runner=self.id, target=ctx.step.target, status="error",
                 exit_code=raw.exit_code, duration_s=raw.duration_s, log_path=raw.log_path,

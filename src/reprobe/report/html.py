@@ -28,6 +28,8 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 </style></head><body><div class="wrap">
 <h1>reprobe report — {{ r.submission_id }}</h1>
 <div class="muted">{{ r.harness_version }} · {{ r.timestamp }}</div>
+{% if r.run_mode == 'dry-run' %}<div class="card nv">⚠️ <b>Dry run</b> — no container was launched (any that were planned had their sandbox flags checked). Nothing here is a result about the artifact's code.</div>
+{% elif r.run_mode == 'no-run' %}<div class="card nv">ℹ️ <b>No-run</b> — fetched and inspected only; no code was executed.</div>{% endif %}
 
 <div class="card"><b>Source</b><br>
  <code>{{ r.source.input }}</code>{% if r.source.resolved_type %} → {{ r.source.resolved_type }}
@@ -84,11 +86,14 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  <table><tr><th>Target</th><th>Runner</th><th>Status</th><th>Time</th><th>Verified / not verified</th></tr>
  {% for s in r.steps %}
  <tr><td><code>{{ s.target }}</code></td><td>{{ s.runner }}{% if s.tier_reached %}<br><span class="muted">{{ s.tier_reached }}</span>{% endif %}</td>
- <td class="{{ {'pass':'pass','fail':'fail','error':'fail','timeout':'fail','partial':'partial','skipped':'partial'}.get(s.status,'') }}">{{ s.status }}</td>
+ <td class="{{ {'pass':'pass','fail':'fail','error':'fail','timeout':'partial','resource-limit':'partial','partial':'partial','skipped':'partial'}.get(s.status,'') }}">{{ s.status }}</td>
  <td>{{ s.duration_s }}s</td>
  <td>{% if s.diagnostics.harness_error %}<div class="nv">⚠️ <b>harness error</b> — no statement about the artifact: {{ s.diagnostics.harness_error }}</div>{% endif %}
+ {% if s.status == 'resource-limit' %}<div class="nv">⏱️ stopped at the sandbox's {{ s.diagnostics.limit }} cap ({{ s.diagnostics.cap }}) — the budget ran out; this says nothing about whether the analysis is correct</div>
+ {% elif s.status == 'timeout' %}<div class="nv">⏱️ stopped at the {{ s.diagnostics.timeout_s }}s time budget — the budget ran out; this says nothing about whether the analysis is correct</div>{% endif %}
+ {% if s.status == 'skipped' and s.diagnostics.reason %}<div class="muted">not run: {{ s.diagnostics.reason }}</div>{% endif %}
  {% for c in s.claims %}✓ {{ c }}<br>{% endfor %}{% for c in s.not_verified %}<span class="muted">✗ {{ c }}</span><br>{% endfor %}
- {% if s.diagnostics.llm_advisory %}<div class="adv" style="margin-top:6px">💡 <b>diagnosis (advisory):</b> {{ s.diagnostics.llm_advisory.likely_cause }}{% for f in s.diagnostics.llm_advisory.suggested_fixes %}<br>→ {{ f }}{% endfor %}</div>{% endif %}
+ {% if s.diagnostics.llm_advisory %}<div class="adv" style="margin-top:6px">💡 <b>diagnosis (advisory{% if s.diagnostics.llm_advisory.meets_threshold == false %}; below the confidence threshold — shown, not applied{% endif %}):</b> {{ s.diagnostics.llm_advisory.likely_cause }}{% for f in s.diagnostics.llm_advisory.suggested_fixes %}<br>→ {{ f }}{% endfor %}</div>{% endif %}
  {% if s.diagnostics.harness_diagnosis %}<div class="adv" style="margin-top:6px">🔎 <b>diagnosis (deterministic, not an LLM guess):</b> {{ s.diagnostics.harness_diagnosis.likely_cause }}{% for f in s.diagnostics.harness_diagnosis.suggested_fixes %}<br>→ {{ f }}{% endfor %}</div>{% endif %}
  {#- The evidence, last. Without it a failed step renders as a bare "fail":
      the markdown report has carried the tail all along, and the HTML — the copy
@@ -100,14 +105,25 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  </table>
 </div>
 
+{% if r.results_comparison %}{% set cmp = r.results_comparison %}<div class="card"><b>Regenerated outputs vs the committed ones</b>
+ <div>{{ cmp.summary.headline }}</div>
+ <div class="muted">floats within rtol={{ cmp.rtol }}, atol={{ cmp.atol }}; integers exactly</div>
+ <table><tr><th>File</th><th>Kind</th><th>Result</th><th>Detail</th></tr>
+ {% for x in cmp.files if x.reason != 'over-file-cap' %}<tr><td><code>{{ x.path }}</code></td><td>{{ x.kind }}</td>
+  <td class="{{ {'identical':'pass','equivalent':'pass','differs':'fail'}.get(x.status, 'partial') }}">{{ x.status }}</td><td>{{ x.detail }}</td></tr>{% endfor %}
+ </table>
+ {% set capped = cmp.files | selectattr('reason', 'equalto', 'over-file-cap') | list %}{% if capped %}<div class="muted">…and {{ capped|length }} more file(s) past the per-run file cap, not compared</div>{% endif %}
+ <div class="muted">A difference can come from nondeterminism (unseeded random numbers, thread scheduling, library versions) as well as from an error — a finding to review, not a verdict.</div></div>{% endif %}
+
 {% if r.llm.results_check %}{% set rc = r.llm.results_check %}<div class="card"><b>Results vs the paper</b>
  <div class="muted">{{ rc.ref }} ({{ rc.source }}){% if rc.coverage %} · {{ rc.coverage }}{% endif %}</div>
  {% if rc.status != 'compared' %}<div class="muted">not compared: {{ rc.detail or rc.status }}</div>
  {% else %}
  {% if rc.overall %}<div class="adv">{{ rc.overall }}</div>{% endif %}
+ {% if rc.threshold_note %}<div class="nv">⚠️ {{ rc.threshold_note }} — the mismatches below are not counted as findings</div>{% endif %}
  <table><tr><th>Claim</th><th>Paper</th><th>Reproduced</th><th>Verdict</th></tr>
  {% for c in rc.claims %}<tr><td>{{ c.claim }}</td><td>{{ c.paper_value or '—' }}</td>
-  <td>{{ c.produced_value or '—' }}</td><td>{{ c.verdict }}</td></tr>{% endfor %}</table>
+  <td>{{ c.produced_value or '—' }}{% if c.produced_value_found == false %} <span class="muted">(not in the run output)</span>{% endif %}</td><td>{{ c.verdict }}</td></tr>{% endfor %}</table>
  {% endif %}
  {% for w in rc.warnings %}<div class="muted">⚠️ {{ w }}</div>{% endfor %}
  <div class="muted">LLM-advisory, not a verified fact — it never grants a badge; confirming that

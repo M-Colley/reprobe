@@ -1,5 +1,110 @@
 # Changelog
 
+## Unreleased — the trust boundary, and what a report may claim
+
+Found by reviewing the harness against its own two promises: untrusted author
+input never reaches the trusted host, and a report says only true things.
+
+### The boundary
+
+- **A manifest can no longer pull a host directory into the sandbox.**
+  `data_sources:` in an author's manifest went through the same fetcher registry
+  as the operator's `--data`, whose catch-all local fetcher accepts any existing
+  path — `{source: ~/.ssh}` copied the chair's own directory into a tree whose
+  install phase has network. Author-declared sources are now fetched
+  `untrusted`: no local paths, no `ssh://` / scp-style git (which would clone with
+  the chair's keys), no internal hosts. A refusal is reported as a decision, with
+  the `--data` flag the chair can use instead.
+- **The install phase no longer runs the artifact's code.** It is the one phase
+  with network. `install.R` is not executed (its `install.packages()` lists are
+  read and installed from the pinned snapshot); dependency files are reduced to
+  plain requirements — no `-e .`, `git+`/URL/archive requirements, custom indexes,
+  pip options, conda channels outside `install.conda_channels`, URL conda specs,
+  or non-CRAN `renv.lock` sources — and every dropped line is named with its
+  reason. Harness Python runs `-I`, Rscript `--vanilla`, and pip/micromamba read
+  neither the artifact's `HOME` nor its config. Packages reprobe *inferred* from
+  imports are installed wheels-only, so a squatted name runs no code while the
+  network is open. The sanitiser uses `packaging` for PEP 508, and rejects
+  archive-suffixed requirements before parsing: `pkg-1.0.tar.gz` is a valid
+  *name*, but pip reads it as a local sdist when one is in its cwd.
+- **Links are never followed.** The run-tree copy, the deposit merge, artifact
+  collection and the produced-text reader no longer follow symlinks (a committed
+  `leak -> ~/.aws`, or a step writing `x.executed.ipynb -> /proc/self/environ`).
+  Author-supplied `.reprobe_*` paths are not copied in.
+- **SSRF guard**: CGNAT (`100.64.0.0/10`, Alibaba's metadata service, Tailscale)
+  and IPv6 wrappers (6to4, NAT64) are internal; probes re-check every redirect hop;
+  DOIs resolve through the doi.org handle API instead of fetching the registrant's
+  landing page; a Dataverse host is judged by its real hostname (not `user@`
+  tricks) and its DOI is only an archival pin if doi.org says it points there.
+- **git runs as nobody**: no credential helper, no `~/.gitconfig`, no inherited
+  `GIT_*` credentials, `core.symlinks=false`.
+- **Archives**: tar extraction is the stdlib `data` filter only (the hand-written
+  fallback was walked out of with a symlink chain; Python >= 3.11.4 required);
+  Zenodo zips now get the zip-bomb guard like every other deposit.
+- **Paper finder**: a manifest `paper.pdf` must stay inside the repository; PDFs
+  are parsed in a time-boxed `python -I` child (pypdf has a run of 2026 DoS
+  advisories; `reprobe[paper]` now needs >= 6.14); a README Zenodo badge is no
+  longer read as `...zenodo.1234567.svg`, and `preferred-citation` beats the
+  software DOI.
+- **Sandbox**: on Linux the container runs as the host user's uid:gid (never
+  root), so the bind-mounted run dir is writable — uid 57439 could not write a
+  single output there. The host-wide `nproc` ulimit is dropped under that mapping,
+  `--cpus` is clamped to the daemon, containers are labelled and a later run
+  reaps what a hard-killed one left, SIGTERM stops the container, and the
+  watchdog caps console output and `/work` size (`limits.yaml: log_max`,
+  `work_max`). A new `sandbox` CI job checks the envelope against a real daemon.
+
+### What a report may claim
+
+- **A dry run is no longer a result.** It wrote "ran to completion (exit 0)",
+  verdict `runs` and a Functional candidate, and `batch --resume` then reused it.
+  It is now `not-run`, labelled, and never resumed; `--resume` only reuses a report
+  made by the same harness version, config files and run options.
+- **Budgets are not failures.** A timeout, an out-of-memory kill (docker's own
+  `OOMKilled` flag, not a bare 137), or a console/disk cap is `resource-limit`,
+  not `runs-with-failures`; and `sys.exit(125)` from an artifact is no longer a
+  broken image (only the docker CLI's own message says that).
+- **Whose install failed.** Each install command carries an origin. The
+  artifact's own declared environment failing to install is a finding about the
+  artifact (and is no longer retried forever as `infra-error`); a package reprobe
+  inferred failing, or network trouble, is ours.
+- **Planned steps that never ran** (no runner, a failed structural check) now
+  show in the verdict instead of reading "all declared steps ran".
+- **Regenerated outputs are compared with the committed ones** (`compare.py`,
+  pandas/numpy): identical, equivalent within a tolerance, differs, or not
+  compared — evidence for the reviewer, never a badge.
+- **The LLM is held to its own rules**: responses are validated against their
+  JSON schemas (and sent to Ollama as its structured-output format); the
+  confidence threshold is enforced; a value the model says the run produced must
+  occur in the output or its match/mismatch becomes `unclear`.
+- **Available notes tell the truth**: Dryad, Dataverse and Software Heritage
+  deposits verify per-file digests / re-hash the tree (`reprobe[swh]`), so an
+  archival pin can actually be granted; an OSF project with no DOI is not told it
+  has one; an `--allow-repo2docker` plan no longer claims a build that never ran.
+- `report.json` is validated against `report.schema.json` for every kind of
+  report (every fetch-failed report violated it before).
+
+### Detection
+
+- Python imports come from `ast`, not a regex: `import os, yaml`, docstrings,
+  optional `try/except ImportError` imports, `TYPE_CHECKING`, IPython magics, and
+  the deposit's own modules (any directory above a `.py`, so `src/` layouts and
+  namespace packages) are handled. Import names map to distributions through
+  reprobe's own table over the vendored pipreqs mapping (Apache-2.0,
+  `detect/LICENSE.pipreqs`); `tables -> pytables` (not a PyPI name) is fixed.
+- R scanning ignores comments, string contents and R Markdown prose, reads
+  `pacman::p_load`, skips `character.only` variables, and scans `.qmd` chunks.
+
+### Also
+
+- The pinned Ollama (`0.12.5`) could not pull `gemma4:e4b`; now `0.33.3`, pinned
+  by digest, and a test keeps the compose file in step with `pins.yaml`.
+- The GitHub Action: inputs no longer interpolate into the shell, and it uploads
+  `work/*/report/` (it uploaded a directory that has not existed since the
+  `out/` -> `report/` rename).
+- Golden values for dry runs are now `skipped` / `not-run`; detection and
+  install-command goldens are unchanged in meaning.
+
 ## Unreleased — a report must distinguish our failure from theirs
 
 Found by running two AutomotiveUI '26 artifacts and re-reading what the reports

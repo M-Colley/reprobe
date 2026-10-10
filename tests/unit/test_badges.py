@@ -394,10 +394,19 @@ def test_a_resolving_osf_doi_is_not_reported_as_no_identifier_found():
     it earns no badge is that it names storage the depositor can still change —
     saying none was found sends an author hunting for a DOI they already have."""
     fetch = FetchResult(input="https://doi.org/10.17605/OSF.IO/4wj86", resolved_type="osf",
-                        src_dir="/x", pin=Pin(kind="none", value="osf.io/4wj86"))
+                        src_dir="/x", pin=Pin(kind="none", value="osf.io/4wj86"),
+                        metadata={"doi": "10.17605/OSF.IO/4WJ86"})
     notes = _decide(fetch, [])["acm"]["notes"]
     assert not any("no archival persistent identifier found" in n for n in notes)
-    assert any("still change" in n for n in notes)
+    assert any("an OSF DOI resolves" in n for n in notes)
+
+
+def test_a_plain_osf_project_is_not_told_it_has_a_doi():
+    fetch = FetchResult(input="https://osf.io/cwd6h", resolved_type="osf",
+                        src_dir="/x", pin=Pin(kind="none", value="osf.io/cwd6h"))
+    notes = _decide(fetch, [])["acm"]["notes"]
+    assert not any("DOI resolves" in n for n in notes)
+    assert any("has no DOI" in n for n in notes)
 
 
 def test_a_source_with_genuinely_no_identifier_still_says_so():
@@ -483,3 +492,128 @@ def test_the_fix_list_reaches_both_renderers():
     for text in (html.render(rep), markdown.render(rep)):
         assert "What to change" in text
         assert "add library(tidyr)" in text
+
+
+# --------------------------------------------------------------------------- #
+# Verdict honesty: dry runs, unexecuted steps, budgets, and whose install failed
+# --------------------------------------------------------------------------- #
+def test_a_dry_run_is_never_a_verdict_about_the_artifact():
+    steps = [RunResult(runner="python", target="main.py", status="skipped", executed=False,
+                       diagnostics={"reason": "dry run — the container was not launched"})]
+    v = badges.verdict(steps, True, dry_run=True)
+    assert v["overall"] == "not-run" and v["human_review_required"]
+    assert "dry run" in v["note"]
+
+
+def test_a_step_with_no_runner_is_visible_in_the_verdict():
+    steps = [RunResult(runner="python", target="a.py", status="pass"),
+             RunResult(runner="?", target="b.m", status="skipped", executed=False,
+                       diagnostics={"reason": "no runner"})]
+    v = badges.verdict(steps, True)
+    assert v["overall"] == "runs-with-warnings" and v["human_review_required"]
+    assert "b.m" in v["note"]
+
+
+def test_a_failed_structural_check_beside_a_passing_script_is_visible():
+    steps = [RunResult(runner="python", target="a.py", status="pass"),
+             RunResult(runner="unity", target="Game", status="fail", executed=False)]
+    assert badges.verdict(steps, True)["overall"] == "runs-with-warnings"
+
+
+def test_running_out_of_budget_is_not_an_artifact_failure():
+    """PDRA_XAI_OS: a CatBoost fit that needs more than 90 minutes is a working
+    analysis on a small laptop budget, not broken code."""
+    steps = [RunResult(runner="jupyter", target="fit.ipynb", status="timeout",
+                       diagnostics={"timeout_s": 5400}),
+             RunResult(runner="python", target="prep.py", status="pass")]
+    v = badges.verdict(steps, True)
+    assert v["overall"] == "resource-limit"
+    assert "5400s time budget" in v["note"] and "no statement about the artifact" in v["note"]
+    out = _decide(_zenodo(), steps)
+    assert out["acm"]["functional"] == "not-evaluated"
+
+    oom = [RunResult(runner="python", target="fit.py", status="resource-limit",
+                     diagnostics={"limit": "memory", "cap": "8g"})]
+    assert "memory cap (8g)" in badges.verdict(oom, True)["note"]
+
+
+def test_a_real_failure_still_outranks_a_budget():
+    steps = [RunResult(runner="jupyter", target="fit.ipynb", status="timeout"),
+             RunResult(runner="python", target="plot.py", status="fail")]
+    assert badges.verdict(steps, True)["overall"] == "runs-with-failures"
+
+
+def _attributed_env(origin, **row):
+    base = {"exit_code": 1, "ok": False, "timed_out": False,
+            "failures": [{"index": 0, "origin": origin, "exit_code": 1,
+                          "command": "python -I -m pip install -r requirements.txt"}]}
+    base.update(row)
+    return {"install_results": {"python": base}}
+
+
+def test_an_uninstallable_declared_environment_is_the_artifacts_finding():
+    """requirements.txt naming `itertools`: pip fails because of what the author
+    wrote. That is not an infrastructure error, and must not be retried forever."""
+    env = _attributed_env("author-declared")
+    assert badges.install_error(env) is None
+    declared = badges.declared_env_error(env)
+    assert declared and "requirements.txt" in declared
+    steps = [RunResult(runner="python", target="main.py", status="fail")]
+    v = badges.verdict(steps, True, badges.install_error(env), declared)
+    assert v["overall"] == "runs-with-failures" and "declared environment" in v["note"]
+    out = badges.decide(_zenodo(), steps, DetectResult(artifact_types=["python"]),
+                        badges_cfg=load_config().badges, functional_requested=True, ran=True,
+                        declared_env_error=declared)
+    assert out["acm"]["functional"] == "not-met"
+
+
+def test_a_harness_chosen_install_failing_stays_ours():
+    env = _attributed_env("harness-detected")
+    assert badges.declared_env_error(env) is None
+    err = badges.install_error(env)
+    assert err and "exited 1" in err
+    steps = [RunResult(runner="python", target="main.py", status="fail")]
+    assert badges.verdict(steps, True, err)["overall"] == "infra-error"
+
+
+def test_network_trouble_is_never_pinned_on_the_author():
+    env = _attributed_env("author-declared", network_error=True)
+    assert badges.declared_env_error(env) is None
+    assert "unreachable" in badges.install_error(env)
+
+
+def test_a_failing_version_listing_is_not_an_install_failure():
+    env = _attributed_env("harness-record")
+    assert badges.install_error(env) is None and badges.declared_env_error(env) is None
+
+
+def test_a_budget_verdict_does_not_deny_a_finding_the_same_report_makes():
+    """Out of memory AND the artifact's own requirements.txt does not install: the
+    second is a statement about the artifact, so the verdict may not also say it
+    makes none."""
+    env = _attributed_env("author-declared")
+    declared = badges.declared_env_error(env)
+    steps = [RunResult(runner="python", target="fit.py", status="resource-limit",
+                       diagnostics={"limit": "memory", "cap": "8g"})]
+    v = badges.verdict(steps, True, badges.install_error(env), declared)
+    assert v["overall"] == "resource-limit"
+    assert "declared environment" in v["note"] and "memory cap (8g)" in v["note"]
+    assert "no statement about the artifact" not in v["note"]
+
+
+def test_install_failures_are_described_in_words_not_as_a_base64_blob():
+    from reprobe.envbuild.base import describe_install_command as d
+    blob = ("mkdir -p /work/.reprobe_req && printf %s 'cGFuZGFzCg==' | base64 -d > "
+            "/work/.reprobe_req/requirements.txt && python -I -m pip install --no-input "
+            "--target=/work/.reprobe_deps -r /work/.reprobe_req/requirements.txt")
+    assert d(blob) == "pip install -r requirements.txt (the sanitised copy)"
+    assert "micromamba create" in d("... HOME=/x micromamba create -y -p /work/.reprobe_env -f e.yml")
+    assert d("Rscript --vanilla -e 'renv::restore(prompt=FALSE)'") == "renv::restore of renv.lock"
+    assert d("python -I -c 'x'  # reprobe: imports the environment does not provide") \
+        == "install of the imports found in the code"
+    assert "cGFuZGFz" not in d(blob)
+    failure = {"origin": "author-declared", "exit_code": 1, "command": blob, "what": d(blob)}
+    msg = badges.declared_env_error({"install_results": {"python": {
+        "ok": False, "timed_out": False, "failures": [failure]}}})
+    assert "pip install -r requirements.txt (the sanitised copy) exited 1" in msg
+    assert "base64" not in msg

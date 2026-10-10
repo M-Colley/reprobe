@@ -16,11 +16,11 @@
     "strategy": "pinned-base",
     "install_commands": [],
     "step_statuses": [
-      "partial"
+      "skipped"
     ],
     "available": "candidate",
-    "functional": "not-met",
-    "verdict": "runs-with-warnings"
+    "functional": "not-evaluated",
+    "verdict": "not-run"
   },
   "tests/fixtures/broken-python": {
     "artifact_types": [
@@ -35,14 +35,15 @@
     "flags": [],
     "strategy": "pinned-base",
     "install_commands": [
-      "python -c 'import importlib.util as u, importlib.metadata as md, subprocess, sys; pairs = [(\"pandas\", \"pandas\")]; norm = lambda s: s.lower().replace(\"_\", \"-\"); have = {norm(getattr(x, \"name\", \"\") or \"\") for x in md.distributions()}; need = sorted({d for m, d in pairs if not m or (u.find_spec(m) is None and norm(d) not in have)}); print(\"reprobe: imports the environment does not provide:\", need or \"none\", flush=True); fail = [d for d in need if subprocess.call([sys.executable, \"-m\", \"pip\", \"install\", \"--no-input\", \"--target=/work/.reprobe_deps\", d]) != 0]; print(\"reprobe: pip could NOT install (reported, not faked):\", fail or \"none\")'"
+      "python -I -c 'import sys, os; sys.path.append(\"/work/.reprobe_deps\"); os.makedirs(\"/var/tmp/reprobe-pip\", exist_ok=True); os.chdir(\"/var/tmp/reprobe-pip\"); import importlib.util as u, importlib.metadata as md, subprocess; pairs = [(\"pandas\", \"pandas\")]; norm = lambda s: s.lower().replace(\"_\", \"-\"); have = {norm(getattr(x, \"name\", \"\") or \"\") for x in md.distributions()}; need = sorted({d for m, d in pairs if not m or (u.find_spec(m) is None and norm(d) not in have)}); print(\"reprobe: imports the environment does not provide:\", need or \"none\", flush=True); W = \"/var/tmp/reprobe-wheels\"; run = lambda *a: subprocess.call([sys.executable, \"-I\", \"-m\", \"pip\", *a]); got = [d for d in need if run(\"download\", \"--no-input\", \"--only-binary=:all:\", \"-d\", W, d) == 0]; bad = bool(got) and run(\"install\", \"--no-input\", \"--no-index\", \"--only-binary=:all:\", \"--find-links\", W, \"--target=/work/.reprobe_deps\", *got) != 0; fail = [d for d in need if d not in got] + (got if bad else []); print(\"reprobe: pip could NOT install (reported, not faked):\", fail or \"none\")'",
+      "python -I -m pip freeze --path=/work/.reprobe_deps"
     ],
     "step_statuses": [
-      "partial"
+      "skipped"
     ],
     "available": "candidate",
-    "functional": "not-met",
-    "verdict": "runs-with-warnings"
+    "functional": "not-evaluated",
+    "verdict": "not-run"
   },
   "tests/fixtures/notebook-r-mix": {
     "artifact_types": [
@@ -58,16 +59,16 @@
     "flags": [],
     "strategy": "pinned-base",
     "install_commands": [
-      "Rscript -e 'if (requireNamespace(\"renv\", quietly=TRUE)) renv::restore(prompt=FALSE) else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'",
-      "Rscript -e 'pkgs <- c(\"lme4\"); repo <- \"https://packagemanager.posit.co/cran/__linux__/noble/2026-07-23\"; options(HTTPUserAgent = sprintf(\"R/%s R (%s)\", getRversion(), paste(getRversion(), R.version$platform, R.version$arch, R.version$os))); have <- rownames(installed.packages()); need <- setdiff(pkgs, have); if (length(need)) { avail <- tryCatch(rownames(available.packages(repos=repo)), error=function(e) character(0)); ok <- intersect(need, avail); miss <- setdiff(need, avail); if (length(ok)) install.packages(ok, repos=repo, lib=Sys.getenv(\"R_LIBS_USER\")); if (length(miss)) message(\"reprobe: R packages not on CRAN (not installed): \", paste(miss, collapse=\", \")); failed <- setdiff(ok, rownames(installed.packages())); if (length(failed)) { message(\"reprobe: CRAN packages FAILED to install: \", paste(failed, collapse=\", \")); print(installed.packages()[, c(\"Package\", \"Version\")]); quit(status=1) } }'",
-      "Rscript -e 'print(installed.packages()[, c(\"Package\", \"Version\")])'"
+      "Rscript --vanilla -e 'if (requireNamespace(\"renv\", quietly=TRUE)) renv::restore(prompt=FALSE, repos=c(CRAN=\"https://packagemanager.posit.co/cran/__linux__/noble/2026-07-23\"), exclude=NULL) else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'",
+      "Rscript --vanilla -e 'pkgs <- c(\"lme4\"); repo <- \"https://packagemanager.posit.co/cran/__linux__/noble/2026-07-23\"; options(HTTPUserAgent = sprintf(\"R/%s R (%s)\", getRversion(), paste(getRversion(), R.version$platform, R.version$arch, R.version$os))); have <- rownames(installed.packages()); need <- setdiff(pkgs, have); if (length(need)) { avail <- tryCatch(rownames(available.packages(repos=repo)), error=function(e) character(0)); ok <- intersect(need, avail); miss <- setdiff(need, avail); if (length(ok)) install.packages(ok, repos=repo, lib=Sys.getenv(\"R_LIBS_USER\")); if (length(miss)) message(\"reprobe: R packages not on CRAN (not installed): \", paste(miss, collapse=\", \")); failed <- setdiff(ok, rownames(installed.packages())); if (length(failed)) { message(\"reprobe: CRAN packages FAILED to install: \", paste(failed, collapse=\", \")); print(installed.packages()[, c(\"Package\", \"Version\")]); quit(status=1) } }'",
+      "Rscript --vanilla -e 'print(installed.packages()[, c(\"Package\", \"Version\")])'"
     ],
     "step_statuses": [
-      "pass"
+      "skipped"
     ],
     "available": "candidate",
-    "functional": "candidate",
-    "verdict": "runs"
+    "functional": "not-evaluated",
+    "verdict": "not-run"
   },
   "tests/fixtures/conda-env": {
     "artifact_types": [
@@ -84,15 +85,15 @@
     ],
     "strategy": "besteffort",
     "install_commands": [
-      "export MAMBA_ROOT_PREFIX=/var/tmp/reprobe-mamba && micromamba create -y -q -p /work/.reprobe_env -f environment.yml && micromamba install -y -q -p /work/.reprobe_env -c conda-forge papermill ipykernel nbconvert",
-      "micromamba list -p /work/.reprobe_env"
+      "mkdir -p /work/.reprobe_req && printf %s 'Y2hhbm5lbHM6Ci0gY29uZGEtZm9yZ2UKZGVwZW5kZW5jaWVzOgotIHB5dGhvbj0zLjExCi0gcGFuZGFzCg==' | base64 -d > /work/.reprobe_req/environment.yml && mkdir -p /var/tmp/reprobe-home && cd /var/tmp/reprobe-home && export MAMBA_ROOT_PREFIX=/var/tmp/reprobe-mamba && HOME=/var/tmp/reprobe-home micromamba create -y -q -p /work/.reprobe_env -f /work/.reprobe_req/environment.yml && HOME=/var/tmp/reprobe-home micromamba install -y -q -p /work/.reprobe_env -c conda-forge papermill ipykernel nbconvert",
+      "mkdir -p /var/tmp/reprobe-home && cd /var/tmp/reprobe-home && HOME=/var/tmp/reprobe-home micromamba list -p /work/.reprobe_env"
     ],
     "step_statuses": [
-      "pass"
+      "skipped"
     ],
     "available": "candidate",
-    "functional": "candidate",
-    "verdict": "runs"
+    "functional": "not-evaluated",
+    "verdict": "not-run"
   },
   "tests/fixtures/lowercase-r": {
     "artifact_types": [
@@ -108,11 +109,11 @@
     "strategy": "pinned-base",
     "install_commands": [],
     "step_statuses": [
-      "pass"
+      "skipped"
     ],
     "available": "candidate",
-    "functional": "candidate",
-    "verdict": "runs"
+    "functional": "not-evaluated",
+    "verdict": "not-run"
   },
   "tests/fixtures/bad-manifest": {
     "artifact_types": [
@@ -132,6 +133,6 @@
     ],
     "available": "candidate",
     "functional": "not-evaluated",
-    "verdict": "structural-only"
+    "verdict": "not-run"
   }
 }

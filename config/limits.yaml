@@ -19,6 +19,17 @@ defaults:
   nofile: 4096
   nproc: 512
   user: "57439:57439"          # non-root (micromamba default uid); reject uid-0 images
+  # On a native Linux host the run dir is a bind mount owned by YOU, which uid
+  # 57439 cannot write — every step would fail on PermissionError and read as the
+  # artifact's fault. true: run as your own uid:gid instead (still non-root; never
+  # 0). Ignored on Windows, and for a rootless daemon (subuids — see runbook).
+  map_host_user: true
+  # Budgets the host-side watchdog enforces besides the wall clock. Both are
+  # author-controlled bytes landing on the host disk: console output (the step
+  # log) and everything written under /work (a bind mount with no quota). Hitting
+  # one stops the step as "resource-limit" — a budget finding, not a failure.
+  log_max: "1g"
+  work_max: "60g"               # torch-sized conda envs live under /work too
   runtime: ""                   # set to "runsc" for gVisor kernel-level isolation
   read_only_rootfs: true
   drop_all_caps: true

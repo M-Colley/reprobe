@@ -12,6 +12,11 @@ work unchanged. A bare http(s) URL — an OSF ``?zip=`` bundle link, a lab web
 server — falls back to a hardened download plus archive extraction, reusing the
 SSRF guard, byte caps and zip-bomb guards in ``base.py``.
 
+A source the AUTHOR declared (manifest ``data_sources``) is fetched with
+``untrusted=True``: never a local path, never ssh/scp git, never an internal
+host — see ``registry.check_untrusted_ref``. Only the operator's ``--data`` may
+name a directory on the host.
+
 Two honesty rules are enforced in this module:
 
 * a data source NEVER overwrites a file the code source already provided.
@@ -24,6 +29,7 @@ Two honesty rules are enforced in this module:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -38,6 +44,7 @@ from .base import (
     get,
     maybe_unzip,
     new_checksum_stats,
+    probe_status,
     record_download,
     safe_join,
 )
@@ -118,22 +125,29 @@ class DirectUrlFetcher:
         )
 
 
-def fetch_data_source(ref: str, dest: str | Path) -> FetchResult:
+def fetch_data_source(ref: str, dest: str | Path, *, untrusted: bool = False) -> FetchResult:
     """Fetch one data deposit into ``dest``.
 
     Platform fetchers are tried first — they carry pins and per-file checksums —
-    then a bare http(s) URL falls back to ``DirectUrlFetcher``."""
+    then a bare http(s) URL falls back to ``DirectUrlFetcher``.
+
+    ``untrusted=True`` for a source the author declared (manifest
+    ``data_sources``): a local path, an ssh/scp-style or non-http(s) reference,
+    or an internal host raises ``RefusedSource`` (a FetchError) before anything
+    is fetched. Leave it False only for the operator's own ``--data``."""
+    from .registry import check_untrusted_ref, select
     from .registry import fetch as fetch_primary
-    from .registry import select
 
     dest = Path(dest)
-    if select(ref) is not None:
-        return fetch_primary(ref, dest)
+    if untrusted:
+        ref = check_untrusted_ref(ref)
+    if select(ref, untrusted=untrusted) is not None:
+        return fetch_primary(ref, dest, untrusted=untrusted)
     direct = DirectUrlFetcher()
     if direct.can_handle(ref):
         return direct.fetch(ref, dest)
-    # Let the registry produce its full "supported sources" message.
-    return fetch_primary(ref, dest)
+    # Let the registry resolve a DOI, or produce its "supported sources" message.
+    return fetch_primary(ref, dest, untrusted=untrusted)
 
 
 _ZENODO_ID_RE = re.compile(r"(?:zenodo\.org/records?/|10\.5281/zenodo\.)(\d+)", re.I)
@@ -157,8 +171,9 @@ def probe_data_source(url: str) -> dict[str, Any]:
             return {**rec, **_probe_zenodo(m.group(1))}
         if (m := _OSF_GUID_RE.search(url)):
             return {**rec, **_probe_osf(m.group(1))}
-        assert_safe_url(url)
-        code = get(url, timeout=20).status_code
+        # Every redirect hop is SSRF-checked: a plain GET would follow a public
+        # URL into the chair's network and echo an internal service's status.
+        code = probe_status(url, timeout=20)
         return {**rec, "status": "available" if code < 400 else "not-found",
                 "detail": f"unauthenticated GET returned HTTP {code}"}
     except Exception as e:                       # noqa: BLE001 - diagnosis only
@@ -207,6 +222,11 @@ _URL_RE = re.compile(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+")
 _DOC_GLOBS = ("README*", "readme*", "*.md", "*.txt", "*.rst")
 
 
+_MAX_DOC_CHARS = 1_000_000
+_MAX_DOC_URLS = 2000
+_MAX_URL_CHARS = 2048
+
+
 def _clean_url(url: str) -> str:
     """Trim the prose a URL was embedded in.
 
@@ -236,8 +256,14 @@ def referenced_deposits(src_root: str | Path, limit: int = 5) -> list[str]:
         for doc in sorted(root.glob(pattern))[:20]:
             if not doc.is_file() or doc.stat().st_size > 1_000_000:
                 continue
-            text = doc.read_text(encoding="utf-8", errors="replace")
-            for raw in _URL_RE.findall(text):
+            # A README is author-controlled: bound what is read and what is cleaned.
+            # (_clean_url re-counts brackets per trailing bracket, so a 200 KB line of
+            # `http://x)))))…` took half a minute.)
+            with doc.open("r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read(_MAX_DOC_CHARS)
+            for raw in _URL_RE.findall(text)[:_MAX_DOC_URLS]:
+                if len(raw) > _MAX_URL_CHARS:
+                    continue
                 url = _clean_url(raw)
                 if any(h in url.lower() for h in _DEPOSIT_HOSTS) and url not in found:
                     found.append(url)
@@ -247,7 +273,7 @@ def referenced_deposits(src_root: str | Path, limit: int = 5) -> list[str]:
 
 
 def merge_into(src_root: str | Path, dest_root: str | Path,
-               into: str = "") -> tuple[list[str], list[str]]:
+               into: str = "", *, skipped: list[str] | None = None) -> tuple[list[str], list[str]]:
     """Copy the tree at ``src_root`` under ``dest_root``/``into``.
 
     Returns ``(copied_paths, collisions)``, both relative to ``dest_root``. The
@@ -259,23 +285,51 @@ def merge_into(src_root: str | Path, dest_root: str | Path,
     An existing file is NEVER replaced: the code source defines the artifact, and
     a data deposit that silently overwrote a script would mean the reviewed code
     is not the submitted code. Collisions are returned so the report can name
-    them."""
+    them — a path the artifact already occupies with a symlink, or one that would
+    lead out of the tree through one, counts as a collision too.
+
+    Symlinks in the deposit are never followed and never copied: a link to
+    ~/.aws would otherwise copy the chair's own files into the artifact. They are
+    appended (relative to ``src_root``) to ``skipped`` when the caller passes a
+    list, so the report can say what was left out."""
     src_root = Path(src_root)
     target_root = safe_join(Path(dest_root), into) if into else Path(dest_root)
     target_root.mkdir(parents=True, exist_ok=True)
 
+    files: list[tuple[str, Path]] = []
+    links: list[str] = []
+    # os.walk(followlinks=False) never descends through a directory link.
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        here = Path(dirpath)
+        for name in list(dirnames):
+            if (here / name).is_symlink():
+                dirnames.remove(name)
+                links.append((here / name).relative_to(src_root).as_posix())
+        for name in filenames:
+            src = here / name
+            rel = src.relative_to(src_root).as_posix()
+            if src.is_symlink():
+                links.append(rel)
+            elif src.is_file():                 # not a fifo/device a tar could carry
+                files.append((rel, src))
+
     copied: list[str] = []
     collisions: list[str] = []
-    for src in sorted(p for p in src_root.rglob("*") if p.is_file()):
-        rel = src.relative_to(src_root).as_posix()
-        # safe_join re-validates every component, so a deposit cannot escape the
-        # tree through a crafted member name that survived extraction.
-        dst = safe_join(target_root, rel)
+    for rel, src in sorted(files):
+        try:
+            # safe_join re-validates every component, and refuses a path that
+            # resolves out of the tree through a symlink the artifact committed.
+            dst = safe_join(target_root, rel)
+        except FetchError:
+            collisions.append((target_root.relative_to(Path(dest_root)) / rel).as_posix())
+            continue
         out_rel = dst.relative_to(Path(dest_root)).as_posix()
-        if dst.exists():
+        if os.path.lexists(dst):                # lexists: a dangling link is still "there"
             collisions.append(out_rel)
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        shutil.copy2(src, dst, follow_symlinks=False)
         copied.append(out_rel)
+    if skipped is not None:
+        skipped.extend(sorted(links))
     return copied, collisions

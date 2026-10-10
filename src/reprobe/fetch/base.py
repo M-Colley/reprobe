@@ -8,17 +8,21 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import ipaddress
+import json
 import os
 import socket
 import subprocess
+import sys
 import tarfile
+import time
 import zipfile
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath
 from typing import Optional, Protocol, runtime_checkable
 from urllib.parse import urljoin, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.util import parse_url as _urllib3_parse_url
 from urllib3.util.retry import Retry
 
 from ..models import FetchResult
@@ -33,6 +37,12 @@ class Fetcher(Protocol):
 
 class FetchError(RuntimeError):
     pass
+
+
+class RefusedSource(FetchError):
+    """An author-declared reference that is not fetched at all (a local path,
+    an ssh/scp git URL, a non-http(s) scheme, an internal host). A FetchError, so
+    every caller that already reports a failed source reports this one too."""
 
 
 # ---------------------------------------------------------------------------
@@ -67,11 +77,25 @@ def post(url: str, **kwargs) -> requests.Response:
     return _SESSION.post(url, **kwargs)
 
 
+# Inherited GIT_* variables that carry no credentials or config: trust roots for
+# a chair behind a TLS-inspecting proxy. Every other GIT_* is dropped (below).
+_GIT_ENV_KEEP = ("GIT_SSL_CAINFO", "GIT_SSL_CAPATH")
+
+
 def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
+    # git runs on the TRUSTED host against an untrusted remote, so it must not
+    # act as the chair: no credential helper, no ~/.gitconfig (helpers,
+    # url.insteadOf rewrites, http.extraHeader tokens, core.hooksPath), no
+    # inherited GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT injection, no
+    # GIT_ASKPASS / GIT_SSH_COMMAND program. A host asking for credentials then
+    # gets none, which _clone_failure reports as "not publicly accessible".
+    env = {k: v for k, v in os.environ.items()
+           if not k.upper().startswith("GIT_") or k.upper() in _GIT_ENV_KEEP}
+    env.pop("SSH_ASKPASS", None)            # git's fallback prompt program
     env["GIT_LFS_SKIP_SMUDGE"] = "1"        # don't pull large LFS blobs during clone/checkout
     env["GIT_TERMINAL_PROMPT"] = "0"        # never hang on a credential prompt
     env["GIT_CONFIG_NOSYSTEM"] = "1"        # ignore host /etc/gitconfig (no injected helpers/transports)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull   # ...and the chair's ~/.gitconfig (git >= 2.32)
     # Restrict git to network transports we actually fetch over. This blocks the
     # `ext::`/`fd::` remote-helper transports (arbitrary host command execution)
     # and `file::` (local exfiltration) even if a crafted ref reaches `git clone`
@@ -79,8 +103,15 @@ def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600) -> 
     # unfenced transport here is a full sandbox escape. Defence in depth with the
     # ref validation in git_host.py.
     env["GIT_ALLOW_PROTOCOL"] = "http:https:git:ssh"
+    # credential.helper= empties the helper list (beats any config git still
+    # reads). core.symlinks=false checks a committed symlink out as a plain file
+    # holding its target text, so a link to ~/.ssh in the repo never becomes a
+    # live path that host-side readers (detection, the paper finder, the LLM
+    # prompt) would follow. Set on every call: a later `checkout` reads the
+    # repo's own config, not the clone's -c.
+    argv = ["git", "-c", "credential.helper=", "-c", "core.symlinks=false", *args]
     try:
-        return subprocess.run(["git", *args], cwd=cwd, env=env,
+        return subprocess.run(argv, cwd=cwd, env=env,
                               capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         raise FetchError("git is not installed or not on PATH — see the chair runbook prerequisites")
@@ -100,6 +131,9 @@ _MAX_EXTRACT_BYTES = 50 * 1024**3        # total declared-uncompressed per archi
 _MAX_ARCHIVE_MEMBERS = 500_000
 _MAX_LFS_TOTAL_BYTES = 20 * 1024**3      # aggregate declared LFS payload per repo (git-lfs
                                          # bypasses download()'s per-file cap; bound it here)
+_MAX_DOWNLOAD_SECONDS = 4 * 3600         # wall clock per streamed file: `timeout` is per read,
+                                         # so a server trickling a byte per read never trips it
+_MAX_JSON_BYTES = 64 * 1024**2           # an API document from a submitter-named host
 
 
 # ---------------------------------------------------------------------------
@@ -111,47 +145,98 @@ _MAX_LFS_TOTAL_BYTES = 20 * 1024**3      # aggregate declared LFS payload per re
 # host-based (not substring) discipline.
 # ---------------------------------------------------------------------------
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _is_internal_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True for any address a fetch on the trusted host must not reach.
+
+    ``is_global`` is the allowlist: it is False for RFC1918, loopback,
+    link-local (169.254.169.254), CGNAT 100.64.0.0/10 (Alibaba's metadata
+    service at 100.100.100.200, Tailscale), ULA fc00::/7 and the documentation
+    and benchmark ranges — ``is_private`` alone misses CGNAT. The explicit checks
+    cover what it gets wrong: multicast and deprecated site-local fec0::/10 are
+    "global" to ``ipaddress``, and its tables have shifted between releases."""
+    if ip.version == 6:
+        # An internal IPv4 must not ride in on an IPv6 wrapper: mapped
+        # (::ffff:a.b.c.d), 6to4 (2002::/16) or NAT64 (64:ff9b::/96 — and a
+        # NAT64 wrapper of a PUBLIC v4 is fine, it is how IPv6-only hosts reach it).
+        inner = ip.ipv4_mapped or ip.sixtofour
+        if inner is None and ip in _NAT64:
+            inner = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if inner is not None:
+            return _is_internal_ip(inner)
+    return (not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+            or bool(getattr(ip, "is_site_local", False)))
+
+
+def _addr_is_internal(addr: str) -> bool:
+    try:
+        return _is_internal_ip(ipaddress.ip_address(addr))
+    except ValueError:
+        return True                             # unparseable: never trust it
+
+
 def is_public_host(host: str) -> bool:
     """True only if ``host`` (a hostname or IP literal) resolves entirely to
-    public, routable addresses. Any private/loopback/link-local/reserved/
-    multicast/unspecified address — or a resolution failure — returns False."""
+    public, routable addresses. Any internal address (see ``_is_internal_ip``)
+    — or a resolution failure — returns False."""
     if not host:
         return False
     host = host.strip("[]")                     # unwrap an IPv6 literal
     try:
-        candidates = [ipaddress.ip_address(host)]
+        candidates = [str(ipaddress.ip_address(host))]
     except ValueError:
         try:
             infos = socket.getaddrinfo(host, None)
         except (OSError, UnicodeError):
             return False
-        candidates = []
-        for info in infos:
-            try:
-                candidates.append(ipaddress.ip_address(info[4][0]))
-            except (ValueError, IndexError):
-                continue
+        candidates = [str(info[4][0]) for info in infos if info and len(info) > 4 and info[4]]
         if not candidates:
             return False
-    for ip in candidates:
-        # Normalize embedded IPv4 (::ffff:169.254.169.254, 6to4) to its v4 form
-        # so an internal address can't hide behind an IPv6 wrapper.
-        mapped = getattr(ip, "ipv4_mapped", None) or getattr(ip, "sixtofour", None)
-        if mapped is not None:
-            ip = mapped
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                or ip.is_multicast or ip.is_unspecified):
-            return False
-    return True
+    return not any(_addr_is_internal(a) for a in candidates)
+
+
+def _url_parts(url: str) -> tuple[str, str, Optional[int]]:
+    """``(scheme, host, port)`` of an http(s) URL, or FetchError.
+
+    The host that was VALIDATED must be the host a request will CONNECT to, and
+    two URL parsers are involved: ``urlparse`` here, and urllib3 inside
+    ``requests``. They disagree on some strings — ``http://127.0.0.1:80`` + a
+    backslash + ``@8.8.8.8/`` is host 8.8.8.8 to urlparse and 127.0.0.1 to urllib3 — so a guard that
+    validated one and fetched with the other was bypassable. Strings that could
+    be read two ways are refused outright rather than interpreted:
+
+    * a backslash, whitespace or a control character anywhere in the URL;
+    * a non-ASCII host (urllib3 resolves its IDNA form, so a pinned address for
+      the unicode spelling would never be applied; use the ``xn--`` form);
+    * any scheme but http/https;
+    * a host or port the two parsers do not agree on."""
+    if not isinstance(url, str) or not url:
+        raise FetchError("refusing an empty URL")
+    if any(c == "\\" or ord(c) <= 32 or ord(c) == 127 for c in url):
+        raise FetchError(f"refusing URL with a backslash, whitespace or control character: {url!r}")
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        port = p.port
+        u3 = _urllib3_parse_url(url)
+    except Exception as e:                       # noqa: BLE001 - any parse failure is a refusal
+        raise FetchError(f"refusing malformed URL {url!r}: {e}")
+    if p.scheme not in ("http", "https"):
+        raise FetchError(f"refusing non-http(s) URL: {url!r}")
+    if not host.isascii():
+        raise FetchError(f"refusing non-ASCII host {host!r} (use its xn-- form): {url!r}")
+    if (u3.host or "").strip("[]").lower() != host or (u3.port or None) != (port or None):
+        raise FetchError(f"refusing URL that parses to different hosts in different parsers: {url!r}")
+    return p.scheme, host, port
 
 
 def assert_safe_url(url: str) -> str:
     """Validate an untrusted (author-declared) download URL: http(s) only, host
     must be public (SSRF guard). Returns the hostname. Raises FetchError."""
-    p = urlparse(url)
-    if p.scheme not in ("http", "https"):
-        raise FetchError(f"refusing non-http(s) URL: {url!r}")
-    host = p.hostname or ""
+    _, host, _ = _url_parts(url)
     if not is_public_host(host):
         raise FetchError(f"refusing URL to a non-public/internal host: {host or url!r}")
     return host
@@ -170,12 +255,7 @@ def _resolve_public(host: str, port: int):
     if not infos:
         raise FetchError(f"host {host!r} did not resolve")
     for ai in infos:
-        ip = ipaddress.ip_address(ai[4][0])
-        mapped = getattr(ip, "ipv4_mapped", None) or getattr(ip, "sixtofour", None)
-        if mapped is not None:
-            ip = mapped
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                or ip.is_multicast or ip.is_unspecified):
+        if _addr_is_internal(str(ai[4][0])):
             raise FetchError(f"refusing URL to a non-public/internal host: {host}")
     return infos
 
@@ -188,9 +268,14 @@ def _pinned_dns(host: str, infos):
     Fetch is single-threaded, so a process-global swap for one connect is safe;
     the hostname stays in the URL, so TLS SNI / cert verification are unaffected."""
     real = socket.getaddrinfo
+    # urllib3 strips a trailing dot from the host before it resolves it, and the
+    # URL's host is lower-cased: compare the way it will actually be asked.
+    want = host.rstrip(".").lower()
 
     def patched(h, port, family=0, type=0, proto=0, flags=0):
-        return infos if h == host else real(h, port, family, type, proto, flags)
+        if isinstance(h, str) and h.rstrip(".").lower() == want:
+            return infos
+        return real(h, port, family, type, proto, flags)
 
     socket.getaddrinfo = patched
     try:
@@ -239,42 +324,34 @@ def safe_join(dest: Path, name: str) -> Path:
     return out
 
 
-def _check_tar_member(m: tarfile.TarInfo) -> None:
-    """Manual member validation for interpreters without extractall(filter=)."""
-    name = m.name.replace("\\", "/")
-    pp = PurePosixPath(name)
-    if pp.is_absolute() or PureWindowsPath(m.name).drive or ".." in pp.parts:
-        raise ValueError(f"unsafe tar member path: {m.name!r}")
-    if m.issym() or m.islnk():
-        link = m.linkname.replace("\\", "/")
-        if PurePosixPath(link).is_absolute() or PureWindowsPath(m.linkname).drive:
-            raise ValueError(f"tar link target is absolute: {m.name!r} -> {m.linkname!r}")
-        # symlink targets are relative to the member's directory; hardlink
-        # targets are relative to the archive root
-        base = str(pp.parent) if m.issym() else "."
-        target = os.path.normpath(os.path.join(base, link)).replace("\\", "/")
-        if target == ".." or target.startswith("../"):
-            raise ValueError(f"tar link escapes destination: {m.name!r} -> {m.linkname!r}")
-    elif not (m.isfile() or m.isdir()):
-        raise ValueError(f"unsupported tar member type: {m.name!r}")
+# Containment for tar members is the stdlib 'data' filter (3.11.4+), not a
+# hand-rolled check — the old lexical fallback was walked out of by a symlink
+# chain. Before these releases the filter itself could be escaped through link
+# members (CVE-2025-4517 / -4330 / -4138, CVE-2024-12718), so on those
+# interpreters link members are dropped rather than trusted to it.
+_TAR_FILTER_SOUND = (sys.version_info >= (3, 13, 4)
+                     or (3, 12, 11) <= sys.version_info < (3, 13)
+                     or (3, 11, 13) <= sys.version_info < (3, 12))
 
 
-def _extract_tar(t: tarfile.TarFile, dest: Path) -> None:
+def _extract_tar(t: tarfile.TarFile, dest: Path, warnings: list[str]) -> None:
+    if not hasattr(tarfile, "data_filter"):
+        raise FetchError("tar extraction needs Python >= 3.11.4 (tarfile filter='data')")
     members = t.getmembers()
     _guard_tar_members(members)             # reject bombs before writing anything
-    try:
-        t.extractall(dest, members=members, filter="data")   # sanitizes; 3.12+ and 3.11.4+
-        return
-    except TypeError:
-        pass                                # 3.11.0–3.11.3: no filter= kwarg, validate by hand
-    for m in members:
-        _check_tar_member(m)
-    t.extractall(dest, members=members)
+    if not _TAR_FILTER_SOUND:
+        links = [m for m in members if m.issym() or m.islnk()]
+        if links:
+            members = [m for m in members if not (m.issym() or m.islnk())]
+            warnings.append(
+                f"skipped {len(links)} link member(s) in the archive: this Python's tar "
+                "'data' filter predates the CVE-2025-4517 fix (upgrade to 3.12.11+ / "
+                "3.13.4+ to extract links)")
+    t.extractall(dest, members=members, filter="data")
 
 
 def maybe_unzip(dest: Path, warnings: list[str]) -> None:
     """If the deposit is a single .zip/.tar.gz archive, extract it in place."""
-    import zipfile
     zips = list(dest.glob("*.zip"))
     tars = list(dest.glob("*.tar.gz")) + list(dest.glob("*.tgz"))
     try:
@@ -284,7 +361,7 @@ def maybe_unzip(dest: Path, warnings: list[str]) -> None:
                 z.extractall(dest)          # zipfile sanitizes member paths itself
         elif len(tars) == 1 and not zips:
             with tarfile.open(tars[0]) as t:
-                _extract_tar(t, dest)
+                _extract_tar(t, dest, warnings)
     except Exception as e:
         warnings.append(f"could not extract archive: {e}")
 
@@ -305,12 +382,10 @@ def _open_stream(url: str, params: dict | None, timeout: int, restrict_public: b
         return _SESSION.get(url, params=params, stream=True, timeout=timeout)
     cur = url
     for _ in range(6):
-        p = urlparse(cur)
-        if p.scheme not in ("http", "https"):
-            raise FetchError(f"refusing non-http(s) URL: {cur!r}")
-        port = p.port or (443 if p.scheme == "https" else 80)
-        infos = _resolve_public(p.hostname or "", port)   # raises on non-public
-        with _pinned_dns(p.hostname or "", infos):
+        scheme, host, explicit_port = _url_parts(cur)         # every hop, not only the first
+        port = explicit_port or (443 if scheme == "https" else 80)
+        infos = _resolve_public(host, port)                   # raises on non-public
+        with _pinned_dns(host, infos):
             r = _SESSION.get(cur, params=params, stream=True, timeout=timeout, allow_redirects=False)
         params = None                           # query params apply to the first hop only
         if getattr(r, "is_redirect", False) or getattr(r, "is_permanent_redirect", False):
@@ -324,20 +399,91 @@ def _open_stream(url: str, params: dict | None, timeout: int, restrict_public: b
     raise FetchError("too many redirects")
 
 
+def _body_chunks(r, size: int = 65536):
+    """Yield the response body as it arrives.
+
+    ``iter_content`` blocks until a whole chunk is in, so a server trickling one
+    byte per read holds it open indefinitely without ever tripping the per-read
+    timeout. urllib3 2.x ``read1`` returns whatever is available, which lets the
+    caller's wall-clock check run between reads; older urllib3 falls back."""
+    read1 = getattr(getattr(r, "raw", None), "read1", None)
+    if read1 is None:
+        yield from r.iter_content(size)
+        return
+    while True:
+        chunk = read1(size, decode_content=True)
+        if not chunk:
+            return
+        yield chunk
+
+
+def probe_status(url: str, *, timeout: int = 20) -> int:
+    """HTTP status an unauthenticated GET of ``url`` ends on, following
+    redirects only through public hosts (the per-hop guard ``download`` uses).
+
+    Following redirects with the plain session would let a public URL bounce the
+    probe to an internal address and echo that service's status code into a
+    report — a port scan of the chair's network. Raises FetchError when refused."""
+    with _open_stream(url, None, timeout, restrict_public=True) as r:
+        return int(r.status_code)
+
+
+def get_json(url: str, *, params: dict | None = None, timeout: int = 60,
+             restrict_public: bool = False, max_bytes: int = _MAX_JSON_BYTES):
+    """GET and parse a JSON document under a byte cap. ``restrict_public`` is
+    for an API whose HOST came from the submission (a Dataverse install), so
+    every redirect hop is SSRF-checked and DNS-pinned like a download."""
+    buf = bytearray()
+    with _open_stream(url, params, timeout, restrict_public) as r:
+        r.raise_for_status()
+        for chunk in _body_chunks(r):
+            buf += chunk
+            if len(buf) > max_bytes:
+                raise FetchError(f"API response from {urlparse(url).hostname} exceeds "
+                                 f"the {max_bytes}-byte cap")
+    return json.loads(bytes(buf))
+
+
+# Platform spellings of a digest algorithm -> hashlib name. Anything else
+# (UNF, an unknown name) is "no usable checksum", never a silent pass.
+_HASH_NAMES = {"md5": "md5", "sha1": "sha1", "sha224": "sha224", "sha256": "sha256",
+               "sha384": "sha384", "sha512": "sha512"}
+
+
+def hash_algorithm(name: object) -> str | None:
+    """hashlib name for a platform's algorithm label ("MD5", "SHA-256", "sha-1")."""
+    key = str(name or "").strip().lower().replace("-", "").replace("_", "")
+    return _HASH_NAMES.get(key)
+
+
 def download(url: str, dest: Path, *, expected_md5: str | None = None,
+             expected_digest: tuple[str, str] | None = None,
              params: dict | None = None, timeout: int = 300,
              max_bytes: int = _MAX_DOWNLOAD_BYTES,
+             max_seconds: float = _MAX_DOWNLOAD_SECONDS,
              restrict_public: bool = False) -> tuple[bool, str]:
-    """Stream a file to dest; verify md5 if provided. Returns (ok, note).
+    """Stream a file to dest; verify a checksum if provided. Returns (ok, note).
 
-    Aborts (and removes the partial file) if the response exceeds ``max_bytes`` —
-    an untrusted platform could otherwise stream unbounded bytes onto the host.
-    Pass ``restrict_public=True`` for an author-declared URL to SSRF-guard every
+    ``expected_digest`` is ``(hashlib_name, hexdigest)`` (see ``hash_algorithm``);
+    ``expected_md5`` is the older md5-only form ("md5:" prefix tolerated).
+    Aborts (and removes the partial file) past ``max_bytes`` or ``max_seconds``
+    of wall clock — an untrusted platform could otherwise stream unbounded bytes
+    onto the host, or hold the fetch open forever by trickling them. Pass
+    ``restrict_public=True`` for an author-declared URL to SSRF-guard every
     redirect hop."""
+    algo, want = None, None
+    if expected_digest and expected_digest[0] and expected_digest[1]:
+        algo, want = expected_digest[0], str(expected_digest[1]).strip().lower()
+    elif expected_md5:
+        algo, want = "md5", expected_md5.strip().lower().replace("md5:", "")
+    try:
+        h = hashlib.new(algo or "md5")
+    except ValueError:
+        return False, f"download failed: unsupported checksum algorithm {algo!r}"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    h = hashlib.md5()
+    deadline = time.monotonic() + max_seconds
     total = 0
-    over = False
+    stopped = ""
     try:
         with _open_stream(url, params, timeout, restrict_public) as r:
             r.raise_for_status()
@@ -345,20 +491,24 @@ def download(url: str, dest: Path, *, expected_md5: str | None = None,
             if clen and clen.isdigit() and int(clen) > max_bytes:
                 return False, f"refusing oversized download ({int(clen)} bytes > {max_bytes}-byte cap)"
             with dest.open("wb") as fh:
-                for chunk in r.iter_content(65536):
+                for chunk in _body_chunks(r):
                     total += len(chunk)
                     if total > max_bytes:
-                        over = True
+                        stopped = f"download exceeded {max_bytes}-byte cap (possible archive bomb)"
+                        break
+                    if time.monotonic() > deadline:
+                        stopped = (f"download exceeded the {int(max_seconds)}s wall-clock limit "
+                                   "(server too slow, or trickling bytes)")
                         break
                     fh.write(chunk)
                     h.update(chunk)
     except Exception as e:
         return False, f"download failed: {e}"
-    if over:
+    if stopped:
         dest.unlink(missing_ok=True)
-        return False, f"download exceeded {max_bytes}-byte cap (possible archive bomb)"
-    if expected_md5:
-        if h.hexdigest() != expected_md5.replace("md5:", ""):
+        return False, stopped
+    if want:
+        if h.hexdigest() != want:
             return False, "checksum mismatch"
         return True, "checksum verified"
     return True, "downloaded (no checksum provided)"

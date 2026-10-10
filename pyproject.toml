@@ -7,7 +7,9 @@ name = "reprobe"
 version = "0.3.0"
 description = "Reusable artifact-reproducibility harness for AutoUI open data — URL in, runnable check out."
 readme = "README.md"
-requires-python = ">=3.11"
+# 3.11.4 is where tarfile gained the `data` extraction filter, which is now the
+# only containment for untrusted archive members (no hand-written fallback).
+requires-python = ">=3.11.4"
 license = { text = "MIT" }
 authors = [{ name = "AutoUI Open Data" }]
 dependencies = [
@@ -18,6 +20,13 @@ dependencies = [
     "typer>=0.9",
     "rich>=13.0",
     "jsonschema>=4",
+    # Parses the artifact's requirements.txt (PEP 508) so the install phase can drop
+    # editable/VCS/URL lines instead of a hand-written regex deciding what is safe.
+    "packaging>=23.0",
+    # Comparing regenerated outputs against the committed ones (compare.py):
+    # tolerance-aware tabular comparison is what pandas/numpy exist for.
+    "pandas>=2.0",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
@@ -25,7 +34,14 @@ dev = ["pytest>=7.0", "ruff>=0.6"]
 # Text extraction from a paper PDF committed in a repo, for the advisory
 # results-vs-paper comparison. Optional: without it the DOI path still works and
 # the report says the PDF was not read (never that it matched).
-paper = ["pypdf>=4.0"]
+# pypdf >= 6.14: earlier 6.x/5.x releases have 2026 advisories for infinite loops
+# and memory exhaustion on crafted PDFs. Parsing also runs in a time-boxed child
+# process (paper.pdf_text), so a future one costs a warning, not a batch.
+paper = ["pypdf>=6.14"]
+# Verify a Software Heritage deposit: re-hash the fetched tree with the reference
+# implementation and compare it to the SWHID. Without it an SWHID pin is recorded
+# but never counts as checksum-verified, so Available stays a candidate.
+swh = ["swh.model>=8.0"]
 
 [project.scripts]
 reprobe = "reprobe.cli:main"
@@ -50,6 +66,11 @@ reprobe = ["py.typed", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The default suite stays daemon-free and offline. Tests that launch real
+# containers carry @pytest.mark.docker and run in their own CI job with
+# `pytest -m docker` (a later -m on the command line replaces this one).
+addopts = "-m 'not docker'"
+markers = ["docker: launches real containers; needs a running Docker daemon"]
 
 # ============================================================================
 #  Lint gate. Deliberately narrow: the rules here are the ones that find BUGS,

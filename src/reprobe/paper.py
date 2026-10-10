@@ -19,17 +19,32 @@ can never imply more was checked than was read.
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+import yaml
+
 from .fetch.base import _MAX_DOWNLOAD_BYTES, FetchError, assert_safe_url, download, get
+from .fetch.doi import DOI_STRICT as _DOI_STRICT
+from .fetch.doi import normalize_doi
 
 # A DOI is author-controlled input that we interpolate into an API URL, so keep
 # it to the registered shape: 10.<registrant>/<suffix>, no spaces or delimiters.
 _DOI_RE = re.compile(r"\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)")
-_DOI_STRICT = re.compile(r"^10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$")
+# A badge IMAGE is not part of the DOI it displays:
+#   https://zenodo.org/badge/DOI/10.5281/zenodo.1234567.svg
+#   https://img.shields.io/badge/DOI-10.1145/3613904.3641909-blue.svg
+_IMAGE_SUFFIX = re.compile(r"\.(?:svg|png|jpe?g|gif|webp)$", re.I)
+_SHIELDS_COLOUR = re.compile(r"-[A-Za-z]+$")
+# Data-repository prefixes (Zenodo, figshare, Dryad, OSF, Harvard Dataverse). A
+# README's first DOI is usually the code deposit's badge, not the paper.
+_DEPOSIT_PREFIXES = ("10.5281/", "10.6084/", "10.5061/", "10.17605/", "10.7910/")
 
 # Markers of a reported statistic. Used to find the passages of a paper that
 # actually contain comparable numbers (see Paper.excerpt).
@@ -43,6 +58,8 @@ _MAX_PDF_BYTES = 64 * 1024 * 1024     # a paper is ~1-10 MB; refuse anything abs
 _MAX_PDF_PAGES = 60
 _MAX_TEXT_CHARS = 60_000              # what we are willing to hold / fence into a prompt
 _API_TIMEOUT = 30
+_PDF_TIMEOUT_S = 120                  # wall clock for parsing one PDF, in a child process
+_PDF_MEMORY_BYTES = 2 * 1024**3       # address-space cap for that child (POSIX only)
 
 
 @dataclass
@@ -95,13 +112,79 @@ class Paper:
 # --------------------------------------------------------------------------- #
 # DOI discovery
 # --------------------------------------------------------------------------- #
+def _trim_doi(doi: str, before: str) -> str:
+    """Strip what the prose / markup a DOI was matched in glued onto it.
+
+    The DOI pattern admits ``(`` and ``)``, so in ``![x](…/10.5281/z.1.svg)`` the
+    match ends ``.svg)`` — the image suffix only becomes visible once the closing
+    bracket is gone, so the trims repeat until nothing more comes off."""
+    shields = "shields.io/badge/" in before.lower()
+    prev = None
+    while doi != prev:
+        prev = doi
+        doi = _IMAGE_SUFFIX.sub("", doi)
+        if shields and doi != prev:
+            doi = _SHIELDS_COLOUR.sub("", doi)
+        # Trailing punctuation belongs to the sentence; a trailing ')' belongs to
+        # the DOI only when it closes a '(' inside it (10.1016/S0140-6736(20)30183-5).
+        if doi and doi[-1] in ").,;:" and not (doi[-1] == ")" and doi.count("(") >= doi.count(")")):
+            doi = doi[:-1]
+    return doi
+
+
+def _text_dois(text: str) -> list[str]:
+    out: list[str] = []
+    for m in _DOI_RE.finditer(text):
+        doi = _trim_doi(m.group(1), text[max(0, m.start() - 40):m.start()])
+        if _DOI_STRICT.match(doi) and doi not in out:
+            out.append(doi)
+    return out
+
+
+def _cff_dois(text: str) -> list[str]:
+    """DOIs a CITATION.cff declares, the paper's first.
+
+    ``preferred-citation`` is how CFF says "cite this paper instead"; the
+    top-level ``doi`` usually names the software deposit itself — the wrong thing
+    to compare results against. ``identifiers:`` entries of type doi count too.
+    Unparseable YAML falls back to a plain DOI scan."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return _text_dois(text)
+    if not isinstance(data, dict):
+        return _text_dois(text)
+    raw: list[Any] = []
+    for block in (data.get("preferred-citation"), data):
+        if not isinstance(block, dict):
+            continue
+        raw.append(block.get("doi"))
+        idents = block.get("identifiers")
+        for ident in idents if isinstance(idents, list) else []:
+            kind = ident.get("type") if isinstance(ident, dict) else None
+            if isinstance(kind, str) and kind.lower() == "doi":
+                raw.append(ident.get("value"))
+    out: list[str] = []
+    for value in raw:
+        # strings only: a YAML alias tree is cheap to load and exponential to str()
+        doi = normalize_doi(value) if isinstance(value, str) and value else None
+        if doi and doi not in out:
+            out.append(doi)
+    return out
+
+
 def find_doi(src: Path, manifest_meta: dict[str, Any] | None = None,
              pin_value: str = "") -> Optional[str]:
     """The paper's DOI from (in order) the manifest, CITATION.cff, README, or the
-    archival pin. Returns None when nothing DOI-shaped is present."""
+    archival pin. Returns None when nothing DOI-shaped is present.
+
+    Within CITATION.cff and the READMEs a paper DOI beats a data-repository one:
+    the Zenodo badge at the top of a README names the code deposit, and the pin
+    is already the last resort for that."""
     declared = ((manifest_meta or {}).get("paper") or {}).get("doi")
-    if declared and _DOI_STRICT.match(str(declared).strip()):
-        return str(declared).strip()
+    if declared and (doi := normalize_doi(str(declared))):
+        return doi
+    found: list[str] = []
     for name in ("CITATION.cff", "README.md", "README.rst", "README.txt", "README"):
         f = src / name
         if not f.is_file():
@@ -110,12 +193,34 @@ def find_doi(src: Path, manifest_meta: dict[str, Any] | None = None,
             text = f.read_text(encoding="utf-8", errors="replace")[:200_000]
         except OSError:
             continue
-        m = _DOI_RE.search(text)
-        if m:
-            return m.group(1).rstrip(").,;]}>\"'")
+        dois = _cff_dois(text) if name == "CITATION.cff" else _text_dois(text)
+        found += [d for d in dois if d not in found]
+    for doi in found:
+        if not doi.startswith(_DEPOSIT_PREFIXES):
+            return doi
+    if found:
+        return found[0]
     if pin_value and _DOI_STRICT.match(pin_value.strip()):
         return pin_value.strip()
     return None
+
+
+def _inside(src: Path, rel: str) -> Optional[Path]:
+    """``src/rel`` when it stays inside the repository, else None.
+
+    The manifest is author-written: an absolute path, a ``../`` or a committed
+    symlink would otherwise hand any PDF on the host to the LLM prompt."""
+    try:
+        root = src.resolve()
+        cand = src / rel
+        if cand.is_symlink():
+            return None
+        real = cand.resolve()
+        if not real.is_relative_to(root):
+            return None
+        return src / real.relative_to(root)
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def find_pdf(src: Path, manifest_meta: dict[str, Any] | None = None, *,
@@ -132,12 +237,14 @@ def find_pdf(src: Path, manifest_meta: dict[str, Any] | None = None, *,
     it was not committed. The paper is a property of the submission itself."""
     declared = ((manifest_meta or {}).get("paper") or {}).get("pdf")
     if declared:
-        cand = src / str(declared)
-        if cand.is_file() and cand.suffix.lower() == ".pdf":
+        cand = _inside(src, str(declared))
+        if cand is not None and cand.is_file() and cand.suffix.lower() == ".pdf":
             return cand                  # an explicit declaration always wins
     skip = exclude or set()
+    root = src.resolve()
     pdfs = [p for p in src.rglob("*.pdf")
             if p.is_file() and not p.is_symlink() and ".git" not in p.parts
+            and p.resolve().is_relative_to(root)
             and p.relative_to(src).as_posix() not in skip][:200]
     if not pdfs:
         return None
@@ -157,9 +264,45 @@ def find_pdf(src: Path, manifest_meta: dict[str, Any] | None = None, *,
 # --------------------------------------------------------------------------- #
 # Extraction
 # --------------------------------------------------------------------------- #
+# Runs in a child interpreter: pypdf on a hostile PDF has a long record of
+# infinite loops and memory blow-ups (a dozen advisories in 2026 alone), and this
+# is the trusted host. argv: pdf, pypdf's sys.path entry, max pages, max chars,
+# address-space cap. Output: one JSON object on stdout (ASCII, json's default).
+_EXTRACT = r"""
+import json, sys
+path, pypdf_home = sys.argv[1], sys.argv[2]
+max_pages, max_chars, mem = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+try:
+    import resource
+    resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (50_000_000, 50_000_000))   # its stderr file
+except Exception:
+    pass
+sys.path.append(pypdf_home)
+from pypdf import PdfReader
+reader = PdfReader(path)
+n = len(reader.pages)
+out, total = [], 0
+for i in range(min(n, max_pages)):
+    try:
+        chunk = reader.pages[i].extract_text() or ""
+    except Exception:
+        continue
+    out.append(chunk)
+    total += len(chunk)
+    if total >= max_chars:
+        break
+json.dump({"pages": n, "text": "\n".join(out)[:max_chars]}, sys.stdout)
+"""
+
+
 def pdf_text(path: Path) -> tuple[str, list[str]]:
     """Extract text from an untrusted PDF under strict caps. Returns (text,
-    warnings); text is "" when extraction is impossible, never an exception."""
+    warnings); text is "" when extraction is impossible, never an exception.
+
+    Parsing happens in a separate ``python -I`` process under a wall-clock limit
+    (and an address-space cap where the OS has one), so a PDF that sends pypdf
+    into a loop or eats memory costs one warning, not the chair's run."""
     warnings: list[str] = []
     try:
         size = path.stat().st_size
@@ -168,30 +311,43 @@ def pdf_text(path: Path) -> tuple[str, list[str]]:
     if size > _MAX_PDF_BYTES:
         return "", [f"PDF is {size} bytes, over the {_MAX_PDF_BYTES}-byte cap; not parsed"]
     try:
-        from pypdf import PdfReader
+        import pypdf
     except ImportError:
         return "", ["a paper PDF was found but text extraction needs pypdf "
                     "(pip install 'reprobe[paper]'); the PDF was NOT read"]
+    if not sys.executable:
+        return "", ["no Python interpreter to isolate PDF parsing in; the PDF was NOT read"]
+    # -I ignores PYTHON* env and user site-packages and keeps the cwd off
+    # sys.path, so pass where THIS process found pypdf (it may be a --user install).
+    home = str(Path(pypdf.__file__).resolve().parent.parent)
+    argv = [sys.executable, "-I", "-c", _EXTRACT, str(path.resolve()), home,
+            str(_MAX_PDF_PAGES), str(_MAX_TEXT_CHARS), str(_PDF_MEMORY_BYTES)]
     try:
-        reader = PdfReader(str(path))
-        pages = reader.pages[:_MAX_PDF_PAGES]
-        if len(reader.pages) > _MAX_PDF_PAGES:
-            warnings.append(f"PDF has {len(reader.pages)} pages; only the first "
-                            f"{_MAX_PDF_PAGES} were read")
-        out: list[str] = []
-        total = 0
-        for page in pages:
-            try:
-                chunk = page.extract_text() or ""
-            except Exception:                      # a single malformed page must not abort
-                continue
-            out.append(chunk)
-            total += len(chunk)
-            if total >= _MAX_TEXT_CHARS:
-                break
-        text = "\n".join(out)[:_MAX_TEXT_CHARS]
-    except Exception as e:                          # untrusted input: never propagate
-        return "", [f"could not parse the PDF ({type(e).__name__}); it was NOT read"]
+        # stdout is ONE json object whose text the child itself caps; stderr (pypdf's
+        # warnings, a traceback) goes to a temp file and only its tail is read, so a
+        # hostile PDF cannot make the host buffer an unbounded pipe
+        with tempfile.TemporaryFile() as err:
+            proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=err, timeout=_PDF_TIMEOUT_S,
+                                  stdin=subprocess.DEVNULL, cwd=tempfile.gettempdir())
+            err.seek(0, 2)
+            err.seek(max(0, err.tell() - 4096))
+            proc.stderr = err.read()
+    except subprocess.TimeoutExpired:
+        return "", [f"parsing the PDF took over {_PDF_TIMEOUT_S}s and was stopped (malformed or "
+                    "hostile PDF?); it was NOT read"]
+    except OSError as e:
+        return "", [f"could not start PDF parsing ({type(e).__name__}); the PDF was NOT read"]
+    if proc.returncode != 0:
+        last = (proc.stderr.decode("utf-8", "replace").strip().splitlines() or ["unknown error"])[-1]
+        kind = last.split(":", 1)[0].rsplit(".", 1)[-1].strip()[:60] or "error"
+        return "", [f"could not parse the PDF ({kind}); it was NOT read"]
+    try:
+        out = json.loads(proc.stdout.decode("utf-8", "replace"))
+        pages, text = int(out.get("pages") or 0), str(out.get("text") or "")[:_MAX_TEXT_CHARS]
+    except (ValueError, AttributeError, TypeError):
+        return "", ["PDF parsing returned no usable result; it was NOT read"]
+    if pages > _MAX_PDF_PAGES:
+        warnings.append(f"PDF has {pages} pages; only the first {_MAX_PDF_PAGES} were read")
     if not text.strip():
         warnings.append("the PDF yielded no extractable text (scanned image?); it was NOT read")
     return text, warnings

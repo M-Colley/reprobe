@@ -11,7 +11,7 @@ import pytest
 import reprobe.fetch.base as base
 from reprobe.fetch.base import (
     FetchError,
-    _check_tar_member,
+    _extract_tar,
     checksum_verdict,
     maybe_unzip,
     new_checksum_stats,
@@ -20,11 +20,12 @@ from reprobe.fetch.base import (
     safe_join,
 )
 from reprobe.fetch.dataverse import DataverseFetcher
+from reprobe.fetch.doi import normalize_doi
 from reprobe.fetch.dryad import _DOI as DRYAD_DOI
 from reprobe.fetch.figshare import _parse as fig_parse
 from reprobe.fetch.git_host import GitHostFetcher, normalize_browser_url
 from reprobe.fetch.osf import _decide_pin
-from reprobe.fetch.registry import _DOI_LIKE, configure, select
+from reprobe.fetch.registry import configure, select
 from reprobe.fetch.software_heritage import _SWHID
 
 
@@ -61,10 +62,28 @@ def test_id_and_doi_parsing():
     assert _SWHID.search("swh:1:rev:" + "a" * 40).group(1).startswith("swh:1:rev:")
 
 
-def test_doi_like_matches():
-    assert _DOI_LIKE.search("10.5281/zenodo.1")
-    assert _DOI_LIKE.search("https://doi.org/10.6084/m9.figshare.1")
-    assert not _DOI_LIKE.search("https://example.com/notadoi")
+@pytest.mark.parametrize("ref", [
+    "10.5281/zenodo.1",
+    "https://doi.org/10.6084/m9.figshare.1",
+    "doi:10.5281/zenodo.1",
+    "DOI: 10.5281/zenodo.1",
+    "https://www.doi.org/10.5281/zenodo.1",
+    "http://dx.doi.org/10.5281/zenodo.1",
+    "https://doi.org/10.5281%2Fzenodo.1",
+])
+def test_every_common_doi_spelling_normalises(ref):
+    assert normalize_doi(ref) in ("10.5281/zenodo.1", "10.6084/m9.figshare.1")
+
+
+@pytest.mark.parametrize("ref", [
+    "https://example.com/notadoi",
+    "https://evil.example/10.5281/zenodo.1",      # a DOI-shaped path on another host
+    "10.5281/zenodo.1 ; rm -rf",                  # never interpolated into a URL
+    "10.5281/zenodo.1?x=1#y",
+    "",
+])
+def test_non_dois_do_not_normalise(ref):
+    assert normalize_doi(ref) is None
 
 
 # --- figshare version-explicit references -----------------------------------
@@ -195,37 +214,60 @@ def test_maybe_unzip_contains_absolute_member(tmp_path):
     assert warnings or extracted.resolve().is_relative_to(dest.resolve())
 
 
-def _tarinfo(name, typ=tarfile.REGTYPE, linkname=""):
-    info = tarfile.TarInfo(name)
-    info.type = typ
-    info.linkname = linkname
-    return info
+def _tar_with(tmp_path, *members):
+    """A real tar on disk. members: (name, type, linkname, payload)."""
+    path = tmp_path / "a.tar"
+    with tarfile.open(path, "w") as t:
+        for name, typ, linkname, payload in members:
+            info = tarfile.TarInfo(name)
+            info.type, info.linkname = typ, linkname
+            info.size = len(payload) if typ == tarfile.REGTYPE else 0
+            t.addfile(info, io.BytesIO(payload) if typ == tarfile.REGTYPE else None)
+    return path
 
 
-@pytest.mark.parametrize("info", [
-    _tarinfo("../x"),
-    _tarinfo("a/../../x"),
-    _tarinfo("/abs"),
-    _tarinfo("C:\\evil.bat"),
-    _tarinfo("link", tarfile.SYMTYPE, "/etc/passwd"),
-    _tarinfo("sub/link", tarfile.SYMTYPE, "../../outside"),
-    _tarinfo("hard", tarfile.LNKTYPE, "../outside"),
-    _tarinfo("dev", tarfile.CHRTYPE),
-])
-def test_check_tar_member_rejects(info):
-    with pytest.raises(ValueError):
-        _check_tar_member(info)
+def _extract(tmp_path, *members):
+    dest = tmp_path / "out"
+    dest.mkdir()
+    warnings: list[str] = []
+    with tarfile.open(_tar_with(tmp_path, *members)) as t:
+        _extract_tar(t, dest, warnings)
+    return dest, warnings
 
 
-@pytest.mark.parametrize("info", [
-    _tarinfo("ok.txt"),
-    _tarinfo("sub/dir/ok.txt"),
-    _tarinfo("sub", tarfile.DIRTYPE),
-    _tarinfo("sub/link", tarfile.SYMTYPE, "sibling.txt"),
-    _tarinfo("sub/link2", tarfile.SYMTYPE, "../other/x"),     # stays inside dest
-])
-def test_check_tar_member_allows(info):
-    _check_tar_member(info)
+@pytest.mark.parametrize("name", ["../x", "a/../../x", "/abs"])
+def test_tar_members_cannot_escape_the_destination(tmp_path, name):
+    # Containment is the stdlib 'data' filter — a hand-written lexical check was
+    # walked out of with a chain of symlinks, so there is no fallback to one.
+    dest, _ = None, None
+    try:
+        dest, _ = _extract(tmp_path, (name, tarfile.REGTYPE, "", b"x"))
+    except tarfile.FilterError:
+        return                                  # refused outright: also correct
+    assert not (tmp_path / "x").exists()
+    assert not any(p.name == "x" and p.resolve().parent != dest.resolve() for p in dest.rglob("x"))
+
+
+def test_tar_device_nodes_are_refused(tmp_path):
+    with pytest.raises(tarfile.FilterError):
+        _extract(tmp_path, ("dev", tarfile.CHRTYPE, "", b""))
+
+
+def test_tar_symlink_out_of_the_tree_is_never_materialised(tmp_path):
+    members = (("ok.txt", tarfile.REGTYPE, "", b"hi"),
+               ("leak", tarfile.SYMTYPE, "/etc/passwd", b""))
+    try:
+        dest, warnings = _extract(tmp_path, *members)
+    except tarfile.FilterError:
+        return                                  # sound interpreter: the filter refuses it
+    assert (dest / "ok.txt").read_text() == "hi"
+    assert not (dest / "leak").exists() and not (dest / "leak").is_symlink()
+    assert any("link member" in w for w in warnings)   # older interpreter: dropped and said so
+
+
+def test_tar_plain_files_extract(tmp_path):
+    dest, _ = _extract(tmp_path, ("sub/dir/ok.txt", tarfile.REGTYPE, "", b"ok"))
+    assert (dest / "sub" / "dir" / "ok.txt").read_text() == "ok"
 
 
 # --- checksum honesty ---------------------------------------------------------
@@ -773,5 +815,5 @@ def test_the_public_probe_never_raises(monkeypatch):
     the report the finding it exists to add."""
     def boom(*a, **k):
         raise RuntimeError("network is down")
-    monkeypatch.setattr(git_host, "get", boom)
+    monkeypatch.setattr(git_host, "probe_status", boom)
     assert "could not complete" in git_host._public_probe("https://github.com/a/b")

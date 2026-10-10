@@ -79,14 +79,16 @@ class OllamaClient:
             st["detail"] = f"reachable but model NOT pulled — run: ollama pull {self.model}"
         return st
 
-    def generate_json(self, prompt: str, *, system: str | None = None) -> Optional[dict[str, Any]]:
+    def generate_json(self, prompt: str, *, system: str | None = None,
+                      schema: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
         """Single-shot, temperature 0, JSON-formatted. Returns a dict or None.
-        Never raises into the pipeline."""
+        Never raises into the pipeline. With ``schema``, Ollama constrains
+        decoding to it (structured outputs); the caller still validates."""
         payload: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
-            "format": "json",
+            "format": schema or "json",
             "keep_alive": self.keep_alive,
             "options": {"temperature": 0},
         }

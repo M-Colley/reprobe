@@ -23,8 +23,34 @@ report carries two lists — `claims` (what was machine-verified) and
 - **Artifacts Evaluated — Functional** — *candidate* (not auto-granted) when the
   primary declared steps pass and at least one declared `expected_output` is
   produced. Opt-in courtesy; a human confirms.
-- **Results Reproduced** — never auto-granted (needs produced-vs-published
-  comparison); reprobe surfaces produced artifacts to aid the human.
+- **Results Reproduced** — never auto-granted. reprobe puts two kinds of
+  evidence in front of the human:
+  - **regenerated vs committed** (deterministic): every file the authors
+    committed that the run rewrote is compared with their copy — identical,
+    *equivalent* within `rtol`/`atol` (integers must match exactly), *differs*
+    (with the largest difference and where), or *not compared* (binary, too
+    large, unreadable — never a guess). A difference can be nondeterminism, so
+    it is a finding to review, not a verdict.
+  - **results vs the paper** (LLM-advisory): a local model lines up the
+    paper's numbers with the run's output. A value the model quotes as produced
+    must actually occur in the output, or its match/mismatch is downgraded to
+    *unclear*; below `llm.confidence_threshold` the comparison is shown but adds
+    no finding.
+
+## Whose failure is it?
+
+The report never folds the harness's failures into the artifact's:
+
+- A step stopped by the sandbox's **budget** — the wall-clock timeout, the
+  `--memory` cap (docker's own OOM flag), or the console-output / disk caps in
+  `limits.yaml` — is `timeout` / `resource-limit`, and the verdict is
+  `resource-limit`, not `runs-with-failures`.
+- A dependency install **reprobe chose** (packages inferred from imports) that
+  fails is `infra-error`; the artifact's **own declared** requirements.txt /
+  environment.yml / renv.lock failing to install is a finding about the
+  artifact. Network trouble during either is never pinned on the author.
+- Exit 125 is docker's "could not start" code only when the docker CLI says
+  so; an artifact can exit 125 itself.
 
 ## FAIR
 

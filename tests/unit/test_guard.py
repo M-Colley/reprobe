@@ -52,7 +52,7 @@ class _FakeClient:
         self.confidence_threshold = threshold
         self.prompt = None
 
-    def generate_json(self, prompt, *, system=None):
+    def generate_json(self, prompt, *, system=None, schema=None):
         self.prompt = prompt
         return None if self._response is None else dict(self._response)
 
@@ -293,3 +293,52 @@ def test_infrastructure_failures_never_reach_the_model(tmp_path):
 
     assert not called, "the diagnoser was asked to explain a host outage"
     assert "llm_advisory" not in res.diagnostics
+
+
+# --------------------------------------------------------------------------- #
+# Schema validation + evidence checks on what the model returns
+# --------------------------------------------------------------------------- #
+class _SchemaSpy(_FakeClient):
+    def generate_json(self, prompt, *, system=None, schema=None):
+        self.schema = schema
+        return super().generate_json(prompt, system=system, schema=schema)
+
+
+def test_the_schema_is_sent_to_the_model_as_its_output_format():
+    client = _SchemaSpy({"likely_cause": "x", "suggested_fixes": ["y"], "confidence": 0.9})
+    roles.diagnose_failure(client, target="a.py", kind="script", env="e", log_tail="boom")
+    assert client.schema is not None and "suggested_fixes" in client.schema["properties"]
+
+
+def test_a_malformed_diagnosis_is_dropped_not_rendered():
+    # One string instead of a list used to render one character per line.
+    bad = {"likely_cause": "x", "suggested_fixes": "pip install shap", "confidence": 0.9}
+    assert roles.diagnose_failure(_FakeClient(bad), target="a.py", kind="script",
+                                  env="e", log_tail="boom") is None
+
+
+def _compare(claims, produced):
+    return roles.compare_results(_FakeClient({"claims": claims, "confidence": 0.9}),
+                                 paper="M = 3.21", produced=produced, coverage="full text")
+
+
+def test_a_produced_value_the_run_never_printed_cannot_support_a_match():
+    out = _compare([{"claim": "mean", "paper_value": "3.21", "produced_value": "3.21",
+                     "verdict": "match"}], produced="mean score: 2.97\n")
+    c = out["claims"][0]
+    assert c["produced_value_found"] is False and c["verdict"] == "unclear"
+    assert c["why"].startswith("[harness]")
+
+
+def test_a_produced_value_found_in_the_output_keeps_its_verdict():
+    out = _compare([{"claim": "mean", "paper_value": "3.21", "produced_value": "M = 3.21",
+                     "verdict": "match"}], produced="mean score: 3.21 (SD 0.4)\n")
+    c = out["claims"][0]
+    assert c["produced_value_found"] is True and c["verdict"] == "match"
+
+
+def test_one_malformed_claim_does_not_discard_the_rest():
+    out = _compare([{"claim": "ok", "verdict": "not-reported"},
+                    {"claim": "bad", "verdict": "match", "produced_value": 3.21}],
+                   produced="nothing")
+    assert [c["claim"] for c in out["claims"]] == ["ok"]
