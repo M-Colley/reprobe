@@ -184,6 +184,12 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
   notebooks run under `python3`, R notebooks under `ir`.
 - An image with no notebook executor at all is a harness error
   (`infra-error`), not a failed notebook.
+- base-r gains papermill (it had IRkernel but nothing to drive it), and its
+  build fails if the `ir` kernel is not registered. The lock was extended by
+  `images/lock-add.py` (via the `lock-base-images` workflow), which holds every
+  locked package at its exact build: all 361 keep their URL and sha256, so the
+  R stack is the one `2026.4` reports were made with. A plain `conda-lock` would
+  have re-solved the whole stack to add one package.
 - **An R Markdown document that asks for PDF is rendered as HTML when the image
   has no LaTeX**, and the step records the substitution. The render used to fail
   after every chunk had run — a typesetting failure read as the analysis
