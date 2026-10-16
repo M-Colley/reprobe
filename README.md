@@ -65,7 +65,7 @@ reprobe doctor --smoke     # self-check: config, Docker, base images, Ollama, sa
 The pinned Python/R analysis environments are published images —
 `ghcr.io/m-colley/reprobe-base-py` and `…-base-r`, built by
 [`images/build-images.sh`](images/build-images.sh). **The tag in force is whatever
-`config/pins.yaml` pins** (`<year>.<revision>` — currently `2026.4`); that file is
+`config/pins.yaml` pins** (`<year>.<revision>`); that file is
 the single source of truth, so read it there rather than trusting a number quoted
 in prose. Authors can test their code against the exact same environment reviewers
 use (see [docs/chair-runbook.md](docs/chair-runbook.md)).

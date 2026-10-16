@@ -140,9 +140,16 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:
   no network, no capabilities, seccomp, read-only rootfs, the Linux host-user
-  mapping, OOM detection, timeout kill with no orphan). **Not yet exercised end to
-  end:** the install phase inside the real base images (micromamba, renv, CRAN
-  binaries) — no test builds an environment in `reprobe-base-*`.
+  mapping, OOM detection, timeout kill with no orphan). The install phase inside
+  the real base images now has end-to-end tests (`tests/e2e`: a pip deposit with
+  `-e .`, a CRAN deposit, a deposit whose declared environment cannot install),
+  run on every push to main. **They have not passed yet:** the published
+  `2026.4` tags are unpullable (`MANIFEST_UNKNOWN` — the per-platform manifests
+  were deleted from GHCR), so the pins move to `2026.5`, built by the new
+  `build-base-images` workflow, which publishes one plain manifest per tag (no
+  attestation, no index) and refuses to overwrite a tag that exists. Until that
+  workflow has run, the e2e job fails at `reprobe pull`, and `reprobe pull` now
+  says why.
 - **Install-attribution markers can be forged** by output from third-party build
   code running in the same container (a nonce would be readable from the
   container's own command line). The worst case is an author's failure mislabelled
@@ -161,6 +168,20 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
   `detect/LICENSE.pipreqs`); `tables -> pytables` (not a PyPI name) is fixed.
 - R scanning ignores comments, string contents and R Markdown prose, reads
   `pacman::p_load`, skips `character.only` variables, and scans `.qmd` chunks.
+- The run plan is one order across languages: `01_prep.py`, `02_model.R`,
+  `03_report.R` run in that order (they used to run grouped by language). Only a
+  *leading* number is a step number, so `plot_study2.R` no longer sorts as step 2.
+  An R entry name needs a word boundary (`runtime_utils.R` is not `run`).
+- Files that are not analysis steps are not run as steps: R files another script
+  `source()`s (comments ignored), `R/` in an R package, and modules inside a
+  Python package.
+- Scripts that are not run are always named in a note ("N R scripts present but
+  NOT run: ..."), even when an entry point was found — before, a deposit with
+  `analysis.R` silently skipped its numbered scripts.
+- An R error that only names a file (`cannot open file 'x.csv'`) is no longer
+  diagnosed as a missing output directory: the open mode decides between "an
+  input is missing" (with a pointer to `data_sources` / `--data`) and "an output
+  directory is missing", and no mode means no diagnosis.
 
 ### Also
 

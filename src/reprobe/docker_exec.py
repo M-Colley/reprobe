@@ -124,8 +124,11 @@ def pull_image_detail(image: str, timeout: int = 600) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
     if r.returncode == 0:
         return True, ""
-    lines = [ln.strip() for ln in ((r.stderr or "") + "\n" + (r.stdout or "")).splitlines() if ln.strip()]
-    return False, (lines[-1] if lines else f"docker pull exited {r.returncode}")[:300]
+    # docker writes its ERROR to stderr and progress ("Pulling from …") to stdout:
+    # the error is the line that explains, so it is read first
+    err = [ln.strip() for ln in (r.stderr or "").splitlines() if ln.strip()]
+    out = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    return False, ((err or out or [f"docker pull exited {r.returncode}"])[-1])[:300]
 
 
 def image_digest(image: str) -> Optional[str]:

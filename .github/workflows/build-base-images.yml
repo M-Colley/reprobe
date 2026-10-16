@@ -1,0 +1,93 @@
+# Build and publish the pinned base images (reprobe-base-py / reprobe-base-r) to
+# GHCR from the committed conda-lock.yml files, at the tag config/pins.yaml pins.
+#
+# Run by hand (Actions → build-base-images → Run workflow) after bumping
+# `revision` in config/pins.yaml. It refuses to overwrite a tag that already
+# exists: a tag must name one set of bytes forever, or reports that cite it stop
+# meaning one thing.
+#
+# Why this exists: 2026.4 became unpullable. Its index still pointed at per-
+# platform manifests the registry no longer had (MANIFEST_UNKNOWN) — the
+# signature of "delete untagged versions" in the GHCR UI, which lists an image's
+# platform manifest and its attestation as untagged children. Images built here
+# carry NO attestation and NO index (one plain manifest per tag), so there are no
+# untagged children to delete. Still: never delete untagged versions of these
+# packages.
+name: build-base-images
+
+on:
+  workflow_dispatch:
+    inputs:
+      which:
+        description: "which images: all | py | r"
+        default: all
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # base-py carries a CPU torch stack; the build is long and large
+    timeout-minutes: 150
+    env:
+      # one plain manifest per tag (see the header)
+      BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Tools
+        # pyyaml for the script's pins reader. conda-lock is deliberately NOT
+        # installed: the build must use the committed lock, not re-solve it.
+        run: pip install pyyaml
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Resolve tags from pins.yaml
+        id: tags
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import yaml
+          b = yaml.safe_load(open("config/pins.yaml"))["base_images"]
+          print(f"py={b['python']}")
+          print(f"r={b['r']}")
+          PY
+      - name: Refuse to overwrite a published tag
+        env:
+          WHICH: ${{ inputs.which }}
+          PY_TAG: ${{ steps.tags.outputs.py }}
+          R_TAG: ${{ steps.tags.outputs.r }}
+        run: |
+          for t in $( [ "$WHICH" != r ] && echo "$PY_TAG" ) $( [ "$WHICH" != py ] && echo "$R_TAG" ); do
+            if docker manifest inspect "$t" >/dev/null 2>&1; then
+              echo "::error::$t already exists. Bump 'revision' in config/pins.yaml (tags are never reused)."
+              exit 1
+            fi
+          done
+      - name: Build
+        run: bash images/build-images.sh "${{ inputs.which }}"
+      - name: Push
+        env:
+          WHICH: ${{ inputs.which }}
+          PY_TAG: ${{ steps.tags.outputs.py }}
+          R_TAG: ${{ steps.tags.outputs.r }}
+        run: |
+          [ "$WHICH" = r ]  || docker push "$PY_TAG"
+          [ "$WHICH" = py ] || docker push "$R_TAG"
+      - name: Verify the published tags are pullable
+        env:
+          WHICH: ${{ inputs.which }}
+          PY_TAG: ${{ steps.tags.outputs.py }}
+          R_TAG: ${{ steps.tags.outputs.r }}
+        run: |
+          docker logout ghcr.io
+          for t in $( [ "$WHICH" != r ] && echo "$PY_TAG" ) $( [ "$WHICH" != py ] && echo "$R_TAG" ); do
+            docker rmi "$t"
+            docker pull "$t"
+            docker image inspect "$t" --format '{{index .RepoDigests 0}}'
+          done

@@ -10,16 +10,19 @@ year: 2026
 # reports that pin "<year>.<revision>" stop meaning one thing. Revision 2 adds
 # the base-r compiler toolchain + preinstalled stats stack; revision 3 adds the
 # dataset readers (pyarrow/openpyxl/pytables/...) that base-py was missing;
-# revision 4 adds CPU-only pytorch + torchvision to base-py (see CHANGELOG).
-revision: 4                       # base-image tag becomes "<year>.<revision>"
+# revision 4 adds CPU-only pytorch + torchvision to base-py (see CHANGELOG);
+# revision 5 republishes the same locks after 2026.4's platform manifests were
+# deleted from GHCR and the tag became unpullable (built by
+# .github/workflows/build-base-images.yml — never delete untagged versions).
+revision: 5                       # base-image tag becomes "<year>.<revision>"
 
 base_images:
   # The immutable build base. Add the @sha256:... digest after first pull:
   #   docker pull mambaorg/micromamba:1.5.10-noble && docker inspect ...
   micromamba_base: "mambaorg/micromamba:1.5.10-noble"
-  python:     "ghcr.io/m-colley/reprobe-base-py:2026.4"   # built by images/build-images.sh
-  r:          "ghcr.io/m-colley/reprobe-base-r:2026.4"
-  controller: "ghcr.io/m-colley/reprobe-controller:2026.4"
+  python:     "ghcr.io/m-colley/reprobe-base-py:2026.5"   # built by images/build-images.sh
+  r:          "ghcr.io/m-colley/reprobe-base-r:2026.5"
+  controller: "ghcr.io/m-colley/reprobe-controller:2026.5"
 
 llm:
   enabled: true
