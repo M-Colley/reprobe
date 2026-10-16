@@ -72,8 +72,9 @@ testpaths = ["tests"]
 # The default suite stays daemon-free and offline. Tests that launch real
 # containers carry @pytest.mark.docker and run in their own CI job with
 # `pytest -m docker` (a later -m on the command line replaces this one).
-addopts = "-m 'not docker'"
-markers = ["docker: launches real containers; needs a running Docker daemon"]
+addopts = "-m 'not docker and not e2e'"
+markers = ["docker: launches real containers; needs a running Docker daemon",
+           "e2e: the whole pipeline in the published base images (daemon + `reprobe pull`)"]
 
 # ============================================================================
 #  Lint gate. Deliberately narrow: the rules here are the ones that find BUGS,

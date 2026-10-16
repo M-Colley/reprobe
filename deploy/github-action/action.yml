@@ -16,7 +16,7 @@ runs:
   using: "composite"
   steps:
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with: { python-version: "3.13" }
     - name: Install reprobe
       shell: bash
@@ -51,7 +51,7 @@ runs:
         reprobe run "$REPROBE_SUBMISSION" "${extra[@]}"
     - name: Upload report
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: reprobe-report
         # Reports land in work/<submission>/report/ (report.json/.md/.html and

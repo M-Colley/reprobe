@@ -13,6 +13,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   unit:
@@ -22,8 +23,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       # The optional extras are installed so their tests run for real in CI: the
@@ -40,8 +41,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Install
@@ -65,8 +66,8 @@ jobs:
       # a skip would be a silent green, so this makes it a failure.
       REPROBE_REQUIRE_DOCKER: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Install
@@ -77,3 +78,26 @@ jobs:
         run: docker version
       - name: Sandbox tests
         run: python -m pytest -m docker tests/sandbox -v
+
+  # The whole pipeline in the PUBLISHED base images: the networked install phase
+  # (pip, CRAN snapshot), the offline run, and the report. The sandbox job proves
+  # the envelope holds; this proves an artifact can actually be built and run
+  # inside it. Pulling the base images costs minutes, so it runs on main (and on
+  # demand), not on every pull request.
+  e2e:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      REPROBE_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Pull the pinned base images
+        run: reprobe pull
+      - name: End-to-end
+        run: python -m pytest -m e2e tests/e2e -v

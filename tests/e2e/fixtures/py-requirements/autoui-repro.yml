@@ -1,0 +1,6 @@
+version: 1
+environment:
+  dependencies: requirements.txt
+run:
+  steps: [analyze.py]
+expected_outputs: [results/table.csv]

@@ -138,9 +138,11 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
 
 ### Known limits
 
-- **No container has been run against these changes.** The Linux user mapping,
-  the micromamba/renv invocations and `tests/sandbox/` are verified by the CI
-  `sandbox` job, not locally; renv restores and R builds are untested here.
+- **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:
+  no network, no capabilities, seccomp, read-only rootfs, the Linux host-user
+  mapping, OOM detection, timeout kill with no orphan). **Not yet exercised end to
+  end:** the install phase inside the real base images (micromamba, renv, CRAN
+  binaries) — no test builds an environment in `reprobe-base-*`.
 - **Install-attribution markers can be forged** by output from third-party build
   code running in the same container (a nonce would be readable from the
   container's own command line). The worst case is an author's failure mislabelled
