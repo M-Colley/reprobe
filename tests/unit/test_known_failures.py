@@ -132,3 +132,62 @@ def test_a_missing_output_directory_explains_why_git_lost_it():
     assert "plots" in d["likely_cause"]
     assert "does not track empty directories" in d["likely_cause"]
     assert any("dir.create" in f for f in d["suggested_fixes"])
+
+
+# --------------------------------------------------------------------------- #
+# R's one "cannot open file" message has several producers: never guess which
+# --------------------------------------------------------------------------- #
+from reprobe.orchestrator import known_failure_diagnosis as _kfd  # noqa: E402
+
+READ_FAIL = """Error in file(file, "rt") : cannot open the connection
+Calls: read.csv -> read.table -> file
+In addition: Warning message:
+In file(file, "rt") :
+  cannot open file 'data/survey.csv': No such file or directory
+Execution halted"""
+
+WRITE_FAIL = """Error in file(file, ifelse(append, "a", "w")) :
+  cannot open the connection
+Calls: write.csv -> eval.parent -> eval -> eval -> <Anonymous> -> file
+In addition: Warning message:
+In file(file, ifelse(append, "a", "w")) :
+  cannot open file 'results/tables/out.csv': No such file or directory"""
+
+
+def test_a_missing_input_is_not_called_a_missing_output_directory():
+    """The old pattern told an author whose data file was absent to
+    `dir.create("data/survey.csv")` — labelled "not an LLM guess"."""
+    d = _kfd(READ_FAIL, 1)
+    assert "reads `data/survey.csv`" in d["likely_cause"]
+    assert "dir.create" not in " ".join(d["suggested_fixes"])
+    assert any("data_sources" in f for f in d["suggested_fixes"])
+
+
+def test_a_write_into_a_missing_directory_names_the_directory():
+    w = WRITE_FAIL.replace('ifelse(append, "a", "w")', '"w"')
+    d = _kfd(w, 1)
+    assert "writes into `results/tables`" in d["likely_cause"]
+    assert 'dir.create("results/tables"' in d["suggested_fixes"][0]
+
+
+def test_without_the_mode_line_nothing_is_stated_as_fact():
+    d = _kfd("cannot open file 'x.csv': No such file or directory\nExecution halted", 1)
+    assert d is None
+
+
+def test_a_missing_step_script_is_named_as_such():
+    d = _kfd("Fatal error: cannot open file 'analysis/run_all.R': No such file or directory", 2)
+    assert "does not exist in the deposit" in d["likely_cause"]
+
+
+def test_setwd_to_the_authors_machine_is_its_own_finding():
+    d = _kfd('Error in setwd("C:/Users/me/proj") : cannot change working directory', 1)
+    assert "setwd()" in d["likely_cause"] and "dir.create" not in " ".join(d["suggested_fixes"])
+
+
+def test_the_rstudio_advice_depends_on_where_the_script_lives():
+    root = _kfd("Error: RStudio not running", 1, "run_all.R")
+    sub = _kfd("Error: RStudio not running", 1, "analysis/run_all.R")
+    assert "drop the two rstudioapi lines" in root["suggested_fixes"][0]
+    assert 'setwd(here::here("analysis"))' in sub["suggested_fixes"][0]
+    assert "drop the two rstudioapi lines" not in " ".join(sub["suggested_fixes"])

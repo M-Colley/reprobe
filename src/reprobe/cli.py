@@ -168,17 +168,24 @@ def pull(
     if smoke and smoke not in images:
         images.append(smoke)
 
+    from .docker_exec import pull_image_detail
+
     ok = True
+    errors: list[tuple[str, str]] = []
     t = Table("image", "status")
     for img in images:
         if image_present(img):
             t.add_row(img, "ok (already present)")
             continue
         console.print(f"pulling {img}…")
-        pulled = pull_image(img)
+        pulled, why = pull_image_detail(img)
         ok &= pulled
-        t.add_row(img, "ok (pulled)" if pulled else "FAIL (not found, private, or network error)")
+        t.add_row(img, "ok (pulled)" if pulled else "FAIL (see below)")
+        if not pulled:
+            errors.append((img, why))
     console.print(t)
+    for img, why in errors:              # untruncated: the table clips long image names
+        console.print(f"[red]{img}[/red]: {why}")
     raise typer.Exit(0 if ok else 1)
 
 

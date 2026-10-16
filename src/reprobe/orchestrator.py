@@ -831,7 +831,7 @@ class Orchestrator:
         # When one matches, the model is not asked: we already know the cause, and
         # a small local model's second opinion beside a known fact can only
         # contradict it.
-        known = known_failure_diagnosis(run_tail, res.exit_code)
+        known = known_failure_diagnosis(run_tail, res.exit_code, step.target)
         if known:
             res.diagnostics["harness_diagnosis"] = known
             return
@@ -1040,13 +1040,52 @@ _URL_IN_LOG_RE = re.compile(r"https?://[^\s\"'\)\]]+")
 
 #: A directory the script writes into that git never carried: git does not track
 #: empty directories, so `plots/` exists for the author and for nobody else.
-_NO_DIR_RE = re.compile(
-    r"Cannot find directory '(?P<dir>[^']+)'|"
-    r"cannot change working directory|"
-    r"cannot open file '(?P<path>[^']+)': No such file or directory")
+#: ggsave's message is unambiguous: it is only ever about an output directory.
+_NO_DIR_RE = re.compile(r"Cannot find directory '(?P<dir>[^']+)'")
+#: R prints ONE message for every connection it cannot open — a read, a write, a
+#: missing script — so the message alone says nothing about which. The mode in the
+#: accompanying `In file(file, "rt")` line does: r* is a read, w*/a* a write.
+_R_OPEN_RE = re.compile(r"cannot open file '(?P<path>[^']+)': No such file or directory")
+_R_OPEN_MODE_RE = re.compile(r"""\bfile\([^,()]*,\s*["'](?P<mode>[rwa])[bt+]?["']""")
+#: Rscript itself, when the step's script is not there at all.
+_R_NO_SCRIPT_RE = re.compile(r"Fatal error: cannot open file '(?P<path>[^']+)'")
+_R_SETWD_RE = re.compile(r"cannot change working directory")
 
 
-def known_failure_diagnosis(log_tail: str, exit_code: Optional[int]) -> Optional[dict[str, Any]]:
+def _missing_output_dir(missing: str) -> dict[str, Any]:
+    return {
+        "source": _DETERMINISTIC,
+        "likely_cause": (
+            f"the script writes into `{missing}`, which does not exist in a fresh clone. "
+            "git does not track empty directories, so a folder that exists on the "
+            "author's machine is simply absent for everyone else — including every "
+            "reviewer, and this harness."),
+        "suggested_fixes": [
+            f'create it in the script: `dir.create("{missing}", recursive = TRUE, showWarnings = FALSE)` '
+            "at the top, or `ggsave(..., create.dir = TRUE)` per call",
+            f'or commit `{missing}/.gitkeep` so a clone carries the directory',
+        ],
+    }
+
+
+def _rstudio_fixes(target: str) -> list[str]:
+    """The idiom sets the working directory to the SCRIPT's directory. The harness
+    runs every script from the repository root, so dropping the lines is the right
+    advice only for a script that sits at the root."""
+    folder = target.replace("\\", "/").rsplit("/", 1)[0] if "/" in target.replace("\\", "/") else ""
+    if not folder:
+        return ["drop the two rstudioapi lines: the harness runs the script from the repository "
+                "root, which is the script's own directory here — exactly what they were setting",
+                "if a path anchor is genuinely needed, `here::here(...)` resolves without an IDE"]
+    return [f"replace them with `setwd(here::here(\"{folder}\"))`: the idiom set the working "
+            f"directory to the script's own folder (`{folder}`), and without an IDE the script "
+            "is run from the repository root instead",
+            f"or rewrite the script's paths relative to the repository root (prefix them with "
+            f"`{folder}/`), which also makes it runnable with plain `Rscript`"]
+
+
+def known_failure_diagnosis(log_tail: str, exit_code: Optional[int],
+                            target: str = "") -> Optional[dict[str, Any]]:
     """Name a failure whose console output has exactly one possible cause.
 
     These are worth recognising deterministically rather than leaving to the
@@ -1073,11 +1112,7 @@ def known_failure_diagnosis(log_tail: str, exit_code: Optional[int]) -> Optional
                 "is missing is the IDE, and a headless container cannot provide one. The "
                 "artifact runs for its author because the author runs it inside RStudio; it "
                 "does not run for anyone using `Rscript`."),
-            "suggested_fixes": [
-                "drop the two rstudioapi lines: the harness already runs the script with the "
-                "working directory at the artifact root, which is what they were setting",
-                "if a path anchor is genuinely needed, `here::here(...)` resolves without an IDE",
-            ],
+            "suggested_fixes": _rstudio_fixes(target),
         }
 
     if (m := _NO_FUNCTION_RE.search(log_tail)):
@@ -1121,21 +1156,55 @@ def known_failure_diagnosis(log_tail: str, exit_code: Optional[int]) -> Optional
             ],
         }
 
-    if (m := _NO_DIR_RE.search(log_tail)):
-        missing = m.group("dir") or m.group("path") or "the output directory"
+    if (m := _R_NO_SCRIPT_RE.search(log_tail)):
+        return {
+            "source": _DETERMINISTIC,
+            "likely_cause": (f"the step's script `{m.group('path')}` does not exist in the deposit, so "
+                             "R could not start it. Nothing of the analysis ran."),
+            "suggested_fixes": ["correct the step path in the manifest (it is relative to the "
+                                "repository root), or commit the missing script"],
+        }
+
+    if _R_SETWD_RE.search(log_tail):
         return {
             "source": _DETERMINISTIC,
             "likely_cause": (
-                f"the script writes to `{missing}`, which does not exist in a fresh clone. "
-                "git does not track empty directories, so a folder that exists on the "
-                "author's machine is simply absent for everyone else — including every "
-                "reviewer, and this harness."),
+                "the script calls `setwd()` with a directory that does not exist here — typically "
+                "an absolute path on the author's machine (`C:/Users/…`, `~/Dropbox/…`). Every "
+                "relative path after it was written against that directory."),
             "suggested_fixes": [
-                f'create it in the script: `dir.create("{missing}", showWarnings = FALSE)` '
-                "at the top, or `ggsave(..., create.dir = TRUE)` per call",
-                f'or commit `{missing}/.gitkeep` so a clone carries the directory',
+                "delete the setwd() call and write paths relative to the repository root, which "
+                "is the working directory the script is run from",
+                "or anchor them with `here::here(...)`, which needs no machine-specific path",
             ],
         }
+
+    if (m := _R_OPEN_RE.search(log_tail)):
+        mode = _R_OPEN_MODE_RE.search(log_tail)
+        path = m.group("path")
+        if mode and mode.group("mode") == "r":
+            # a READ of a file that is not here: two causes, and both are said
+            return {
+                "source": _DETERMINISTIC,
+                "likely_cause": (
+                    f"the script reads `{path}`, which is not in the run directory (the "
+                    "repository root). Either the file is not in the deposit — data kept in a "
+                    "separate repository, or never committed — or the path is written relative "
+                    "to a different working directory than the repository root."),
+                "suggested_fixes": [
+                    f"if `{path}` lives in a data deposit (OSF, Zenodo, …), declare it with "
+                    "`data_sources:` in the manifest (or re-run with `--data <deposit>`)",
+                    "if it is in the repository under another directory, make the path relative "
+                    "to the repository root",
+                ],
+            }
+        if mode and mode.group("mode") in ("w", "a"):
+            missing = path.rsplit("/", 1)[0] if "/" in path else path
+            return _missing_output_dir(missing)
+        # no mode line: which of the three it was is unknown — say nothing as fact
+
+    if (m := _NO_DIR_RE.search(log_tail)):
+        return _missing_output_dir(m.group("dir"))
 
     if exit_code == 2 and _USAGE_RE.search(log_tail):
         m = _ARG_REQUIRED_RE.search(log_tail)

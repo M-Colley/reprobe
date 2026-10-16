@@ -104,17 +104,28 @@ def image_present(image: str) -> bool:
 def pull_image(image: str, timeout: int = 600) -> bool:
     """Pull a TRUSTED image (declared in the chair's own pins.yaml). Author
     code images are never auto-pulled — run_container requires them present."""
+    return pull_image_detail(image, timeout)[0]
+
+
+def pull_image_detail(image: str, timeout: int = 600) -> tuple[bool, str]:
+    """``(ok, docker's own words)``. "not found, private, or network error" was a
+    guess printed for every failure; the daemon's message says which it was."""
     if not image:
-        return False
+        return False, "no image named"
     try:
         _validate_image(image)
-    except SandboxViolation:
-        return False
+    except SandboxViolation as e:
+        return False, str(e)
     try:
-        r = subprocess.run(["docker", "pull", image], capture_output=True, timeout=timeout)
-        return r.returncode == 0
-    except Exception:
-        return False
+        r = subprocess.run(["docker", "pull", image], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"docker pull did not finish within {timeout}s"
+    except Exception as e:                       # noqa: BLE001 - reported, never raised
+        return False, f"{type(e).__name__}: {e}"
+    if r.returncode == 0:
+        return True, ""
+    lines = [ln.strip() for ln in ((r.stderr or "") + "\n" + (r.stdout or "")).splitlines() if ln.strip()]
+    return False, (lines[-1] if lines else f"docker pull exited {r.returncode}")[:300]
 
 
 def image_digest(image: str) -> Optional[str]:

@@ -396,3 +396,105 @@ def test_redaction_touches_env_values_only():
     assert red[red.index("--network") + 1] == "none"          # untouched
     assert "TOKEN=***" in red and "MODE=***" in red
     assert not any("s3cret" in a for a in red)
+
+
+# --- image_digest: pins exact bytes for the report, never fakes -------------
+
+def _patch_inspect(monkeypatch, stdout, returncode=0):
+    def fake_run(argv, **kw):
+        assert argv[:3] == ["docker", "image", "inspect"]
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+    monkeypatch.setattr(docker_exec.subprocess, "run", fake_run)
+
+
+def test_image_digest_prefers_repo_digest(monkeypatch):
+    _patch_inspect(monkeypatch, "ghcr.io/m-colley/reprobe-base-py@sha256:" + "a" * 64 + "\n")
+    assert docker_exec.image_digest("ghcr.io/m-colley/reprobe-base-py:2026.1") == "sha256:" + "a" * 64
+
+
+def test_image_digest_falls_back_to_local_id(monkeypatch):
+    # Locally-built, never-pushed image: no RepoDigest, template yields the Id.
+    _patch_inspect(monkeypatch, "sha256:" + "b" * 64 + "\n")
+    assert docker_exec.image_digest("local-only:latest") == "sha256:" + "b" * 64
+
+
+def test_image_digest_none_when_absent(monkeypatch):
+    _patch_inspect(monkeypatch, "", returncode=1)
+    assert docker_exec.image_digest("missing:tag") is None
+
+
+def test_image_digest_none_when_docker_unreachable(monkeypatch):
+    def boom(argv, **kw):
+        raise FileNotFoundError("docker not on PATH")
+    monkeypatch.setattr(docker_exec.subprocess, "run", boom)
+    assert docker_exec.image_digest("any:tag") is None
+
+
+def test_image_digest_empty_image_is_none():
+    assert docker_exec.image_digest("") is None
+
+
+# --------------------------------------------------------------------------- #
+# Daemon loss vs artifact failure — exit 125 means both, and the report must
+# not blame the base image for a host outage.
+# --------------------------------------------------------------------------- #
+def _run_with(monkeypatch, tmp_path, *, returncode, stdout="", daemon_up=True):
+    """Runs a container whose `docker run` writes `stdout` and exits `returncode`."""
+    _patch_docker(monkeypatch, [], lambda timeout: returncode, stdout=stdout, daemon_up=daemon_up)
+    return run_container(_spec(), _limits(), tmp_path / "run.log")
+
+
+def test_daemon_dying_mid_run_is_not_reported_as_a_broken_image(monkeypatch, tmp_path):
+    """The engine vanishing under a running container exits 125 exactly like a
+    container that never started. Telling a chair to check the base image for a
+    step that ran fine for 30 minutes sends them after the wrong thing."""
+    raw = _run_with(monkeypatch, tmp_path, returncode=125,
+                    stdout='Trial 948 finished\ntime="..." level=error '
+                           'msg="error waiting for container: unexpected EOF"\n')
+    assert raw.error.startswith("docker-daemon-lost")
+    assert "nothing here is a statement about the artifact" in raw.error
+
+
+def test_daemon_loss_detected_even_when_the_cli_said_nothing(monkeypatch, tmp_path):
+    # No disconnect wording in the log, but nothing answers afterwards either.
+    raw = _run_with(monkeypatch, tmp_path, returncode=125, stdout="boom\n", daemon_up=False)
+    assert raw.error.startswith("docker-daemon-lost")
+
+
+def test_genuine_start_failure_stays_a_start_failure(monkeypatch, tmp_path):
+    """125 with a live daemon and no disconnect: the container really did fail to
+    start, and the runner's "check the base image" wording is the right advice."""
+    raw = _run_with(monkeypatch, tmp_path, returncode=125,
+                    stdout="docker: Error response from daemon: no such file or directory\n")
+    assert raw.error is None and raw.exit_code == 125
+    assert docker_exec.docker_cli_failed(raw.log_path)
+
+
+def test_an_artifact_exiting_125_is_not_a_docker_failure(monkeypatch, tmp_path):
+    # docker passes the program's own status through; without the CLI's own
+    # "docker: …" message, 125 is just what the author's code returned.
+    raw = _run_with(monkeypatch, tmp_path, returncode=125, stdout="Traceback ...\nSystemExit: 125\n")
+    assert raw.error is None
+    assert not docker_exec.docker_cli_failed(raw.log_path)
+
+
+def test_missing_image_is_only_claimed_when_the_daemon_can_answer(monkeypatch, tmp_path):
+    """`docker image inspect` fails identically for "no such image" and "no
+    daemon", so an unreachable daemon must not be reported as a missing image —
+    that sends a chair to `docker pull` a tag that was there all along."""
+    monkeypatch.setattr(docker_exec, "image_present", lambda image: False)
+    monkeypatch.setattr(docker_exec, "docker_available", lambda: False)
+    monkeypatch.setattr(docker_exec, "host_user", lambda limits: None)
+    raw = run_container(_spec(), _limits(), tmp_path / "a.log")
+    assert raw.error.startswith("docker-unavailable")
+    assert "image-not-present" not in raw.error
+
+    monkeypatch.setattr(docker_exec, "docker_available", lambda: True)
+    raw = run_container(_spec(), _limits(), tmp_path / "b.log")
+    assert raw.error.startswith("image-not-present")
+
+
+def test_daemon_down_errors_are_recognisable_to_callers():
+    # The orchestrator keys its abort on these prefixes; keep them in sync.
+    assert "docker-daemon-lost".startswith(docker_exec.DAEMON_DOWN_ERRORS)
+    assert "docker-unavailable".startswith(docker_exec.DAEMON_DOWN_ERRORS)
