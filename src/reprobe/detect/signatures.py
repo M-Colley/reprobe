@@ -27,14 +27,19 @@ _SKIP_DIRS = {".git", ".hg", "node_modules", "__pycache__", ".ipynb_checkpoints"
 # no escaping the fetch dir) and stop after a sane cap so a deposit with millions
 # of files can't hang detection before any container is even used.
 _MAX_SCAN_FILES = 200_000
-_NUM_RE = re.compile(r"(\d+)")
+# A STEP number is a leading one (`01_prep`, `step2_model`, `part-3`) — not any
+# digits in the name: `plot_study2.R` is not step 2, and reading it so ran it
+# before `03_model.R`.
+_NUM_RE = re.compile(r"^(?:step|part|phase|stage|s)?[ _.-]?(\d+)(?!\d)", re.I)
 _ENTRY_PY = {"main.py", "run.py", "analysis.py", "analyze.py", "pipeline.py",
              "train.py", "evaluate.py", "reproduce.py", "make_figures.py"}
 # Word-boundary stems only ("run_all.py" yes, "runners.py"/"mainwindow.py" no),
 # and only at shallow depth (see _entry_shallow) so nested library helpers are
 # never executed as top-level steps. Exact _ENTRY_PY names match at any depth.
 _ENTRY_PY_RE = re.compile(r"^(main|run|analysis|analyze|pipeline|reproduce|train|evaluate|make_figures?)([_-]|\.py$)", re.I)
-_ENTRY_R_RE = re.compile(r"^(main|run|analy|reproduce)", re.I)
+# Word-bounded: `runtime_utils.R` and `analytic_helpers.R` are not entry points.
+_ENTRY_R_RE = re.compile(r"^(main|run|run_?all|analysis|analyses|analyze|analyse|reproduce)([_\-. ]|$)",
+                         re.I)
 # Literate R sources whose code chunks are scanned for packages. .qmd is never a
 # run step (there is no Quarto runner), but its R chunks are still code the
 # artifact needs.
@@ -835,6 +840,34 @@ def _entry_shallow(p: Path, root: Path) -> bool:
     return len(parts) == 1 or (len(parts) == 2 and parts[0].lower() in _SCRIPT_DIRS)
 
 
+_R_SOURCE_RE = re.compile(r"""(?<![\w.])(?:sys\.)?source\s*\(\s*(?P<arg>[^)]*)\)""")
+_R_STR_RE = re.compile(r"""["']([^"']+)["']""")
+
+
+def _sourced_r_files(root: Path, r_scripts: list[Path]) -> set[Path]:
+    """R scripts that another script loads with ``source("…")`` (a literal path, or
+    ``here::here("dir", "x.R")`` / ``file.path("dir", "x.R")``), resolved against the
+    repository root and against the sourcing script's own directory. Comments and
+    strings elsewhere are ignored (``_r_views``)."""
+    by_path = {q.resolve(): q for q in r_scripts}
+    found: set[Path] = set()
+    for p in r_scripts:
+        clean, masked = _r_views(_read_head(p))
+        for m in _R_SOURCE_RE.finditer(masked):
+            parts = _R_STR_RE.findall(clean[m.start("arg"):m.end("arg")])
+            if not parts:
+                continue
+            rel_path = "/".join(parts) if len(parts) > 1 else parts[0]
+            for base in (root, p.parent):
+                try:
+                    cand = (base / rel_path).resolve()
+                except (OSError, ValueError):
+                    continue
+                if cand in by_path and by_path[cand] != p:
+                    found.add(by_path[cand])
+    return found
+
+
 def _unity_projects(root: Path) -> list[Path]:
     projects = []
     for dirpath, dirs, files in os.walk(root, followlinks=False):
@@ -895,65 +928,86 @@ def scan(src_dir: str | Path) -> DetectResult:
             "run order is inferred, not declared: no numeric filename prefixes and the README does not "
             "reference these files by name. Names that look downstream (analyse/combine/summary/"
             "compare/plot) were moved last; everything else is alphabetical. If the real order differs, "
-            "declare `steps:` in .reprobe.yaml — a mis-ordered aggregation step can read stale committed "
-            "outputs and pass.")
+            "declare `run: steps:` in autoui-repro.yml — a mis-ordered aggregation step can read stale "
+            "committed outputs and pass.")
 
+    # R helpers that other scripts source() are not steps of their own (running them
+    # standalone executes them twice, and adds trivial "passes"); nor is the R/ of
+    # an R package, whose functions are loaded, not run.
+    sourced = _sourced_r_files(root, r_scripts)
+    is_pkg = (root / "DESCRIPTION").is_file()
+    r_candidates = [p for p in r_scripts if p not in sourced
+                    and not (is_pkg and p.relative_to(root).parts[0] == "R")]
+    # Python files inside a package (a directory with __init__.py) are modules: run
+    # as a script, `from . import x` fails with an ImportError blamed on the artifact.
+    py_candidates = [p for p in py_files if not (p.parent / "__init__.py").is_file()]
+
+    planned: list[tuple[Path, str]] = []          # (path, runner), ordered below
+    unscheduled: dict[str, list[str]] = {}
     if notebooks:
         types.append("jupyter")
-        for nb in notebooks:
-            steps.append(RunStep(runner="jupyter", target=rel(nb), kind="jupyter"))
+        planned += [(nb, "jupyter") for nb in notebooks]
     if rmds:
         types.append("rmarkdown")
-        for rmd in rmds:
-            steps.append(RunStep(runner="rmarkdown", target=rel(rmd), kind="rmarkdown"))
+        planned += [(rmd, "rmarkdown") for rmd in rmds]
 
     # R scripts: entry-named scripts always run; the full set only when no
-    # notebooks/Rmd drive the analysis. Suppressed scripts still register the
-    # language (so renv restore runs) and leave a note in the report.
+    # notebooks/Rmd drive the analysis.
     if r_scripts:
-        entry_r = [p for p in r_scripts if _ENTRY_R_RE.match(p.stem) and _entry_shallow(p, root)]
-        would_run = entry_r or r_scripts
-        chosen = entry_r if (notebooks or rmds) else would_run
-        if chosen:
-            types.append("r")
-            for p in sorted(chosen, key=lambda x: _order_key(x, root, readme)):
-                steps.append(RunStep(runner="r", target=rel(p), kind="r"))
-        suppressed = len(would_run) - len(chosen)
-        if suppressed:
-            types.append("r")
-            notes.append(f"{suppressed} R script(s) present but not scheduled "
-                         "(notebooks/R Markdown assumed to drive the analysis)")
+        types.append("r")
+        entry_r = [p for p in r_candidates if _ENTRY_R_RE.match(p.stem) and _entry_shallow(p, root)]
+        chosen = entry_r if (notebooks or rmds or entry_r) else r_candidates
+        planned += [(p, "r") for p in chosen]
+        unscheduled["R"] = [rel(p) for p in r_candidates if p not in chosen]
+        if sourced:
+            notes.append(f"{len(sourced)} R file(s) are source()d by other scripts and run as part of "
+                         "them, not as steps of their own: " + ", ".join(sorted(rel(p) for p in sourced)[:8]))
 
     # Python scripts: entry-named scripts always run; otherwise notebooks are
     # assumed to be the entry point and plain scripts are noted, not run.
     if py_files:
-        entry = [p for p in py_files
+        entry = [p for p in py_candidates
                  if p.name in _ENTRY_PY or (_entry_shallow(p, root) and _ENTRY_PY_RE.match(p.name))]
-        top = [p for p in py_files if len(p.relative_to(root).parts) == 1]
-        would_run = entry or top
-        chosen = entry if notebooks else would_run
-        if chosen:
+        top = [p for p in py_candidates if len(p.relative_to(root).parts) == 1]
+        chosen = entry if (notebooks or entry) else top
+        if chosen or py_candidates:
             types.append("python")
-            for p in sorted(chosen, key=lambda x: _order_key(x, root, readme)):
-                steps.append(RunStep(runner="python", target=rel(p), kind="python"))
+        planned += [(p, "python") for p in chosen]
         if not entry and not notebooks and len(top) > 3:
             notes.append("multiple top-level .py scripts and no clear entry point; ordering is best-effort")
-        suppressed = len(would_run) - len(chosen)
-        if suppressed:
-            types.append("python")
-            notes.append(f"{suppressed} Python script(s) present but not scheduled "
-                         "(notebooks assumed to drive the analysis)")
+        unscheduled["Python"] = [rel(p) for p in top if p not in chosen]
+
+    # ONE order across languages: `01_preprocess.py` runs before `02_model.R`. Files
+    # with no step number keep their former group order (notebooks, R Markdown, R,
+    # Python) as a tie-break, after README order.
+    group = {"jupyter": 0, "rmarkdown": 1, "r": 2, "python": 3}
+    planned.sort(key=lambda pr: (_order_key(pr[0], root, readme)[:2], group[pr[1]],
+                                 _order_key(pr[0], root, readme)[2:]))
+    for path, runner in planned:
+        steps.append(RunStep(runner=runner, target=rel(path), kind=runner))
+
+    # Never drop a script silently: a verdict of `runs` with 2 of 3 scripts never
+    # executed would be read as "the analysis runs".
+    for lang, names in unscheduled.items():
+        if names:
+            why = ("notebooks/R Markdown assumed to drive the analysis" if (notebooks or rmds)
+                   else "an entry-point script was found and is assumed to run the rest")
+            notes.append(f"{len(names)} {lang} script(s) present but NOT run ({why}): "
+                         + ", ".join(names[:8]) + (" …" if len(names) > 8 else "")
+                         + ". If they are part of the analysis, declare `run: steps:` in "
+                           "autoui-repro.yml")
 
     for proj in unity:
         types.append("unity")
         steps.append(RunStep(runner="unity", target=rel(proj) if proj != root else ".", kind="unity"))
 
     # repo2docker hints (repo root or binder/, per repo2docker conventions)
-    for hint in ("Dockerfile", "postBuild", "apt.txt", "start", "runtime.txt",
-                 "environment.yml", "environment.yaml"):
+    # (environment.yml is not among them: the install phase builds it.)
+    for hint in ("Dockerfile", "postBuild", "apt.txt", "start", "runtime.txt"):
         if any((base / hint).is_file() for base in (root, root / "binder")):
             flags.append("needs-repo2docker")
-            notes.append(f"found {hint}: consider --allow-repo2docker for a faithful environment")
+            notes.append(f"found {hint}: the artifact declares system-level setup that the pinned "
+                         "base image may lack, and reprobe does not apply it")
             break
 
     if len(steps) > 12:
@@ -998,5 +1052,5 @@ def scan(src_dir: str | Path) -> DetectResult:
 
 def is_ambiguous(result: DetectResult) -> bool:
     """Whether the LLM's alternative ordering is worth offering."""
-    return any("best-effort" in n or "no clear entry" in n or "not scheduled" in n
+    return any("best-effort" in n or "no clear entry" in n or "NOT run" in n
                for n in result.notes)

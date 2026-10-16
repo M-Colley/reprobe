@@ -80,10 +80,8 @@
     "steps": [
       "01_analyze.ipynb"
     ],
-    "flags": [
-      "needs-repo2docker"
-    ],
-    "strategy": "besteffort",
+    "flags": [],
+    "strategy": "pinned-base",
     "install_commands": [
       "mkdir -p /work/.reprobe_req && printf %s 'Y2hhbm5lbHM6Ci0gY29uZGEtZm9yZ2UKZGVwZW5kZW5jaWVzOgotIHB5dGhvbj0zLjExCi0gcGFuZGFzCg==' | base64 -d > /work/.reprobe_req/environment.yml && mkdir -p /var/tmp/reprobe-home && cd /var/tmp/reprobe-home && export MAMBA_ROOT_PREFIX=/var/tmp/reprobe-mamba && HOME=/var/tmp/reprobe-home micromamba create -y -q -p /work/.reprobe_env -f /work/.reprobe_req/environment.yml && HOME=/var/tmp/reprobe-home micromamba install -y -q -p /work/.reprobe_env -c conda-forge papermill ipykernel nbconvert",
       "mkdir -p /var/tmp/reprobe-home && cd /var/tmp/reprobe-home && HOME=/var/tmp/reprobe-home micromamba list -p /work/.reprobe_env"

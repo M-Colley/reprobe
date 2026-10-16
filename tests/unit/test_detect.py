@@ -126,7 +126,7 @@ def test_notebook_r_mix_keeps_r_visible():
     # the notebook drives the run, but R stays in artifact_types so renv restores
     assert [s.kind for s in res.steps] == ["jupyter"]
     assert "r" in res.artifact_types
-    assert any("not scheduled" in n for n in res.notes)
+    assert any("NOT run" in n and "lmm_models.R" in n for n in res.notes)   # named, not just counted
     assert signatures.is_ambiguous(res)
 
 
@@ -138,9 +138,12 @@ def test_notebook_mix_still_schedules_entry_named_scripts(tmp_path):
                                                        ("python", "reproduce.py")}
 
 
-def test_conda_environment_yml_flags_repo2docker():
+def test_a_conda_environment_yml_is_not_a_repo2docker_hint():
+    """The install phase builds environment.yml; flagging it told the chair to use
+    --allow-repo2docker "for a faithful environment" — a flag that builds nothing."""
     res = signatures.scan(FIXTURES / "conda-env")
-    assert "needs-repo2docker" in res.flags
+    assert "needs-repo2docker" not in res.flags
+    assert not any("repo2docker" in n for n in res.notes)
 
 
 # --------------------------------------------------------------------------- #
@@ -775,3 +778,64 @@ def test_requirements_lint_leaves_real_packages_alone(tmp_path):
     f = tmp_path / "requirements.txt"
     f.write_text("pandas>=2.0\n# a comment\n-r other.txt\n\nscikit-learn\n", encoding="utf-8")
     assert lint_requirements(f) == []
+
+
+
+# --------------------------------------------------------------------------- #
+# The run plan: one order across languages, nothing dropped silently
+# --------------------------------------------------------------------------- #
+
+def _plan(tmp_path, files):
+    """Write each file (one source line per list item) and scan the tree."""
+    for rel_path, lines in files.items():
+        f = tmp_path / rel_path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    return signatures.scan(tmp_path)
+
+
+R1 = ["x <- 1"]
+PY1 = ["x = 1"]
+
+
+def test_numbered_steps_run_in_number_order_across_languages(tmp_path):
+    res = _plan(tmp_path, {"02_model.R": R1, "01_preprocess.py": PY1, "03_report.R": R1})
+    assert [s.target for s in res.steps] == ["01_preprocess.py", "02_model.R", "03_report.R"]
+
+
+def test_only_a_leading_number_is_a_step_number(tmp_path):
+    res = _plan(tmp_path, {"03_model.R": R1, "plot_study2.R": R1, "01_clean.R": R1, "step2_fit.R": R1})
+    names = [s.target for s in res.steps]
+    assert names[:3] == ["01_clean.R", "step2_fit.R", "03_model.R"]
+    assert names[-1] == "plot_study2.R"                   # no step number: after the numbered ones
+
+
+def test_scripts_not_run_are_named_even_when_an_entry_point_exists(tmp_path):
+    res = _plan(tmp_path, {"analysis.R": R1, "01_prep.R": R1, "02_figs.R": R1})
+    assert [s.target for s in res.steps] == ["analysis.R"]
+    note = next(n for n in res.notes if "NOT run" in n)
+    assert "01_prep.R" in note and "02_figs.R" in note
+
+
+def test_an_r_entry_name_needs_a_word_boundary(tmp_path):
+    res = _plan(tmp_path, {"runtime_utils.R": R1, "01_a.R": R1, "02_b.R": R1})
+    assert [s.target for s in res.steps] == ["01_a.R", "02_b.R", "runtime_utils.R"]
+
+
+def test_modules_inside_a_python_package_are_not_steps(tmp_path):
+    res = _plan(tmp_path, {"src/mypkg/__init__.py": [], "src/mypkg/models/__init__.py": [],
+                           "src/mypkg/models/train.py": ["from . import x"], "main.py": ["import mypkg"]})
+    assert [s.target for s in res.steps] == ["main.py"]
+
+
+def test_sourced_r_helpers_are_not_run_as_their_own_steps(tmp_path):
+    res = _plan(tmp_path, {
+        "01_clean.R": ['source("helpers.R")', '# source("old.R")', "x <- 1"],
+        "02_model.R": ['source(here::here("R", "utils.R"))'],
+        "helpers.R": ["f <- function() 1"], "R/utils.R": ["g <- function() 2"],
+        "old.R": ["h <- 3"]})
+    targets = [s.target for s in res.steps]
+    assert targets[:2] == ["01_clean.R", "02_model.R"]
+    assert "helpers.R" not in targets and "R/utils.R" not in targets
+    assert "old.R" in targets                         # only mentioned in a comment: still a script
+    assert any("source()d by other scripts" in n for n in res.notes)
