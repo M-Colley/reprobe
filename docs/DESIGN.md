@@ -29,12 +29,12 @@ A single **host orchestrator** (`reprobe`, Python) is the only process with Dock
 
 ```
 submission (URL | DOI | anon link, + optional secret token)
-  └─(1) FETCH      network ON, code NOT run   → work/<sub>/src + fetch_manifest.json
-    (2) DETECT     deterministic scan; LLM advisory → artifact_plan.json
+  └─(1) FETCH      network ON, code NOT run   → work/<sub>/src  (report.json: source)
+    (2) DETECT     deterministic scan; LLM advisory → (report.json: detect)
     (3) PLAN ENV   resolve image/lock         → image ref + resolved-deps digest
     (4) RUN        ephemeral container per step, --network none by default
-    (5) ASSESS     exit codes / logs / outputs → run_results.json
-    (6) LLM ASSIST advisory only              → llm_notes.json
+    (5) ASSESS     exit codes / logs / outputs → (report.json: steps, results_comparison)
+    (6) LLM ASSIST advisory only              → (report.json: per-step diagnostics)
     (7) REPORT                                → report.json + .md + .html
   └─ BATCH AGGREGATE                          → out/dashboard.html + badges.json
 ```
@@ -297,7 +297,7 @@ Wrapped by a host-side **hard timeout** that `docker kill`s and records `status=
 > - Fetches stay bounded on the host too: strict URL parsing (both parsers must
 >   agree) with a DNS pin per hop, and a 20 GiB on-disk cap for `git clone`.
 
-**Network policy.** Default `--network none`. Sanctioned, explicit, time-boxed exceptions only: (a) **dependency-install phase** runs in a *separate* container with egress, then the actual run is `--network none` (recorded as a distinct phase); (b) **Unity activation** egress, then dropped; (c) per-submission opt-in `--allow-net <host>...` egress allowlist (A's escape hatch) for artifacts that must download data at runtime — this **downgrades badge confidence** and is flagged loudly. Default behavior when code attempts network under `none`: it fails fast and the report says `needs-network` rather than silently allowing egress.
+**Network policy.** Default `--network none`. Sanctioned, explicit, time-boxed exceptions only: (a) **dependency-install phase** runs in a *separate* container with egress, then the actual run is `--network none` (recorded as a distinct phase); (b) **Unity activation** egress, then dropped; (c) per-submission opt-in `--allow-net <host>...` egress allowlist (A's escape hatch) for artifacts that must download data at runtime — this **downgrades badge confidence** and is flagged loudly. Default behavior when code attempts network under `none`: the step fails fast, and a deterministic diagnosis names the runtime fetch as the finding (the artifact is not self-contained) rather than silently allowing egress.
 
 **Other guarantees:** no Docker socket in any runtime container; no host bind beyond the per-submission work dir; never `--privileged`; secrets passed via env to the *right* container only, never logged; console output and `/work` size-capped by the watchdog; logs captured to host files, never streamed into the orchestrator's eval path. **Not yet built:** the `--allow-net` per-host allowlist (today it grants full egress and says so in the report), and an allowlisting egress proxy for the install phase (it has the default bridge. The plan keeps the artifact's own code out of it — `install.R` is never run (its package lists are read statically), dependency files are sanitised (`envbuild/sanitize.py`: no `-e .`, `git+`/URL requirements, custom indexes, archive paths, non-allow-listed conda channels, or non-CRAN `renv.lock` sources — each drop is reported), harness Python runs `-I` and Rscript `--vanilla`, pip/micromamba never read the artifact's `HOME`, and import-inferred packages are installed wheels-only — but the build steps of third-party packages the artifact legitimately depends on (an sdist's `setup.py`, a conda post-link script) still run with network; closing that needs the egress proxy). **Optional `--runtime=runsc` (gVisor) toggle** in `limits.yaml` (from B) for institutions wanting kernel-level isolation of untrusted code.
 
@@ -327,7 +327,7 @@ expected_outputs: [figures/shap_summary.png, results/ranking.csv]
 badges_claimed: [available, functional]    # author's claim; harness verifies
 ```
 
-**Auto-detect fallback (`detect/signatures.py`, deterministic, always runs first):** `*.ipynb`→jupyter (order: manifest > numeric filename prefixes > README mentions > mtime); `requirements.txt`/`environment.yml`/`Pipfile`→python env; `*.R`/`renv.lock`/`DESCRIPTION`→r_script, `*.Rmd`→rmarkdown; `Assets/`+`ProjectVersion.txt`→unity; `Dockerfile`/`postBuild`/`apt.txt`→flag for `--allow-repo2docker`. If order is ambiguous and `--no-llm` is unset, the LLM proposes an ordering shown **alongside** the deterministic one. The detector emits `artifact_plan.json` regardless.
+**Auto-detect fallback (`detect/signatures.py`, deterministic, always runs first):** `*.ipynb`→jupyter (order: manifest > numeric filename prefixes > README mentions > mtime); `requirements.txt`/`environment.yml`/`Pipfile`→python env; `*.R`/`renv.lock`/`DESCRIPTION`→r_script, `*.Rmd`→rmarkdown; `Assets/`+`ProjectVersion.txt`→unity; `Dockerfile`/`postBuild`/`apt.txt`→flag for `--allow-repo2docker`. If order is ambiguous and `--no-llm` is unset, the LLM proposes an ordering shown **alongside** the deterministic one. The run plan is recorded in `report.json` (`detect`) regardless, and `reprobe detect` prints it without running anything.
 
 ---
 

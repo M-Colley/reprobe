@@ -317,3 +317,25 @@ def test_run_exits_3_when_the_harness_made_no_statement(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_mod, "_orch", lambda *a, **k: FakeOrch())
     res = runner.invoke(app, ["run", "x", "--workroot", str(tmp_path)])
     assert res.exit_code == 3, res.stdout
+
+
+def test_smoke_script_reports_each_check_and_fails_on_any(tmp_path):
+    """Run the generated script under a local bash with the checks swapped for
+    stand-ins: every check prints its own line, and one failure fails the run."""
+    import shutil
+    import subprocess
+
+    import reprobe.cli as cli_mod
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash")
+    checks = {"passes": "true", "fails": "false"}
+    old = cli_mod._SMOKE_CHECKS
+    try:
+        cli_mod._SMOKE_CHECKS = checks
+        script = cli_mod._smoke_script("python").replace(cli_mod._SMOKE_RUNTIME["python"], "true")
+    finally:
+        cli_mod._SMOKE_CHECKS = old
+    res = subprocess.run([bash, "-c", script], capture_output=True, text=True)
+    assert res.returncode == 1
+    assert res.stdout.splitlines() == ["ok   passes", "FAIL fails", "ok   python runs"]

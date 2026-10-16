@@ -30,7 +30,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 from . import __version__
 from .config import installed_non_editably, load_config
-from .docker_exec import docker_available, image_present, pull_image, run_container
+from .docker_exec import docker_available, image_present, run_container
 from .models import ContainerSpec
 from .orchestrator import Orchestrator, fresh_dir, run_options, submission_id
 
@@ -302,7 +302,10 @@ def batch(
 @app.command()
 def doctor(
     config_dir: Optional[str] = typer.Option(None),
-    smoke: bool = typer.Option(False, "--smoke", help="run a sandbox smoke test (hello-world)"),
+    smoke: bool = typer.Option(False, "--smoke", help="check the sandbox inside each pinned base "
+                               "image: /work writable, rootfs read-only, not root, no network"),
+    workroot: str = typer.Option("work", help="the workroot runs will use; --smoke mounts a "
+                                 "directory from it, exactly as a run would"),
     golden: bool = typer.Option(False, "--golden", help="regression-check the pipeline against "
                                 "the bundled golden fixtures (repo checkout only)"),
 ):
@@ -393,23 +396,7 @@ def doctor(
             ok = False
             console.print("[yellow]smoke FAIL: docker unavailable[/yellow]")
         else:
-            img = cfg.pins.get("fetch", {}).get("smoke_image", "hello-world")
-            # The smoke image comes from the chair's own pins.yaml (trusted
-            # config, tiny by convention) — pulling it here keeps `doctor
-            # --smoke` working on a fresh machine. Author-code images are
-            # never auto-pulled; that policy lives in docker_exec.
-            if not image_present(img):
-                console.print(f"[bold]sandbox smoke[/bold]: pulling {img}…")
-                pull_image(img, timeout=300)
-            console.print(f"[bold]sandbox smoke[/bold]: running {img} under full sandbox flags…")
-            spec = ContainerSpec(image=img, command=[], network="none")
-            raw = run_container(spec, cfg.limits_for("python"), Path("work") / "_smoke.log")
-            passed = raw.exit_code == 0
-            ok &= passed
-            status = "ok passed" if passed else f"FAIL exit={raw.exit_code} ({raw.error or 'see log'})"
-            console.print(f"  {status}  ({raw.duration_s}s)")
-            if raw.argv_redacted:
-                console.print(f"  [dim]{' '.join(raw.argv_redacted)}[/dim]")
+            ok &= _sandbox_smoke(cfg, Path(workroot))
 
     if golden:
         from .golden import GOLDEN_REL, find_repo_root
@@ -569,6 +556,70 @@ def _split_data_cell(cell: Optional[str]) -> list[str]:
     subdirectory marker, so ';' and whitespace are what remain — and a URL can
     contain neither."""
     return [tok for tok in re.split(r"[;\s]+", (cell or "").strip()) if tok]
+
+
+# What every author step relies on, checked inside each pinned base image under
+# the real run-phase envelope. hello-world proved only that a container starts;
+# a /work the mapped user cannot write (rootless Docker, SELinux labels) or an
+# image that cannot start read-only fails EVERY artifact, and each failure reads
+# like the artifact's own. One line per check, so a failure names itself.
+_SMOKE_CHECKS = {
+    "work dir writable": "echo x > /work/.reprobe_smoke && rm /work/.reprobe_smoke",
+    "root filesystem read-only": "! touch /usr/.reprobe_smoke 2>/dev/null",
+    "not running as root": '[ "$(id -u)" != 0 ]',
+    "no network": "! timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/53' 2>/dev/null",
+}
+_SMOKE_RUNTIME = {"python": "python -I -c 'import sys; print(sys.version)'",
+                  "r": "Rscript --vanilla -e 'cat(R.version.string, \"\\n\")'"}
+
+
+def _smoke_script(key: str) -> str:
+    checks = {**_SMOKE_CHECKS, f"{key} runs": _SMOKE_RUNTIME[key]}
+    return "; ".join(f"if {cmd}; then echo 'ok   {name}'; else echo 'FAIL {name}'; rc=1; fi"
+                     for name, cmd in checks.items()).join(("rc=0; ", "; exit $rc"))
+
+
+def _sandbox_smoke(cfg, workroot: Path = Path("work")) -> bool:
+    """Run the checks with /work mounted from ``workroot`` — the directory real
+    runs mount. Under the controller image (Docker-out-of-Docker) the host
+    daemon resolves that path on the HOST, so a workroot that is not the same
+    path inside and outside the controller fails "work dir writable" here
+    instead of failing every artifact later."""
+    import tempfile
+
+    from .models import Mount
+    images = [(k, cfg.base_image(k)) for k in ("python", "r")]
+    present = [(k, img) for k, img in images if img and image_present(img)]
+    if not present:
+        console.print("[yellow]smoke FAIL: no pinned base image is present — `reprobe pull` first; "
+                      "the smoke test checks the sandbox inside the images author code runs in[/yellow]")
+        return False
+    all_ok = True
+    for key, img in present:
+        console.print(f"[bold]sandbox smoke[/bold] [{key}]: {img} under the run-phase envelope…")
+        workroot.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".smoke-", dir=workroot) as tmp:
+            work = Path(tmp) / "work"
+            work.mkdir()
+            spec = ContainerSpec(image=img, command=["bash", "-c", _smoke_script(key)],
+                                 workdir="/work", network="none",
+                                 mounts=[Mount(source=work.resolve().as_posix(), target="/work",
+                                               read_only=False)])
+            log = Path(tmp) / "smoke.log"
+            limits = dict(cfg.limits_for("python"), timeout_s=120)
+            raw = run_container(spec, limits, log, work_root=work)
+            out = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+        lines = [ln for ln in out.splitlines() if ln.startswith(("ok   ", "FAIL "))]
+        passed = raw.exit_code == 0 and len(lines) == len(_SMOKE_CHECKS) + 1 \
+            and not any(ln.startswith("FAIL") for ln in lines)
+        all_ok &= passed
+        for ln in lines:
+            console.print(f"  {ln}")
+        if not passed:
+            console.print(f"  [red]FAIL[/red] exit={raw.exit_code} {raw.error or ''}".rstrip())
+            if not lines:
+                console.print("  " + "\n  ".join(out.splitlines()[-10:]))
+    return all_ok
 
 
 def _print_report_summary(report, outdir: Path) -> None:

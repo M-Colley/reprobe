@@ -253,6 +253,27 @@ def _py_ipynb_cells(p: Path) -> list[str]:
     return cells
 
 
+def notebook_language(p: Path) -> str:
+    """A notebook's kernel language: "python", "r", or whatever else it declares
+    ("julia", ...). An absent or unreadable kernelspec is Python, the default
+    for .ipynb — the same rule the import scanners use."""
+    import json
+    try:
+        data = json.loads(_read_head(p, 5_000_000))
+    except (ValueError, OSError, RecursionError):
+        return "python"
+    meta = (data.get("metadata") or {}) if isinstance(data, dict) else {}
+    ks = meta.get("kernelspec") or {}
+    lang = str(ks.get("language", "")).lower()
+    li = str((meta.get("language_info") or {}).get("name", "")).lower()
+    name = str(ks.get("name", "")).lower()
+    if lang == "r" or li == "r" or name.startswith("ir"):
+        return "r"
+    if lang in ("", "python") and li in ("", "python") or name.startswith("py"):
+        return "python"
+    return lang or li or name
+
+
 def _py_ipynb_source(p: Path) -> str:
     """All code cells joined — kept for callers that want one blob."""
     return "\n".join(_py_ipynb_cells(p))
@@ -984,7 +1005,8 @@ def scan(src_dir: str | Path) -> DetectResult:
     planned.sort(key=lambda pr: (_order_key(pr[0], root, readme)[:2], group[pr[1]],
                                  _order_key(pr[0], root, readme)[2:]))
     for path, runner in planned:
-        steps.append(RunStep(runner=runner, target=rel(path), kind=runner))
+        steps.append(RunStep(runner=runner, target=rel(path), kind=runner,
+                             args={"language": notebook_language(path)} if runner == "jupyter" else {}))
 
     # Never drop a script silently: a verdict of `runs` with 2 of 3 scripts never
     # executed would be read as "the analysis runs".

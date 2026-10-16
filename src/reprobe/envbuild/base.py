@@ -243,8 +243,9 @@ def plan(
                        env_provenance="author-specified")
 
     # choose default base image: python stack unless purely R
-    py_needed = _needs(kinds, "python", "jupyter")
-    r_needed = _needs(kinds, "r", "rmarkdown")
+    nb_langs = {s.args.get("language", "python") for s in detect_result.steps if s.kind == "jupyter"}
+    py_needed = "python" in kinds or "python" in nb_langs
+    r_needed = _needs(kinds, "r", "rmarkdown") or "r" in nb_langs
     image_key = "python" if py_needed or not r_needed else "r"
     image = config.base_image(image_key) or config.pins.get("fetch", {}).get("fallback_python_image", "")
 

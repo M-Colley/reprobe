@@ -50,6 +50,14 @@ def detect(
             # manifest-carrying repo would score WORSE than an unmanaged one.
             m_result.license_file = heuristic.license_file
             m_result.dep_manifest = heuristic.dep_manifest
+            # which image runs a notebook depends on its kernel, which the
+            # manifest does not state; read it from the notebook itself
+            root = src_dir.resolve()
+            for s in m_result.steps:
+                if s.kind == "jupyter" and "language" not in s.args:
+                    nb = (src_dir / s.target).resolve()
+                    if nb.is_relative_to(root) and nb.is_file():
+                        s.args["language"] = signatures.notebook_language(nb)
             return m_result, meta
         # codecheck or partial manifest: use heuristic steps + lifted expected outputs
         exp = meta.get("expected_outputs", [])

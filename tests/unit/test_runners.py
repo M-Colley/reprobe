@@ -78,9 +78,10 @@ def test_python_and_jupyter_export_writable_home(tmp_path):
 
 def test_jupyter_papermill_runs_kernel_in_notebook_dir(tmp_path):
     cmd = _bash(JupyterRunner().build_command(_ctx(tmp_path, RunStep(target="analysis/figs.ipynb", kind="jupyter"))))
-    assert ("papermill --no-progress-bar --log-output --cwd 'analysis' "
+    assert ("papermill --no-progress-bar --log-output -k python3 --cwd 'analysis' "
             "'analysis/figs.ipynb' 'analysis/figs.executed.ipynb'") in cmd
-    assert "nbconvert --to notebook --execute --output 'figs.executed'" in cmd
+    assert ("nbconvert --to notebook --execute --ExecutePreprocessor.kernel_name=python3 "
+            "--output 'figs.executed'") in cmd
     # root-level notebook: parent is "."
     cmd = _bash(JupyterRunner().build_command(_ctx(tmp_path, RunStep(target="nb.ipynb", kind="jupyter"))))
     assert "--cwd '.'" in cmd
@@ -436,3 +437,57 @@ def test_python_runs_unbuffered_and_without_an_empty_pythonpath_entry(tmp_path):
     out = subprocess.run([bash, "-c", f'{export}; printf %s "$PYTHONPATH"'], env=env,
                          capture_output=True, text=True).stdout
     assert out == "/work/.reprobe_deps"
+
+
+
+def test_an_r_notebook_runs_under_irkernel_in_the_r_image(tmp_path):
+    step = RunStep(target="nb.ipynb", kind="jupyter", args={"language": "r"})
+    runner = JupyterRunner()
+    assert runner.image_key_for(step) == "r" and runner.unsupported(step) is None
+    cmd = _bash(runner.build_command(_ctx(tmp_path, step)))
+    assert "-k ir " in cmd and "R_LIBS_USER=/work/.reprobe_Rlib" in cmd
+
+
+def test_a_notebook_in_a_language_no_image_has_is_skipped_with_the_reason():
+    step = RunStep(target="nb.ipynb", kind="jupyter", args={"language": "julia"})
+    assert "`julia`" in JupyterRunner().unsupported(step)
+    assert JupyterRunner().unsupported(RunStep(target="nb.ipynb", kind="jupyter")) is None
+
+
+def test_a_pdf_document_without_latex_is_rendered_as_html_and_says_so(tmp_path):
+    """The render failed AFTER every chunk ran ("pdflatex not found"): a
+    typesetting failure read as the analysis failing."""
+    step = RunStep(target="paper.Rmd", kind="rmarkdown")
+    ctx = _ctx(tmp_path, step)
+    cmd = _bash(RMarkdownRunner().build_command(ctx))
+    assert "output_format=fmt" in cmd and "Sys.which" in cmd
+    assert "'" not in cmd.split("Rscript -e '", 1)[1].split("' 'paper.Rmd'", 1)[0]
+    log = tmp_path / "step.log"
+    log.write_text("[reprobe] PDF output requested but the image has no LaTeX; rendering as HTML\n"
+                   "Output created: paper.html\n", encoding="utf-8")
+    res = RMarkdownRunner().interpret(RawRunOutput(exit_code=0, duration_s=1.0, log_path=str(log)), ctx)
+    assert res.status == "pass"
+    assert res.diagnostics["rendered_as"].startswith("html_document")
+    assert any("typesetting was not checked" in n for n in res.not_verified)
+
+
+def test_an_ordinary_render_records_no_substitution(tmp_path):
+    ctx = _ctx(tmp_path, RunStep(target="a.Rmd", kind="rmarkdown"))
+    log = tmp_path / "step.log"
+    log.write_text("Output created: a.html\n", encoding="utf-8")
+    res = RMarkdownRunner().interpret(RawRunOutput(exit_code=0, duration_s=1.0, log_path=str(log)), ctx)
+    assert "rendered_as" not in res.diagnostics
+
+
+def test_an_image_without_a_notebook_executor_is_the_harness_s_failure(tmp_path):
+    step = RunStep(target="nb.ipynb", kind="jupyter", args={"language": "r"})
+    ctx = _ctx(tmp_path, step)
+    cmd = _bash(JupyterRunner().build_command(ctx))
+    assert "exit 97" in cmd
+    log = tmp_path / "s.log"
+    log.write_text("[reprobe] no notebook executor (papermill or jupyter) in this image\n",
+                   encoding="utf-8")
+    res = JupyterRunner().interpret(RawRunOutput(exit_code=97, duration_s=0.1, log_path=str(log)), ctx)
+    assert res.status == "error" and "`r` base image" in res.diagnostics["harness_error"]
+    from reprobe.report import badges
+    assert badges.verdict([res], ran=True)["overall"] == "infra-error"

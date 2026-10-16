@@ -252,8 +252,8 @@ class Orchestrator:
                                              diagnostics={"reason": "no runner",
                                                           "loaded_runners": sorted(self.runners)}))
                     continue
-                refused = None if getattr(runner, "host_only", False) else _step_target_problem(
-                    step.target, rundir)
+                refused = None if getattr(runner, "host_only", False) else (
+                    _step_target_problem(step.target, rundir) or runner.unsupported(step))
                 if refused:
                     results.append(RunResult(runner=runner.id, target=step.target,
                                              status="skipped", executed=False,
@@ -262,7 +262,7 @@ class Orchestrator:
                 image = None if getattr(runner, "host_only", False) else (
                     env_plan.image
                     if env_plan.env_provenance in ("author-specified", "fallback-generic")
-                    else self.config.base_image(runner.image_key) or env_plan.image)
+                    else self.config.base_image(runner.image_key_for(step)) or env_plan.image)
                 step_limits = self.config.limits_for(runner.id)
                 if timeout_s:
                     # docker_exec still clamps this to limits.yaml:max_timeout_s —
@@ -289,7 +289,7 @@ class Orchestrator:
                                         allow_egress=allow_egress_runtime, dry_run=dry_run,
                                         work_root=rundir)
                     res = runner.interpret(raw, ctx)
-                    self._diagnose(res, llm_client, env_plan, step, logdir, runner.image_key)
+                    self._diagnose(res, llm_client, env_plan, step, logdir, runner.image_key_for(step))
                 results.append(res)
                 if _daemon_down(res):
                     # Once the daemon is gone every remaining step fails in

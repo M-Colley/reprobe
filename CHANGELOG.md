@@ -169,6 +169,37 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
   itself; the in-tree work directory is now left out (and named), and the
   GitHub Action keeps its work dir in `$RUNNER_TEMP`.
 
+### Notebooks, R Markdown, the smoke test
+
+- **A notebook runs in the image for its kernel language.** Every notebook went
+  to base-py, so an R-kernel notebook failed with "No such kernel" — reported as
+  the artifact failing — and, counted as `jupyter` rather than R, never had its
+  scanned R packages installed. Detection now records each notebook's kernel
+  language (manifest-declared notebooks too): R notebooks run in base-r under
+  IRkernel with the R library path, and plan R installs. A language no image has
+  a kernel for (Julia, ...) is skipped with that reason instead of failing.
+- **The kernel is named, not taken from the notebook.** A kernelspec name is
+  whatever the author's machine called it (`conda-env-study-py`, `myenv`), and
+  papermill's "No such kernel" for it read as the artifact failing. Python
+  notebooks run under `python3`, R notebooks under `ir`.
+- An image with no notebook executor at all is a harness error
+  (`infra-error`), not a failed notebook.
+- **An R Markdown document that asks for PDF is rendered as HTML when the image
+  has no LaTeX**, and the step records the substitution. The render used to fail
+  after every chunk had run — a typesetting failure read as the analysis
+  failing. The code runs the same; the typesetting is listed as not verified.
+- **`doctor --smoke` checks the sandbox inside each pinned base image** under the
+  run-phase envelope, mounting a directory from `--workroot` exactly as a run
+  does: `/work` writable by the mapped user, root filesystem read-only, not root,
+  no network, the runtime starts. It ran `hello-world`, which proved only that a
+  container starts. An e2e test runs it on CI.
+- Controller mode (Docker-out-of-Docker) documented with the two things that
+  make every artifact fail if wrong: the workroot must be the same path inside
+  and outside the controller, and the controller must run as the invoking user.
+- Docs: `--reuse-downloads` (the cache was described under `HOME=/work`),
+  `environment.r_packages` (combined with detected packages, not an override),
+  and DESIGN's pipeline no longer names JSON files the harness never writes.
+
 ### Known limits
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:

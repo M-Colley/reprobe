@@ -138,6 +138,29 @@ dedicated VM, never on a personal machine. Author code still only ever runs in
 the sibling sandboxed containers; the socket belongs to the trusted
 orchestrator alone.
 
+Two things about the mounted socket decide whether runs work at all, and both
+fail in a way that reads like *every artifact* failing:
+
+- **The workroot must be the same path inside and outside the controller.** The
+  sandboxed containers are siblings started by the HOST daemon, which resolves
+  every bind-mount source on the host. A workroot that exists only inside the
+  controller is mounted as an empty directory, and each step fails on a missing
+  file.
+- **Run the controller as your own user, not root.** reprobe runs author code as
+  the invoking user so it can write its outputs into the bind-mounted run
+  directory; as root it falls back to the image's own uid, which cannot write a
+  root-owned workroot (every step: `Permission denied`).
+
+```bash
+W="$PWD/reprobe-work"; mkdir -p "$W"
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp   --group-add "$(stat -c %g /var/run/docker.sock)"   -v /var/run/docker.sock:/var/run/docker.sock -v "$W:$W"   ghcr.io/m-colley/reprobe-controller:<tag> doctor --smoke --workroot "$W"
+```
+
+Then the same with `run <url> --workroot "$W"`. `doctor --smoke` mounts a
+directory from the workroot exactly as a run does, so a wrong path or owner shows
+up there as `FAIL work dir writable`, before any artifact is judged. `<tag>` is
+`base_images.controller` in `config/pins.yaml`.
+
 ## What you never touch
 
 `src/` (orchestrator, runner contract, sandbox flags, fetchers, report schema),

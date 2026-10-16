@@ -839,3 +839,47 @@ def test_sourced_r_helpers_are_not_run_as_their_own_steps(tmp_path):
     assert "helpers.R" not in targets and "R/utils.R" not in targets
     assert "old.R" in targets                         # only mentioned in a comment: still a script
     assert any("source()d by other scripts" in n for n in res.notes)
+
+
+def _nb(path, kernelspec, language_info=None):
+    import json
+    meta = {"kernelspec": kernelspec}
+    if language_info:
+        meta["language_info"] = {"name": language_info}
+    path.write_text(json.dumps({"metadata": meta, "cells": [], "nbformat": 4}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("kernelspec, li, lang", [
+    ({"name": "ir", "language": "R"}, "R", "r"),
+    ({"name": "conda-env-study-py", "language": "python"}, "python", "python"),
+    ({}, None, "python"),
+    ({"name": "julia-1.10", "language": "julia"}, "julia", "julia"),
+])
+def test_notebook_steps_carry_their_kernel_language(tmp_path, kernelspec, li, lang):
+    _nb(tmp_path / "a.ipynb", kernelspec, li)
+    [step] = signatures.scan(tmp_path).steps
+    assert step.args == {"language": lang}
+
+
+def test_a_manifest_declared_notebook_gets_its_language_too(tmp_path):
+    from reprobe.detect import detect
+    _nb(tmp_path / "a.ipynb", {"name": "ir", "language": "R"}, "R")
+    (tmp_path / "autoui-repro.yml").write_text("version: 1\nrun:\n  steps: [a.ipynb]\n",
+                                                encoding="utf-8")
+    res, _ = detect(tmp_path)
+    assert res.run_plan_source == "manifest" and res.steps[0].args["language"] == "r"
+
+
+def test_an_r_notebook_alone_plans_r_installs(tmp_path):
+    """Its R packages were scanned but never installed: R was not 'needed'."""
+    import json
+
+    from reprobe.config import load_config
+    from reprobe.envbuild import plan
+    nb = {"metadata": {"kernelspec": {"name": "ir", "language": "R"}}, "nbformat": 4,
+          "cells": [{"cell_type": "code", "source": "library(praise)\n"}]}
+    (tmp_path / "a.ipynb").write_text(json.dumps(nb), encoding="utf-8")
+    res = signatures.scan(tmp_path)
+    assert "praise" in res.r_packages
+    env = plan(res, {}, load_config(), tmp_path)
+    assert any(c.startswith("Rscript") and "praise" in c for c in env.install_commands)

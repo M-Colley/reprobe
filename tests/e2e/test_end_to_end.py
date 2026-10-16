@@ -87,3 +87,11 @@ def test_an_renv_projects_restored_library_is_usable_offline(tmp_path):
     assert step.expected_met == ["results/version.txt"]
     produced = tmp_path / report.submission_id / "run" / "results" / "version.txt"
     assert produced.read_text(encoding="utf-8").strip() == "1.0.0"
+
+
+def test_doctor_smoke_holds_inside_every_pinned_image():
+    """The sandbox guarantees, checked from inside the images author code runs in:
+    /work writable by the mapped user, rootfs read-only, not root, no network."""
+    from reprobe.cli import _sandbox_smoke
+    from reprobe.config import load_config
+    assert _sandbox_smoke(load_config())

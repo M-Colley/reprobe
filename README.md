@@ -106,9 +106,9 @@ reprobe run <code-url> --data <deposit-url>::dataset --data <other-url>::models
 reprobe run <url> --reuse-downloads
 ```
 
-`--reuse-downloads` exists because pip and micromamba cache under `HOME=/work` —
-inside the run directory, which is wiped before every run — so re-running one
-artifact re-downloads everything it already had. A torch-pulling `environment.yml`
+`--reuse-downloads` exists because pip, micromamba and renv cache under the
+install container's own `HOME`, which is gone when that container exits — so
+re-running one artifact re-downloads everything it already had. A torch-pulling `environment.yml`
 makes that a 30-minute tax per attempt. The flag points both at a cache in the
 workroot instead. **It is off by default and should stay off for a review
 season**: the cache is shared across submissions, and an `environment.yml` chooses
@@ -183,8 +183,10 @@ CODECHECK `codecheck.yml` is also read). See
 [src/reprobe/schemas/autoui-repro.schema.json](src/reprobe/schemas/autoui-repro.schema.json) and
 [examples/example-python](examples/example-python). Two knobs worth knowing:
 
-- `environment.r_packages: [pkg1, pkg2]` — pin exactly the CRAN packages to
-  install (reprobe also auto-detects them, so this is only for overriding).
+- `environment.r_packages: [pkg1, pkg2]` — CRAN packages to install on top of the
+  ones reprobe detects in your code (the two lists are combined; this is for
+  packages loaded in ways a scan cannot see). Names only: versions come from the
+  pinned CRAN snapshot in `config/pins.yaml`.
 - `data: [{path, source, checksum}]` — individual data files reprobe should
   download (from an http(s) `source`) into the run tree before your analysis runs.
 - `data_sources: [{source, into}]` — whole external deposits (OSF, Zenodo, Dryad,

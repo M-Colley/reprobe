@@ -168,6 +168,15 @@ class BaseRunner:
     display_name: str = ""
     handles_types: frozenset[str] = frozenset()
     image_key: str = "python"               # key into pins.yaml:base_images
+
+    def image_key_for(self, step: "RunStep") -> str:
+        """The base image this step runs in (a notebook's depends on its kernel)."""
+        return self.image_key
+
+    def unsupported(self, step: "RunStep") -> Optional[str]:
+        """Why no image can run this step, or None. Such a step is skipped with
+        the reason — running it would fail in a way that reads as the artifact's."""
+        return None
     host_only: bool = False                 # True -> container_spec returns None; no author code executes
 
     # -- routing ---------------------------------------------------------- #
