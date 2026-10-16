@@ -11,9 +11,11 @@ year: 2026
 # the base-r compiler toolchain + preinstalled stats stack; revision 3 adds the
 # dataset readers (pyarrow/openpyxl/pytables/...) that base-py was missing;
 # revision 4 adds CPU-only pytorch + torchvision to base-py (see CHANGELOG);
-# revision 5 republishes the same locks after 2026.4's platform manifests were
-# deleted from GHCR and the tag became unpullable (built by
-# .github/workflows/build-base-images.yml — never delete untagged versions).
+# revision 5 republishes after 2026.4's platform manifests were deleted from
+# GHCR and the tag became unpullable (built by .github/workflows/build-base-images.yml
+# — never delete untagged versions); base-py's lock is unchanged, base-r's adds
+# papermill for R-kernel notebooks with every package already locked held
+# exactly (images/lock-add.py).
 revision: 5                       # base-image tag becomes "<year>.<revision>"
 
 base_images:

@@ -95,3 +95,14 @@ def test_doctor_smoke_holds_inside_every_pinned_image():
     from reprobe.cli import _sandbox_smoke
     from reprobe.config import load_config
     assert _sandbox_smoke(load_config())
+
+
+def test_an_r_kernel_notebook_runs_in_the_r_image(tmp_path):
+    """Every notebook went to base-py, which has no R: an R notebook failed with
+    "No such kernel", reported as the artifact's failure."""
+    report, logs = _run(tmp_path, "r-notebook")
+    step = report.steps[0]
+    assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
+    assert step.expected_met == ["results/sum.txt"]
+    produced = tmp_path / report.submission_id / "run" / "results" / "sum.txt"
+    assert produced.read_text(encoding="utf-8").strip() == "55"
