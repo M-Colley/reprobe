@@ -371,17 +371,118 @@ def test_install_log_parsers_read_in_constant_memory(tmp_path):
     tracemalloc.start()
     failures = om._install_failures(log, [(0, "pip install -r x", "author-declared")])
     digest = om._hash_resolved_versions(tmp_path)
-    net = om._network_trouble(log)
+    sections = om._install_sections(log)
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
-    assert [f["index"] for f in failures] == [0] and digest and net
+    assert [f["index"] for f in failures] == [0] and digest and 0 in sections
     assert peak < 5_000_000, f"peak {peak} bytes for a 30 MB log"
 
 
-def test_the_network_check_reads_only_the_tail(tmp_path):
+# --------------------------------------------------------------------------- #
+# Network trouble belongs to the command whose own output shows it
+# --------------------------------------------------------------------------- #
+
+def _sections(tmp_path, text):
     import reprobe.orchestrator as om
     log = tmp_path / "install-python.log"
-    log.write_text("Temporary failure in name resolution\n" + "ok\n" * 200_000, encoding="utf-8")
-    assert om._network_trouble(log) is False            # long past, not the cause of the end
-    log.write_text("ok\n" * 200_000 + "Temporary failure in name resolution\n", encoding="utf-8")
-    assert om._network_trouble(log) is True
+    log.write_text(text, encoding="utf-8")
+    return om._install_sections(log), om._install_failures(log, [(0, "a", "author-declared"),
+                                                                 (1, "b", "harness-detected")])
+
+
+def test_a_retry_warning_from_one_command_does_not_excuse_anothers_failure(tmp_path):
+    """A pip retry warning anywhere in the log tail used to mark the whole group as
+    network trouble, which excused a genuinely broken requirements.txt."""
+    from reprobe.report import badges
+    _, failures = _sections(tmp_path, (
+        "\n[reprobe-install] begin 0 author-declared\n"
+        "ERROR: Could not find a version that satisfies the requirement nosuchpkg==9.9\n"
+        "\n[reprobe-install] failed 0 author-declared exit 1\n"
+        "\n[reprobe-install] begin 1 harness-detected\n"
+        "WARNING: Retrying ... Temporary failure in name resolution\n"))
+    assert failures[0]["network"] is False
+    env = {"install_results": {"python": {"ok": False, "exit_code": 1, "timed_out": False,
+                                          "failures": failures}}}
+    assert "nosuchpkg" not in (badges.install_error(env) or "")
+    assert badges.declared_env_error(env)                 # the author's finding stands
+
+
+def test_a_declared_install_that_died_on_the_network_is_not_the_authors(tmp_path):
+    from reprobe.report import badges
+    _, failures = _sections(tmp_path, (
+        "\n[reprobe-install] begin 0 author-declared\n"
+        "WARNING: Retrying (Retry(total=0)) ... Max retries exceeded with url: /simple/pandas/\n"
+        "ERROR: Could not install packages due to a ConnectionError\n"
+        "\n[reprobe-install] failed 0 author-declared exit 1\n"))
+    assert failures[0]["network"] is True
+    env = {"install_results": {"python": {"ok": False, "exit_code": 1, "timed_out": False,
+                                          "failures": failures, "network_error": True}}}
+    assert badges.declared_env_error(env) is None
+    assert "unreachable" in badges.install_error(env)
+
+
+def test_the_network_cause_is_read_from_the_end_of_the_failing_section(tmp_path):
+    lines = "".join(f"line {i}\n" for i in range(500))
+    _, failures = _sections(tmp_path, (
+        "\n[reprobe-install] begin 0 author-declared\nTemporary failure in name resolution\n"
+        + lines + "ERROR: invalid requirement\n\n[reprobe-install] failed 0 author-declared exit 1\n"))
+    assert failures[0]["network"] is False                # long past, not the cause of the failure
+
+
+# --------------------------------------------------------------------------- #
+# git clone has a disk budget
+# --------------------------------------------------------------------------- #
+
+def test_a_clone_that_grows_past_its_budget_is_stopped(tmp_path, monkeypatch):
+    import subprocess as sp
+
+    import reprobe.fetch.base as fb
+
+    dest = tmp_path / "repo"
+    dest.mkdir()
+    (dest / "pack").write_bytes(b"0" * 4096)
+    killed = []
+
+    class Proc:
+        def wait(self, timeout=None):
+            if killed:
+                return -9
+            raise sp.TimeoutExpired("git", timeout)
+
+        def kill(self):
+            killed.append(True)
+
+    monkeypatch.setattr(fb.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(fb, "_GIT_WATCH_EVERY_S", 0.0)
+    with pytest.raises(fb.FetchError, match="passed"):
+        fb.run_git(["clone", "--", "https://example.org/x.git", str(dest)], watch=dest, max_bytes=1024)
+    assert killed
+
+
+def test_a_clone_within_budget_returns_git_s_own_result(tmp_path):
+    import shutil as sh
+
+    import reprobe.fetch.base as fb
+    if sh.which("git") is None:
+        pytest.skip("needs git")
+    r = fb.run_git(["--version"], watch=tmp_path, max_bytes=10**9)
+    assert r.returncode == 0 and "git version" in r.stdout
+
+
+def test_clones_are_run_with_the_budget(monkeypatch, tmp_path):
+    from reprobe.fetch import git_host
+    seen = {}
+
+    def fake(args, cwd=None, timeout=600, **kw):
+        if args and "clone" in args:
+            seen.update(kw)
+            import subprocess as sp
+            return sp.CompletedProcess(args, 1, "", "fatal: nope")
+        import subprocess as sp
+        return sp.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(git_host, "run_git", fake)
+    monkeypatch.setattr(git_host, "_public_probe", lambda url: "probe")
+    from reprobe.fetch.base import FetchError
+    with pytest.raises(FetchError):
+        git_host.GitHostFetcher().fetch("https://github.com/a/b", tmp_path / "d")
+    assert seen.get("max_bytes") and seen.get("watch") == tmp_path / "d"

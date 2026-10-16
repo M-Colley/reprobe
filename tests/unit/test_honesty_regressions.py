@@ -343,3 +343,73 @@ def test_nan_in_json_and_text_is_equal_to_nan_not_to_a_number(tmp_path):
         (run / name).write_text(b, encoding="utf-8")
     res = {r["path"]: r["status"] for r in compare_outputs(src, run, ["n.json", "m.json"])}
     assert res["n.json"] in ("identical", "equivalent") and res["m.json"] == "differs"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_real_install_commands_survive_both_shell_layers_byte_for_byte(tmp_path):
+    """Every install command runs as `bash -ec <quoted>` inside the container's own
+    `bash -c`. The real commands carry single quotes, double quotes, `$`, brackets
+    and base64; if either layer re-interpreted one character, the installer would
+    run something else. Each command is printed back by the inner shell instead of
+    executed, and must come back unchanged."""
+    import shlex
+
+    from reprobe.envbuild import sanitize
+    from reprobe.envbuild.base import _cran_install_command, _py_detected_install_command
+    real = [
+        _py_detected_install_command(["shap", "ray[tune]", "umap-learn"], None),
+        _py_detected_install_command(["shap"], "/work/.reprobe_env"),
+        _cran_install_command(["lme4", "data.table"], "https://packagemanager.posit.co/cran/x"),
+        sanitize.embed_file_command("pandas>=2\n$(touch pwned)\n'q'\n", "/work/.reprobe_req/r.txt"),
+    ]
+    for cmd in real:
+        items = [(0, "printf '%s' " + shlex.quote(cmd), "author-declared")]
+        r = subprocess.run(["bash", "-c", "set -e; " + om._attributed_script(items)],
+                           capture_output=True, text=True, cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        printed = r.stdout.split("[reprobe-install] begin 0 author-declared\n", 1)[1]
+        assert printed == cmd
+    assert not (tmp_path / "pwned").exists()
+
+
+def test_the_generated_import_install_code_runs_and_does_what_it_says(monkeypatch, capsys):
+    """Execute the very code the plan sends to the container, with its process calls
+    intercepted: present modules are skipped, each missing one is DOWNLOADED (no
+    install), ONE --no-index install follows, and what pip could not get is
+    reported. A logic error here would otherwise first show up inside a container."""
+    import os
+    import sys
+
+    from reprobe.envbuild.base import _py_detected_install_command
+    cmd = _py_detected_install_command(["json-present-as-stdlib", "reprobe-absent-ok", "reprobe-absent-bad"], None)
+    code = cmd[len("python -I -c '"):-1]
+    # "json-present-as-stdlib" maps to module json_present_as_stdlib (absent) — use a
+    # real present module instead by rewriting its pair to ("json", ...)
+    code = code.replace('("json_present_as_stdlib", "json-present-as-stdlib")',
+                        '("json", "json-present-as-stdlib")')
+    calls: list[list[str]] = []
+
+    def fake_call(argv, **kw):
+        calls.append(list(argv))
+        args = argv[argv.index("pip") + 1:]
+        if args[0] == "download":
+            return 0 if args[-1] == "reprobe-absent-ok" else 1
+        return 0
+
+    import subprocess as real_subprocess
+    monkeypatch.setattr(real_subprocess, "call", fake_call)
+    monkeypatch.setattr(os, "chdir", lambda p: None)
+    monkeypatch.setattr(os, "makedirs", lambda p, exist_ok=False: None)
+    saved_path = list(sys.path)
+    try:
+        exec(compile(code, "<install>", "exec"), {})
+    finally:
+        sys.path[:] = saved_path
+    out = capsys.readouterr().out
+    pip_args = [c[c.index("pip") + 1:] for c in calls]
+    downloads = [a[-1] for a in pip_args if a[0] == "download"]
+    installs = [a for a in pip_args if a[0] == "install"]
+    assert downloads == ["reprobe-absent-bad", "reprobe-absent-ok"]   # json is present: not asked for
+    assert len(installs) == 1 and "--no-index" in installs[0] and installs[0][-1] == "reprobe-absent-ok"
+    assert "--target=/work/.reprobe_deps" in installs[0]
+    assert "pip could NOT install (reported, not faked): ['reprobe-absent-bad']" in out

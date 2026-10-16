@@ -84,6 +84,71 @@ input never reaches the trusted host, and a report says only true things.
 - `report.json` is validated against `report.schema.json` for every kind of
   report (every fetch-failed report violated it before).
 
+### After two adversarial reviews of the above
+
+Both reviews reproduced their findings against this branch; every fix carries a
+regression test built from the reviewer's input (`tests/unit/test_review_regressions.py`,
+`tests/unit/test_honesty_regressions.py`).
+
+- **The sanitiser let committed archives through**: `evil-1.0.tar.gz ; marker`,
+  `evil-1.0.tar.gz[x]`, and `.tbz`/`.txz`/`.tlz`/`.tar.lz`/`.tar.lzma` survived, and pip
+  builds such a file from its cwd. Archives are now refused by pip's full suffix
+  list on both the raw token and the parsed name, and pip runs from a directory
+  that holds only the sanitised request.
+- **SSRF**: `http://127.0.0.1:80\@8.8.8.8/` is host 8.8.8.8 to `urlparse` and
+  127.0.0.1 to urllib3. URLs with a backslash, whitespace, control characters or
+  a non-ASCII host are refused, the two parsers must agree, every redirect hop is
+  re-checked, and the DNS pin matches the host however urllib3 spells it.
+- **"Wheels run no code" was false in a conda env**: a wheel's `.pth` runs at the
+  next interpreter start, and one pip process per package gave it one. Inferred
+  packages are now downloaded first and installed in a single pip run.
+- **The install phase no longer uses `/work` as `HOME`** (`~/.R/Makevars` is run by
+  make; `~/.pydistutils.cfg`, `~/.condarc`, pip's cache), exports no `PYTHONPATH`,
+  and each command runs in its own `bash -ec`: bash ignores `set -e` inside a
+  subshell that is part of an `||` list, so "stop at the first failure" never held.
+- **Host-side reads of author-named files are contained**: a manifest
+  `dependencies:` path outside the tree (its first lines were echoed into the
+  report), a symlinked requirements file, a dataset written into `.reprobe_*`
+  (also matched case-insensitively), and YAML alias bombs (only plain strings are
+  read). `renv.lock` duplicate keys are refused; foreign repositories excluded;
+  conda bracket specs dropped.
+- **Linear scans** of R sources, R Markdown fences and README URLs (inputs that
+  took 12–34 s now take under 0.2 s); install logs are parsed in constant memory;
+  `git clone` stops past 20 GiB on disk.
+- **Install attribution**: a container that dies with no failing command marked
+  (a cap, docker exit 125, a killed shell) is the harness's failure — it was
+  falling through to the artifact. Network trouble is judged per command from its
+  own output, so one command's retry warning no longer excuses another's broken
+  `requirements.txt`; an unreachable index during the import install is ours.
+- **Report honesty**: steps that passed only against the base image (the declared
+  environment did not install) are `runs-with-warnings`; the badge and verdict
+  agree when an infrastructure error and a declaration failure coincide; a step
+  that did not finish regenerated nothing; directory/glob outputs are collected;
+  the timeout reported is the one enforced; an OOM flag on a clean exit is not a
+  failure; a failed version listing is not hashed as "resolved versions"; the
+  dry-run note no longer claims containers were planned.
+- **Comparison**: whole numbers on both sides are exact however a writer spelled
+  them (1234567 vs 1234568.0 differs); `atol` is 1e-12 (p = 1e-10 vs 9e-10 differed
+  only ninefold and read as equal); HTML whose embedded plots changed is
+  `not-compared`, not `equivalent`. An LLM "match" that quotes no number in the
+  output is `unclear`.
+- **Tests**: a resume test that passed for the wrong reason now exercises the
+  retry rule (mutation-checked); new extras `parquet` and the `paper`/`swh` real
+  libraries are installed in CI; the sandbox CPU check follows the daemon clamp.
+
+### Known limits
+
+- **No container has been run against these changes.** The Linux user mapping,
+  the micromamba/renv invocations and `tests/sandbox/` are verified by the CI
+  `sandbox` job, not locally; renv restores and R builds are untested here.
+- **Install-attribution markers can be forged** by output from third-party build
+  code running in the same container (a nonce would be readable from the
+  container's own command line). The worst case is an author's failure mislabelled
+  as the harness's — both are human-review verdicts.
+- Third-party package build code (an sdist's `setup.py`, a conda post-link script)
+  from the allowed indexes still runs with network; closing that needs an
+  allow-listing egress proxy.
+
 ### Detection
 
 - Python imports come from `ast`, not a regex: `import os, yaml`, docstrings,

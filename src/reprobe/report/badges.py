@@ -264,8 +264,10 @@ def _stopped_for_another_reason(row: dict[str, Any]) -> bool:
     """The install container ended for a reason that is not "a command failed": the
     clock, a memory/output/disk cap, the daemon, the network, or for no recorded
     reason at all. Whatever else the log shows, none of that is the author's doing."""
-    return bool(row.get("timed_out") or row.get("error") or row.get("network_error")
-                or row.get("limit_exceeded") or row.get("oom_killed") or row.get("unattributed"))
+    return bool(row.get("timed_out") or row.get("error")
+                or row.get("limit_exceeded") or row.get("oom_killed") or row.get("unattributed")
+                # a row from before per-command attribution: network is row-wide
+                or (row.get("network_error") and not any("network" in f for f in row.get("failures") or [])))
 
 
 def declared_env_error(environment: dict[str, Any]) -> Optional[str]:
@@ -281,7 +283,9 @@ def declared_env_error(environment: dict[str, Any]) -> Optional[str]:
         if _stopped_for_another_reason(v):
             continue
         for f in v.get("failures") or []:
-            if f.get("origin") == "author-declared":
+            # a declared install that failed because ITS OWN output shows the index
+            # was unreachable is not the author's doing
+            if f.get("origin") == "author-declared" and not f.get("network"):
                 what = f.get("what") or f"`{f.get('command', '')[:120]}`"
                 why.append(f"{k}: {what} exited {f.get('exit_code')}")
     if not why:
@@ -312,7 +316,8 @@ def install_error(environment: dict[str, Any]) -> Optional[str]:
             why.append(f"{k}: stopped by the {v['limit_exceeded']} cap")
         elif v.get("oom_killed"):
             why.append(f"{k}: killed at the memory cap")
-        elif v.get("network_error"):
+        elif v.get("network_error") and not any("network" in f for f in v.get("failures") or []):
+            # older row shape: network trouble recorded for the whole group
             why.append(f"{k}: the package index was unreachable mid-install (exit {v.get('exit_code')})")
         elif v.get("unattributed"):
             # non-zero exit and no command recorded as failing: the container (or its
@@ -325,10 +330,14 @@ def install_error(environment: dict[str, Any]) -> Optional[str]:
                 # No per-command attribution (older plan): the whole group is ours.
                 why.append(f"{k}: exited {v.get('exit_code')}")
                 continue
-            # ours is ours even when the author's own file failed as well
-            ours = [f for f in failures if f.get("origin") not in ("author-declared", "harness-record")]
-            why.extend(f"{k}: {f.get('what') or '`' + f.get('command', '')[:120] + '`'} "
-                       f"exited {f.get('exit_code')}" for f in ours)
+            # ours is ours even when the author's own file failed as well; a failure
+            # whose own output shows the index was unreachable is ours whoever asked
+            for f in failures:
+                what = f.get("what") or "`" + f.get("command", "")[:120] + "`"
+                if f.get("network"):
+                    why.append(f"{k}: the package index was unreachable during {what}")
+                elif f.get("origin") not in ("author-declared", "harness-record"):
+                    why.append(f"{k}: {what} exited {f.get('exit_code')}")
     if not why:
         return None
     return f"the harness's dependency install did not complete ({'; '.join(why)})"

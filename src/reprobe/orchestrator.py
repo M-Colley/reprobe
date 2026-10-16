@@ -660,15 +660,20 @@ class Orchestrator:
             if raw.oom_killed:
                 row["oom_killed"] = True
             # The import-scan install never FAILS (a mis-detected local module must not
-            # fail the phase) — it prints what pip could not get. If that is because
-            # the index was unreachable, it is a failure of the harness's install.
-            missing = _detected_install_missing(log_path)
+            # fail the phase) — it prints what pip could not get. If its OWN output
+            # shows the index was unreachable, that is a failure of the harness's install.
+            sections = _install_sections(log_path)
+            missing = sorted({n for sec in sections.values() for n in sec["missing"]})
             if missing:
                 row["incomplete"] = missing
-                if ok and _network_trouble(log_path):
+                if any(sec["missing"] and sec["network"] and sec["failed_exit"] is None
+                       for sec in sections.values()):
                     ok = row["ok"] = False
-                    row["network_error"] = True
-            if not ok and not row.get("network_error") and _network_trouble(log_path):
+                    failures.append({"index": -1, "origin": "harness-detected", "exit_code": 0,
+                                     "network": True, "command": "",
+                                     "what": "install of the imports found in the code"})
+            # network trouble is a property of a failing command's own output
+            if any(f.get("network") for f in failures):
                 row["network_error"] = True
             if not ok and not failures and not (raw.timed_out or raw.error or raw.limit_exceeded
                                                 or raw.oom_killed or row.get("network_error")):
@@ -680,8 +685,8 @@ class Orchestrator:
             note = f"install[{key}] ({'ok' if ok else 'failed'}; egress phase)"
             report.environment.setdefault("notes", []).append(note)
             if not ok:
-                declared = [f for f in failures if f["origin"] == "author-declared"]
-                if declared and not (raw.timed_out or raw.error or row.get("network_error")):
+                declared = [f for f in failures if f["origin"] == "author-declared" and not f.get("network")]
+                if declared and not (raw.timed_out or raw.error or raw.limit_exceeded or raw.oom_killed):
                     report.not_verified.append(
                         f"the artifact's declared environment ({key}) did not install: "
                         + "; ".join(f"{f.get('what') or f['command'][:100]} exited {f['exit_code']}"
@@ -1308,52 +1313,81 @@ def _log_lines(path: Path, max_line: int = 65_536):
         return
 
 
+def _install_sections(log_path: Path) -> dict[int, dict[str, Any]]:
+    """What each install command's OWN output says, keyed by command index:
+    ``{"origin", "failed_exit" (None if it did not fail), "network", "missing"}``.
+
+    Per command, not per log: a pip retry warning printed by one command used to
+    mark the whole group as "network trouble", which excused a different
+    command's genuinely broken requirements.txt. The network markers are read
+    from the last lines of the failing command's own section only. Streams the
+    log in constant memory."""
+    import ast
+    from collections import deque
+
+    sections: dict[int, dict[str, Any]] = {}
+    cur: Optional[dict[str, Any]] = None
+    tail: deque[str] = deque(maxlen=200)       # lines cut to 512 chars: bounded memory
+
+    def network_in_tail() -> bool:
+        text = "\n".join(tail).lower()
+        return any(mk in text for mk in badge_rules._NETWORK_MARKERS)
+
+    def close_section() -> None:
+        # the import install REPORTS instead of failing: judge its network trouble
+        # from the end of its own section
+        if cur is not None and cur["missing"] and cur["failed_exit"] is None:
+            cur["network"] = network_in_tail()
+
+    for line in _log_lines(log_path):
+        m = _MARK_RE.match(line)
+        if m:
+            kind, idx, origin = m.group(1), int(m.group(2)), m.group(3)
+            if kind == "begin":
+                close_section()
+                cur = sections.setdefault(idx, {"origin": origin, "failed_exit": None,
+                                                "network": False, "missing": []})
+                tail.clear()
+            elif kind == "failed":
+                sec = sections.setdefault(idx, {"origin": origin, "failed_exit": None,
+                                                "network": False, "missing": []})
+                sec["failed_exit"] = int(m.group(4) or 0)
+                sec["network"] = network_in_tail()
+                cur = None
+            continue
+        if cur is None:
+            continue
+        tail.append(line[:512])
+        mm = _DETECTED_MISSING_RE.match(line)
+        if mm:
+            listed = mm.group(1).strip()
+            names: Any = []
+            if listed and listed != "none":
+                try:
+                    names = ast.literal_eval(listed)
+                except (ValueError, SyntaxError):
+                    names = []
+            cur["missing"] = [n for n in names if isinstance(n, str)
+                              and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._\[\],-]*", n)][:50] \
+                if isinstance(names, list) else []
+    close_section()
+    return sections
+
+
 def _install_failures(log_path: Path, items: list[tuple[int, str, str]]) -> list[dict[str, Any]]:
     cmd_by_index = {i: c for i, c, _ in items}
     out = []
-    for line in _log_lines(log_path):
-        m = _MARK_RE.match(line)
-        if m and m.group(1) == "failed":
-            idx = int(m.group(2))
-            cmd = cmd_by_index.get(idx, "")
-            out.append({"index": idx, "origin": m.group(3), "exit_code": int(m.group(4) or 0),
-                        "command": cmd, "what": describe_install_command(cmd) if cmd else ""})
+    for idx, sec in sorted(_install_sections(log_path).items()):
+        if sec["failed_exit"] is None:
+            continue
+        cmd = cmd_by_index.get(idx, "")
+        out.append({"index": idx, "origin": sec["origin"], "exit_code": sec["failed_exit"],
+                    "network": sec["network"],
+                    "command": cmd, "what": describe_install_command(cmd) if cmd else ""})
     return out
 
 
 _DETECTED_MISSING_RE = re.compile(r"^reprobe: pip could NOT install \(reported, not faked\): (.*)$")
-
-
-def _detected_install_missing(log_path: Path) -> list[str]:
-    """Distributions the import-scan install said pip could not get (its last line)."""
-    import ast
-
-    last = ""
-    for line in _log_lines(log_path):
-        m = _DETECTED_MISSING_RE.match(line)
-        if m:
-            last = m.group(1).strip()
-    if not last or last == "none":
-        return []
-    try:
-        names = ast.literal_eval(last)
-    except (ValueError, SyntaxError):
-        return []
-    return [n for n in names if isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._\[\],-]*", n)][:50] \
-        if isinstance(names, list) else []
-
-
-def _network_trouble(log_path: Path, tail_bytes: int = 262_144) -> bool:
-    """Whether the END of the log reads like a network failure (the cause of a
-    failed install is at the end; a gigabyte of earlier output is not read)."""
-    try:
-        with log_path.open("rb") as fh:
-            fh.seek(0, 2)
-            fh.seek(max(0, fh.tell() - tail_bytes))
-            text = fh.read().decode("utf-8", errors="replace").lower()
-    except OSError:
-        return False
-    return any(m in text for m in badge_rules._NETWORK_MARKERS)
 
 
 def _hash_resolved_versions(logdir: Path) -> Optional[str]:

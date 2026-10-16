@@ -27,10 +27,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       # The optional extras are installed so their tests run for real in CI: the
-      # PDF parser (paper) and the Software Heritage verifier (swh) are checked
+      # PDF parser (paper), the Software Heritage verifier (swh) and the Parquet
+      # comparison (parquet) are checked
       # against the actual libraries, and skip silently on a bare install.
       - name: Install
-        run: pip install -e ".[dev,paper,swh]"
+        run: pip install -e ".[dev,paper,swh,parquet]"
       - name: Test
         run: python -m pytest -q
 

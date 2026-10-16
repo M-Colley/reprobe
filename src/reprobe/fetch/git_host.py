@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from ..models import FetchResult, Pin
 from .base import (
+    _MAX_CLONE_BYTES,
     _MAX_LFS_TOTAL_BYTES,
     FetchError,
     _resolve_public,
@@ -271,7 +272,8 @@ class GitHostFetcher:
 
         dest.mkdir(parents=True, exist_ok=True)
         # `--` ends option parsing so a URL/dest can never be read as a flag.
-        clone = run_git([*guard, "clone", "--quiet", "--", url, str(dest)])
+        clone = run_git([*guard, "clone", "--quiet", "--", url, str(dest)],
+                        watch=dest, max_bytes=_MAX_CLONE_BYTES)
         if clone.returncode != 0:
             raise FetchError(_clone_failure(url, clone.stderr))
 

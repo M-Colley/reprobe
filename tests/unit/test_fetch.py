@@ -406,7 +406,7 @@ def test_clone_argv_uses_double_dash(tmp_path, monkeypatch):
     parsed as a git option."""
     seen = {}
 
-    def fake_git(args, cwd=None, timeout=600):
+    def fake_git(args, cwd=None, timeout=600, **kw):
         seen.setdefault("argvs", []).append(list(args))
         if args[0] == "rev-parse":
             return subprocess.CompletedProcess(args, 0, stdout="deadbeef\n", stderr="")
@@ -618,7 +618,7 @@ def test_allow_lfs_reaches_the_git_fetcher(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_git(args, cwd=None, timeout=600):
+    def fake_git(args, cwd=None, timeout=600, **kw):
         calls.append(list(args))
         if args[0] == "rev-parse":
             return subprocess.CompletedProcess(args, 0, stdout="deadbeef\n", stderr="")
@@ -661,7 +661,7 @@ def _lfs_pointer(size: int) -> str:
 
 def _origin(url):
     """A run_git stub factory that reports remote.origin.url = url."""
-    def fake_git(args, cwd=None, timeout=600):
+    def fake_git(args, cwd=None, timeout=600, **kw):
         if args[:3] == ["config", "--get", "remote.origin.url"]:
             return subprocess.CompletedProcess(args, 0, stdout=f"{url}\n", stderr="")
         if args[:2] == ["lfs", "ls-files"]:
@@ -692,7 +692,7 @@ def test_lfs_neutralizes_committed_lfsconfig(tmp_path, monkeypatch):
 def test_lfs_refuses_internal_origin(tmp_path, monkeypatch):
     (tmp_path / "d.bin").write_text(_lfs_pointer(10))
 
-    def fake_git(args, cwd=None, timeout=600):
+    def fake_git(args, cwd=None, timeout=600, **kw):
         if args[:3] == ["config", "--get", "remote.origin.url"]:
             return subprocess.CompletedProcess(args, 0, stdout="http://10.0.0.5/r.git\n", stderr="")
         if args[:2] == ["lfs", "pull"]:
@@ -708,7 +708,7 @@ def test_lfs_refuses_internal_origin(tmp_path, monkeypatch):
 def test_lfs_pull_refused_when_payload_exceeds_cap(tmp_path, monkeypatch):
     (tmp_path / "big.bin").write_text(_lfs_pointer(999_999_999_999))
 
-    def fake_git(args, cwd=None, timeout=600):
+    def fake_git(args, cwd=None, timeout=600, **kw):
         if args[:3] == ["config", "--get", "remote.origin.url"]:
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")   # no origin -> skip
         if args[:2] == ["lfs", "ls-files"]:
@@ -735,7 +735,7 @@ def test_lfs_pull_success_within_cap(tmp_path, monkeypatch):
 
 def _fetch_with_lfs_listing(monkeypatch, listing, rc=0):
     """Stub run_git so `git lfs ls-files` reports `listing` (rc!=0 = query failed)."""
-    def fake_git(args, cwd=None, timeout=600):
+    def fake_git(args, cwd=None, timeout=600, **kw):
         if args[0] == "rev-parse":
             return subprocess.CompletedProcess(args, 0, stdout="deadbeef\n", stderr="")
         if args[:2] == ["lfs", "ls-files"]:

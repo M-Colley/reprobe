@@ -31,6 +31,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from reprobe import docker_exec
 from reprobe.config import load_config
 from reprobe.docker_exec import run_container
 from reprobe.models import ContainerSpec, Mount, RawRunOutput, RunStep
@@ -330,13 +331,22 @@ def test_cgroup_limit_matches_config(envelope, cg_file):
         pytest.skip("cgroup v1 host: no unified /sys/fs/cgroup to read (the memory/pids tests still "
                     "check enforcement)")
     got = cg[cg_file]
+    if cg_file == "memory.swap.max" and not got["ok"]:
+        pytest.skip("this kernel has no swap accounting (memory.swap.max absent); the memory-cap "
+                    "test still checks that the cap is enforced")
     assert got["ok"], f"cannot read /sys/fs/cgroup/{cg_file}: {got['error']}"
     lim = envelope.limits
     if cg_file == "cpu.max":
         quota, period = got["value"].split()
         assert quota != "max", "cpu.max has no quota: --cpus not applied"
-        assert int(quota) / int(period) == pytest.approx(float(lim["cpus"])), (
-            f"cpu.max = {got['value']!r}, expected {lim['cpus']} CPUs")
+        # run_container clamps --cpus to what the daemon has (a 2-vCPU runner cannot
+        # be given 4), so the expectation is the clamped value, not the config's
+        want = float(lim["cpus"])
+        daemon = docker_exec._daemon_cpus()
+        if daemon:
+            want = min(want, daemon)
+        assert int(quota) / int(period) == pytest.approx(want), (
+            f"cpu.max = {got['value']!r}, expected {want:g} CPUs")
         return
     expected = {
         "pids.max": str(lim["pids"]),

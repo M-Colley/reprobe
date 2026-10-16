@@ -288,6 +288,14 @@ Wrapped by a host-side **hard timeout** that `docker kill`s and records `status=
 > - A host-side watchdog enforces, besides the clock, a console-output cap
 >   (`log_max`) and a cap on bytes under `/work` (`work_max`). A step stopped by
 >   any budget — including an OOM kill — is `resource-limit`, not `fail`.
+> - The install phase runs with `HOME` in the container's own filesystem (never
+>   `/work`), no `PYTHONPATH`, pip/R/micromamba user config disabled, and each
+>   command in its own `bash -ec` with an origin marker. Inferred Python packages
+>   are downloaded first and installed in one `--no-index` pip run (wheels only).
+>   Markers are written into the same output untrusted build code can write to, so
+>   attribution is evidence, not proof — see CHANGELOG "Known limits".
+> - Fetches stay bounded on the host too: strict URL parsing (both parsers must
+>   agree) with a DNS pin per hop, and a 20 GiB on-disk cap for `git clone`.
 
 **Network policy.** Default `--network none`. Sanctioned, explicit, time-boxed exceptions only: (a) **dependency-install phase** runs in a *separate* container with egress, then the actual run is `--network none` (recorded as a distinct phase); (b) **Unity activation** egress, then dropped; (c) per-submission opt-in `--allow-net <host>...` egress allowlist (A's escape hatch) for artifacts that must download data at runtime — this **downgrades badge confidence** and is flagged loudly. Default behavior when code attempts network under `none`: it fails fast and the report says `needs-network` rather than silently allowing egress.
 

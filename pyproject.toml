@@ -42,6 +42,9 @@ paper = ["pypdf>=6.14"]
 # implementation and compare it to the SWHID. Without it an SWHID pin is recorded
 # but never counts as checksum-verified, so Available stays a candidate.
 swh = ["swh.model>=8.0"]
+# Compare regenerated .parquet outputs. >= 14.0.1: earlier pyarrow can run code
+# embedded in an untrusted Parquet file (CVE-2023-47248), and compare.py refuses it.
+parquet = ["pyarrow>=14.0.1"]
 
 [project.scripts]
 reprobe = "reprobe.cli:main"

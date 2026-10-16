@@ -82,7 +82,8 @@ def post(url: str, **kwargs) -> requests.Response:
 _GIT_ENV_KEEP = ("GIT_SSL_CAINFO", "GIT_SSL_CAPATH")
 
 
-def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600) -> subprocess.CompletedProcess:
+def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600, *,
+            watch: Optional[Path] = None, max_bytes: Optional[int] = None) -> subprocess.CompletedProcess:
     # git runs on the TRUSTED host against an untrusted remote, so it must not
     # act as the chair: no credential helper, no ~/.gitconfig (helpers,
     # url.insteadOf rewrites, http.extraHeader tokens, core.hooksPath), no
@@ -110,6 +111,8 @@ def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600) -> 
     # prompt) would follow. Set on every call: a later `checkout` reads the
     # repo's own config, not the clone's -c.
     argv = ["git", "-c", "credential.helper=", "-c", "core.symlinks=false", *args]
+    if watch is not None and max_bytes:
+        return _run_git_watched(argv, cwd, env, timeout, watch, max_bytes, args[0])
     try:
         return subprocess.run(argv, cwd=cwd, env=env,
                               capture_output=True, text=True, timeout=timeout)
@@ -120,6 +123,73 @@ def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600) -> 
                          f"(large repo or slow network); re-run or clone manually")
 
 
+def _dir_bytes_over(root: Path, cap: int) -> bool:
+    """True once the files under ``root`` pass ``cap`` bytes (links not followed;
+    stops counting as soon as the answer is yes)."""
+    total = 0
+    stack = [root]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(Path(e.path))
+                        else:
+                            total += e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+                    if total > cap:
+                        return True
+        except OSError:
+            continue
+    return False
+
+
+_GIT_WATCH_EVERY_S = 2.0
+
+
+def _run_git_watched(argv: list[str], cwd: Optional[Path], env: dict, timeout: int,
+                     watch: Path, max_bytes: int, verb: str) -> subprocess.CompletedProcess:
+    """``git`` with a disk budget on ``watch``.
+
+    A clone writes onto the TRUSTED host, outside every container cap, and its
+    size is the author's choice — a repository of tens of gigabytes (or a crafted
+    pack) would fill the disk a whole review season runs on. git has no size
+    limit of its own, so the destination is measured while it grows and the
+    process is killed past ``max_bytes``. Output goes to temp files, not pipes,
+    so a chatty git can never deadlock the wait."""
+    import tempfile
+
+    start = time.monotonic()
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=out, stderr=err)
+        except FileNotFoundError:
+            raise FetchError("git is not installed or not on PATH — see the chair runbook prerequisites")
+        stopped = ""
+        while True:
+            try:
+                code = proc.wait(timeout=_GIT_WATCH_EVERY_S)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if time.monotonic() - start > timeout:
+                stopped = f"git {verb} timed out after {timeout}s (large repo or slow network); " \
+                          "re-run or clone manually"
+            elif watch.exists() and _dir_bytes_over(watch, max_bytes):
+                stopped = (f"git {verb} stopped: the repository passed {max_bytes // 1024**3} GiB on disk, "
+                           "the cap for a fetch on the review host")
+            if stopped:
+                proc.kill()
+                proc.wait(timeout=30)
+                raise FetchError(stopped)
+        out.seek(0)
+        err.seek(0)
+        return subprocess.CompletedProcess(argv, code, out.read().decode("utf-8", "replace"),
+                                           err.read().decode("utf-8", "replace"))
+
+
 # ---------------------------------------------------------------------------
 # Resource bounds. A malicious deposit (a huge file or a decompression bomb) is
 # handled on the TRUSTED host, outside the container caps, so it could exhaust
@@ -127,6 +197,7 @@ def run_git(args: list[str], cwd: Optional[Path] = None, timeout: int = 600) -> 
 # that still bound a bomb (which is TB–PB scale); a chair can lower them here.
 # ---------------------------------------------------------------------------
 _MAX_DOWNLOAD_BYTES = 20 * 1024**3       # per streamed file
+_MAX_CLONE_BYTES = 20 * 1024**3          # a git clone, working tree + .git
 _MAX_EXTRACT_BYTES = 50 * 1024**3        # total declared-uncompressed per archive
 _MAX_ARCHIVE_MEMBERS = 500_000
 _MAX_LFS_TOTAL_BYTES = 20 * 1024**3      # aggregate declared LFS payload per repo (git-lfs

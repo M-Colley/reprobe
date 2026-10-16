@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from reprobe.cli import app
@@ -61,12 +62,16 @@ def test_batch_resume_skips_completed_reports(tmp_path):
     assert "MARKER" not in rep_path.read_text(encoding="utf-8")
 
 
-def test_batch_resume_retries_fetch_failed(tmp_path):
+@pytest.mark.parametrize("overall", ["fetch-failed", "infra-error"])
+def test_batch_resume_retries_transient_failures(tmp_path, overall):
+    # The marker goes in a field resume does NOT compare: planting it in
+    # harness_version made the version check force the re-run on its own, so the
+    # verdict rule this test is about went untested (removing it stayed green).
     assert _batch(tmp_path).exit_code == 0
     rep_path = _report_json(tmp_path)
     data = json.loads(rep_path.read_text(encoding="utf-8"))
-    data["verdict"]["overall"] = "fetch-failed"
-    data["harness_version"] = "reprobe MARKER"
+    data["verdict"]["overall"] = overall
+    data["timestamp"] = "MARKER"
     rep_path.write_text(json.dumps(data), encoding="utf-8")
 
     res = _batch(tmp_path, "--resume")
@@ -75,7 +80,38 @@ def test_batch_resume_retries_fetch_failed(tmp_path):
     assert "MARKER" not in rep_path.read_text(encoding="utf-8")
 
 
-import pytest
+@pytest.mark.parametrize("extra", [("--timeout", "120"), ("--no-functional",)])
+def test_resume_reruns_when_the_batch_options_changed(tmp_path, extra):
+    """A report made with other options answers a different question."""
+    assert _batch(tmp_path).exit_code == 0
+    rep_path = _report_json(tmp_path)
+    data = json.loads(rep_path.read_text(encoding="utf-8"))
+    data["timestamp"] = "MARKER"
+    rep_path.write_text(json.dumps(data), encoding="utf-8")
+    res = _batch(tmp_path, "--resume", *extra)
+    assert res.exit_code == 0, res.output
+    assert "MARKER" not in rep_path.read_text(encoding="utf-8")
+    # and the SAME options now resume it
+    data = json.loads(rep_path.read_text(encoding="utf-8"))
+    data["timestamp"] = "MARKER2"
+    rep_path.write_text(json.dumps(data), encoding="utf-8")
+    res = _batch(tmp_path, "--resume", *extra)
+    assert "resumed from existing report" in res.output and "MARKER2" in rep_path.read_text(encoding="utf-8")
+
+
+def test_resume_reruns_when_a_rows_data_deposits_changed(tmp_path):
+    from reprobe.cli import _resumed_report
+    from reprobe.orchestrator import run_options
+    rep = tmp_path / "report.json"
+    opts = run_options(run_mode="no-run", data_sources=["https://osf.io/aaaaa"])
+    rep.write_text(json.dumps({"submission_id": "s", "harness_version": "reprobe x", "timestamp": "",
+                               "run_mode": "no-run", "verdict": {"overall": "not-run"},
+                               "provenance": {"run_options": opts}}), encoding="utf-8")
+    want = {"harness_version": "reprobe x", "config": {}}
+    assert _resumed_report(rep, {**want, "run_options": opts}) is not None
+    other = run_options(run_mode="no-run", data_sources=["https://osf.io/bbbbb"])
+    assert _resumed_report(rep, {**want, "run_options": other}) is None
+
 
 
 @pytest.mark.parametrize("change", [

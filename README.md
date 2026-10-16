@@ -56,8 +56,8 @@ anything. `reprobe --no-llm` is fully functional and deterministic.
 
 ```bash
 pip install -e .            # Python 3.11.4+; needs Docker available for runs
-pip install -e '.[paper,swh]'   # optional: read a paper PDF (results-vs-paper), and verify
-                                # Software Heritage deposits against their SWHID
+pip install -e '.[paper,swh,parquet]'   # optional: read a paper PDF (results-vs-paper),
+                                        # verify Software Heritage deposits, compare .parquet
 reprobe pull               # fetch the pinned base images (published, no login needed)
 reprobe doctor --smoke     # self-check: config, Docker, base images, Ollama, sandbox
 ```
