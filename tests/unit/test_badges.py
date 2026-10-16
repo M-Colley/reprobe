@@ -617,3 +617,18 @@ def test_install_failures_are_described_in_words_not_as_a_base64_blob():
         "ok": False, "timed_out": False, "failures": [failure]}}})
     assert "pip install -r requirements.txt (the sanitised copy) exited 1" in msg
     assert "base64" not in msg
+
+
+def test_steps_the_pipeline_never_ran_are_nothing_executed_not_structural():
+    """The orchestrator records an unmatched step with executed=False; that used
+    to leave no runnable step and read as `structural-only`."""
+    steps = [RunResult(runner="?", target="a.py", status="skipped", executed=False,
+                       diagnostics={"reason": "no runner"})]
+    v = badges.verdict(steps, ran=True)
+    assert v["overall"] == "nothing-executed"
+    assert "no runner" in v["note"]
+
+
+def test_a_host_only_structural_check_is_still_structural_only():
+    steps = [RunResult(runner="unity", target=".", status="pass", executed=False)]
+    assert badges.verdict(steps, ran=True)["overall"] == "structural-only"

@@ -70,6 +70,13 @@ def _q(s: object) -> str:
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
+#: Run-phase R environment. R_LIBS_USER holds what the install phase added.
+#: HOME and XDG_CACHE_HOME must be writable under the read-only rootfs (as for
+#: Python): R writes there for tools::R_user_dir, knitr and renv, and with no
+#: usable HOME those fail with errors that read like the artifact's own.
+_R_ENV = ("export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache R_LIBS_USER=/work/.reprobe_Rlib; ")
+
+
 def env_path_prefix(ctx: "RunContext") -> str:
     """`export PATH=…` putting the artifact's own conda env first, or "".
 

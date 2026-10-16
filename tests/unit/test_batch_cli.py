@@ -262,6 +262,58 @@ def test_batch_passes_each_rows_deposits_to_the_run(tmp_path, monkeypatch):
     cli_mod.batch(str(f), workroot=str(tmp_path / "w"), out=str(tmp_path / "o"),
                   config_dir=None, no_run=True, no_llm=True, no_functional=False,
                   no_install=False, allow_lfs=False, timeout=None, reuse_downloads=False,
-                  resume=False)
+                  resume=False, strict=False)
     assert seen == [("https://github.com/a/b", ["https://osf.io/cwd6h"]),
                     ("https://github.com/c/d", [])]
+
+
+def test_read_refs_headerless_csv_keeps_its_first_submission(tmp_path):
+    """`a,deposit` rows with no header: DictReader took the first submission for
+    the header and the season silently lost it."""
+    f = tmp_path / "subs.csv"
+    f.write_text("https://github.com/a/b,https://osf.io/x\nhttps://github.com/c/d,\n",
+                 encoding="utf-8")
+    assert _read_refs(str(f)) == [{"url": "https://github.com/a/b", "data": ["https://osf.io/x"]},
+                                  {"url": "https://github.com/c/d", "data": []}]
+
+
+def test_read_refs_refuses_a_header_without_a_url_column(tmp_path):
+    import typer
+    f = tmp_path / "subs.csv"
+    f.write_text("title,link\nA paper,https://github.com/a/b\n", encoding="utf-8")
+    with pytest.raises(typer.BadParameter, match="no 'url' column"):
+        _read_refs(str(f))
+
+
+def test_read_refs_skips_comment_rows_in_csv_form(tmp_path):
+    f = tmp_path / "subs.csv"
+    f.write_text("url,data\n# withdrawn\n#https://github.com/x/y,\nhttps://github.com/a/b,\n",
+                 encoding="utf-8")
+    assert [r["url"] for r in _read_refs(str(f))] == ["https://github.com/a/b"]
+
+
+@pytest.mark.parametrize("verdict, strict, code", [
+    ({"overall": "runs", "human_review_required": False}, False, 0),
+    ({"overall": "runs-with-failures", "human_review_required": True}, False, 0),
+    ({"overall": "runs-with-failures", "human_review_required": True}, True, 1),
+    ({"overall": "runs", "human_review_required": False}, True, 0),
+    ({"overall": "infra-error", "human_review_required": True}, False, 3),
+    ({"overall": "infra-error", "human_review_required": True}, True, 3),
+])
+def test_exit_codes_separate_a_finding_from_a_harness_failure(verdict, strict, code):
+    from reprobe.cli import _exit_code
+    assert _exit_code([verdict], strict=strict) == code
+
+
+def test_run_exits_3_when_the_harness_made_no_statement(tmp_path, monkeypatch):
+    import reprobe.cli as cli_mod
+    from reprobe.models import Report
+
+    class FakeOrch:
+        def run(self, ref, **kw):
+            return Report(submission_id="sid", harness_version="t", timestamp="",
+                          verdict={"overall": "infra-error", "human_review_required": True})
+
+    monkeypatch.setattr(cli_mod, "_orch", lambda *a, **k: FakeOrch())
+    res = runner.invoke(app, ["run", "x", "--workroot", str(tmp_path)])
+    assert res.exit_code == 3, res.stdout

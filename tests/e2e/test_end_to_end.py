@@ -72,3 +72,18 @@ def test_an_artifact_whose_declared_environment_cannot_install_is_its_own_findin
     assert install["ok"] is False and [f["origin"] for f in install["failures"]] == ["author-declared"], install
     assert report.verdict["overall"] == "runs-with-failures", report.verdict
     assert "declared environment does not install" in report.verdict.get("note", "")
+
+
+def test_an_renv_projects_restored_library_is_usable_offline(tmp_path):
+    """renv installs into its global cache and symlinks the project library to
+    it. The cache lived in the install container's HOME, so every restored
+    package was a dangling link in the run phase — and the step's "there is no
+    package called" was read as the artifact's fault."""
+    report, logs = _run(tmp_path, "r-renv")
+    install = report.environment["install_results"]["r"]
+    assert install["ok"], f"install phase failed: {install}\n{logs}"
+    step = report.steps[0]
+    assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
+    assert step.expected_met == ["results/version.txt"]
+    produced = tmp_path / report.submission_id / "run" / "results" / "version.txt"
+    assert produced.read_text(encoding="utf-8").strip() == "1.0.0"

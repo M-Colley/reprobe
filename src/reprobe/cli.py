@@ -69,8 +69,14 @@ def run(
              "the cache is shared between submissions: use it while iterating on one "
              "artifact, not for a season of them"),
     dry_run: bool = typer.Option(False, "--dry-run", help="build argv but do not launch containers"),
+    strict: bool = typer.Option(False, "--strict",
+                                help="exit 1 when the verdict needs human review (CI gating). "
+                                     "Without it: 0 = a report was made, 3 = the harness failed"),
 ):
-    """Fetch, detect, run (sandboxed), and report on a single artifact."""
+    """Fetch, detect, run (sandboxed), and report on a single artifact.
+
+    Exit status: 0 a report was written; 1 (only with --strict) the verdict needs
+    human review; 3 the harness failed (infra-error) and made no statement."""
     orch = _orch(workroot, config_dir)
     report = orch.run(
         ref, do_run=not no_run, functional=not no_functional, use_llm=not no_llm,
@@ -79,6 +85,25 @@ def run(
         data_sources=list(data or []), reuse_downloads=reuse_downloads,
     )
     _print_report_summary(report, Path(workroot) / report.submission_id / "report")
+    if code := _exit_code([report.verdict], strict=strict):
+        raise typer.Exit(code)
+
+
+# Exit codes. A finding about the artifact — it fails, it needs review — is what
+# the tool exists to report, so it is not a failure of the tool. Only a run that
+# made NO statement (the harness itself failed) is, and `--strict` adds the case
+# a CI gate wants: anything a human still has to look at.
+EXIT_OK, EXIT_NEEDS_REVIEW, EXIT_HARNESS_ERROR = 0, 1, 3
+
+
+def _exit_code(verdicts: list[dict[str, Any]], *, strict: bool) -> int:
+    if any(v.get("overall") == "infra-error" for v in verdicts):
+        console.print(f"[yellow]exit {EXIT_HARNESS_ERROR}[/yellow]: the harness failed on at "
+                      "least one submission (infra-error) — no statement about it was made")
+        return EXIT_HARNESS_ERROR
+    if strict and any(v.get("human_review_required") for v in verdicts):
+        return EXIT_NEEDS_REVIEW
+    return EXIT_OK
 
 
 @app.command()
@@ -211,8 +236,14 @@ def batch(
     resume: bool = typer.Option(False, "--resume", help="reuse existing per-submission reports made "
                                 "by this harness version, config and these options; fetch-failed/"
                                 "infra-error submissions are retried"),
+    strict: bool = typer.Option(False, "--strict",
+                                help="exit 1 when any submission needs human review"),
 ):
-    """Run a whole review season and emit a sortable dashboard."""
+    """Run a whole review season and emit a sortable dashboard.
+
+    Exit status: 0 the dashboard was written; 1 (only with --strict) a
+    submission needs human review; 3 the harness failed on at least one
+    submission (re-run with --resume to retry just those)."""
     import shutil
 
     from . import __version__ as _v
@@ -264,6 +295,8 @@ def batch(
         [{"submission_id": r["submission_id"], "badges": r["badges"]} for r in reports], indent=2), encoding="utf-8")
     (outdir / "badges.csv").write_text(_badges_csv(reports), encoding="utf-8")
     console.print(f"[green]ok[/green] dashboard: {outdir / 'dashboard.html'}  ({len(reports)} submissions)")
+    if code := _exit_code([r.get("verdict") or {} for r in reports], strict=strict):
+        raise typer.Exit(code)
 
 
 @app.command()
@@ -487,25 +520,48 @@ def _read_refs(csv_path: str) -> list[dict[str, Any]]:
     the split that `--data` exists for is the one where the README links the data
     in prose and the artifact declares nothing a machine can read. That case was
     reviewable one submission at a time and not at the scale a chair works at.
-    Several deposits go in one cell, separated by whitespace or ';'."""
-    p = Path(csv_path)
+    Several deposits go in one cell, separated by whitespace or ';'.
+
+    Comment lines (``#``) and blank lines are skipped in both forms. A header
+    is recognised by its ``url`` column; a file without one is read as
+    ``url[,data]`` rows — the first row is a submission, not a header. A header
+    that has columns but no ``url`` is an error: taking its first column instead
+    would batch a sheet of paper titles."""
     # utf-8-sig strips a leading BOM (Excel / PowerShell CSV exports carry one),
     # which would otherwise break header detection and the 'url' column lookup.
-    text = p.read_text(encoding="utf-8-sig")
-    lines = text.splitlines()
+    text = Path(csv_path).read_text(encoding="utf-8-sig")
+    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
     if not lines:                       # empty file must not abort the whole season
         return []
-    refs: list[dict[str, Any]] = []
-    if "," in lines[0] or lines[0].lower().startswith("url"):
-        for row in csv.DictReader(lines):
-            low = {(k or "").strip().lower(): v for k, v in row.items()}
-            url = low.get("url") or next(iter(row.values()), None)
-            if url and url.strip():
-                refs.append({"url": url.strip(), "data": _split_data_cell(low.get("data"))})
+    rows = list(csv.reader(lines))
+    header = [(c or "").strip().lower() for c in rows[0]]
+    if "url" in header:
+        i_url = header.index("url")
+        i_data = header.index("data") if "data" in header else None
+        body = rows[1:]
+    elif len(rows[0]) == 1 or _looks_like_ref(rows[0][0]):
+        if any(len(r) > 2 for r in rows):
+            raise typer.BadParameter(
+                f"{csv_path}: rows have more than two columns but no header; add a header "
+                "row naming the 'url' (and optional 'data') column")
+        i_url, i_data, body = 0, 1, rows
     else:
-        refs = [{"url": ln.strip(), "data": []}
-                for ln in lines if ln.strip() and not ln.startswith("#")]
+        raise typer.BadParameter(
+            f"{csv_path}: the header row ({', '.join(c.strip() for c in rows[0])}) has no "
+            "'url' column; name the column holding the submission links 'url'")
+    refs: list[dict[str, Any]] = []
+    for r in body:
+        url = r[i_url].strip() if len(r) > i_url else ""
+        if url:
+            cell = r[i_data] if i_data is not None and len(r) > i_data else None
+            refs.append({"url": url, "data": _split_data_cell(cell)})
     return refs
+
+
+def _looks_like_ref(cell: str) -> bool:
+    """Whether a first cell is a submission rather than a column name."""
+    c = cell.strip()
+    return "://" in c or c.lower().startswith(("doi:", "10.", "git@")) or Path(c).exists()
 
 
 def _split_data_cell(cell: Optional[str]) -> list[str]:

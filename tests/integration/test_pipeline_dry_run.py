@@ -637,3 +637,64 @@ def test_a_fully_successful_install_script_exits_zero(tmp_path):
     r = subprocess.run(["bash", "-c", "set -e; " + orch_mod._attributed_script(items)],
                        capture_output=True, text=True)
     assert r.returncode == 0 and "failed" not in r.stdout
+
+
+@pytest.mark.parametrize("target", ["/usr/lib/python3/this.py", "../outside.py", "missing.py",
+                                    "-mrunpy.py", "link_out.py"])
+def test_a_manifest_step_must_name_a_file_inside_the_deposit(tmp_path, monkeypatch, target):
+    """A step outside the deposit would run someone else's code and pass; a
+    missing one would fail with an error that reads like the artifact's own."""
+    art = tmp_path / "artifact"
+    art.mkdir()
+    (art / "run.py").write_text("print(1)\n", encoding="utf-8")
+    (tmp_path / "outside.py").write_text("print(1)\n", encoding="utf-8")
+    try:
+        (art / "link_out.py").symlink_to(tmp_path / "outside.py")
+    except OSError:
+        if target == "link_out.py":
+            pytest.skip("symlinks need privileges on this platform")
+    (art / "autoui-repro.yml").write_text(
+        f"version: 1\nrun:\n  steps: [{target!r}]\n", encoding="utf-8")
+    launched = []
+    _simulate(monkeypatch, lambda spec, log: launched.append(spec))
+
+    report = Orchestrator(workroot=tmp_path / "wk").run(str(art), use_llm=False)
+    assert launched == []                                   # no container for the step
+    [step] = report.steps
+    assert step.status == "skipped" and step.executed is False
+    assert report.verdict["overall"] == "nothing-executed"
+    assert target.lstrip("-") in report.verdict["note"]
+
+
+def test_a_refused_step_beside_a_passing_one_is_not_a_clean_run(tmp_path, monkeypatch):
+    from reprobe.models import RawRunOutput
+    art = tmp_path / "artifact"
+    art.mkdir()
+    (art / "run.py").write_text("print(1)\n", encoding="utf-8")
+    (art / "autoui-repro.yml").write_text(
+        "version: 1\nrun:\n  steps: [run.py, typo.py]\n", encoding="utf-8")
+
+    def ok(spec, log):
+        Path(log).write_text("1\n", encoding="utf-8")
+        return RawRunOutput(exit_code=0, duration_s=0.1, image=spec.image, log_path=str(log))
+    _simulate(monkeypatch, ok)
+
+    report = Orchestrator(workroot=tmp_path / "wk").run(str(art), use_llm=False)
+    assert [s.status for s in report.steps] == ["pass", "skipped"]
+    assert report.verdict["overall"] == "runs-with-warnings"
+    assert "typo.py" in report.verdict["note"] and "does not exist" in report.verdict["note"]
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_renv_restores_copies_not_links_into_a_cache_the_run_cannot_see(tmp_path, spy_run_container,
+                                                                        reuse):
+    """renv symlinks the project library into its global cache; that cache is in
+    the install container's HOME (or the --reuse-downloads mount), and the run
+    phase sees neither — every restored package was a dangling link."""
+    RENV = Path(__file__).resolve().parents[1] / "e2e" / "fixtures" / "r-renv"
+    _run(tmp_path, RENV, reuse_downloads=reuse)
+    [install] = [c for c in spy_run_container if c["spec"].network == "egress"]
+    script = install["spec"].command[-1]
+    assert "renv::restore" in script
+    assert "export RENV_CONFIG_CACHE_SYMLINKS=FALSE;" in script
+    assert ("RENV_CONFIG_CACHE_ENABLED=FALSE" in script) is (not reuse)

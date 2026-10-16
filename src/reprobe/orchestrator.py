@@ -252,6 +252,13 @@ class Orchestrator:
                                              diagnostics={"reason": "no runner",
                                                           "loaded_runners": sorted(self.runners)}))
                     continue
+                refused = None if getattr(runner, "host_only", False) else _step_target_problem(
+                    step.target, rundir)
+                if refused:
+                    results.append(RunResult(runner=runner.id, target=step.target,
+                                             status="skipped", executed=False,
+                                             diagnostics={"reason": refused}))
+                    continue
                 image = None if getattr(runner, "host_only", False) else (
                     env_plan.image
                     if env_plan.env_provenance in ("author-specified", "fallback-generic")
@@ -587,7 +594,15 @@ class Orchestrator:
         prep = (f"set -e; mkdir -p /work/.reprobe_deps /work/.reprobe_Rlib {INSTALL_HOME}; "
                 f"export HOME={INSTALL_HOME}; export R_LIBS_USER=/work/.reprobe_Rlib; "
                 "export R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null R_MAKEVARS_USER=/dev/null; "
-                "export PIP_CONFIG_FILE=/dev/null PIP_DISABLE_PIP_VERSION_CHECK=1; ")
+                "export PIP_CONFIG_FILE=/dev/null PIP_DISABLE_PIP_VERSION_CHECK=1; "
+                # renv installs into its global cache and SYMLINKS the project
+                # library to it. That cache is under this container's HOME (or
+                # the --reuse-downloads mount), neither of which the run phase
+                # sees: every restored package would be a dangling link there,
+                # failing as "there is no package called ..." — read as the
+                # artifact's fault. Copies keep the library self-contained.
+                "export RENV_CONFIG_CACHE_SYMLINKS=FALSE; "
+                + ("" if reuse_downloads else "export RENV_CONFIG_CACHE_ENABLED=FALSE; "))
 
         # Package downloads land in a container-local HOME, which is gone when the
         # container exits — so re-running one submission re-downloads
@@ -980,6 +995,32 @@ class Orchestrator:
 
 
 # ---------------------------------------------------------------------- #
+def _step_target_problem(target: str, rundir: Path) -> Optional[str]:
+    """Why a step's target must not be run, or None.
+
+    Targets from an author manifest are verbatim strings. One that names a file
+    outside the deposit (`/usr/lib/python3/this.py`, `../x.py`, a symlink out)
+    would run code the deposit does not contain — and pass, crediting the
+    artifact with a run of someone else's file. One that does not exist fails
+    with a console error that reads like the artifact's own. A leading `-` is
+    read by the interpreter as an option (`-mhttp.server`), not a file."""
+    t = target.strip()
+    if not t:
+        return "the step names no file"
+    if t.startswith("-"):
+        return f"`{t}` would be read as an interpreter option, not a file"
+    root = rundir.resolve()
+    if Path(t).is_absolute() or Path(t).drive:
+        return f"`{t}` is an absolute path; a step must name a file inside the deposit"
+    p = (rundir / t).resolve()
+    if not p.is_relative_to(root):
+        return f"`{t}` resolves outside the deposit; refusing to run it"
+    if not p.is_file():
+        return (f"`{t}` does not exist in the deposit (check the step's path in the "
+                "manifest; paths are relative to the repository root)")
+    return None
+
+
 def _daemon_down(res: RunResult) -> bool:
     """True when a step failed because the Docker daemon is gone — the one
     failure that makes every later step meaningless rather than informative."""

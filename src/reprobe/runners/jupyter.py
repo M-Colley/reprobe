@@ -43,7 +43,7 @@ class JupyterRunner(BaseRunner):
         # tail names the culprit. Logging only; it cannot change the exit code.
         cmd = (
             "export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache MPLCONFIGDIR=/tmp; "
-            "export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; "
+            "export PYTHONPATH=/work/.reprobe_deps${PYTHONPATH:+:$PYTHONPATH} PYTHONUNBUFFERED=1; "
             f"{env_path_prefix(ctx)}"
             f"if command -v papermill >/dev/null 2>&1; then "
             f"papermill --no-progress-bar --log-output --cwd {_q(nbdir)} {_q(t)} {_q(out)}; "

@@ -48,15 +48,17 @@ runs:
       run: |
         read -r -a extra <<< "$REPROBE_ARGS"
         [ "$REPROBE_LLM" = "true" ] || extra+=(--no-llm)
-        reprobe run "$REPROBE_SUBMISSION" "${extra[@]}"
+        # The work dir lives outside the workspace: `submission: .` would
+        # otherwise put it inside the tree being checked.
+        reprobe run "$REPROBE_SUBMISSION" --workroot "$RUNNER_TEMP/reprobe-work" "${extra[@]}"
     - name: Upload report
       if: always()
       uses: actions/upload-artifact@v7
       with:
         name: reprobe-report
-        # Reports land in work/<submission>/report/ (report.json/.md/.html and
-        # collected artifacts). A missing report is a failure, not a warning.
-        path: work/*/report/
+        # Reports land in <workroot>/<submission>/report/ (report.json/.md/.html
+        # and collected artifacts). A missing report is a failure, not a warning.
+        path: ${{ runner.temp }}/reprobe-work/*/report/
         if-no-files-found: error
 # Note: the host runner must have Docker available (the action launches sibling
 # sandboxed containers). For batch matrices, drive `reprobe batch` instead.

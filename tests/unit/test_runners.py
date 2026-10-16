@@ -9,6 +9,8 @@ containment, and config-driven plugin loading.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 import types
 
@@ -409,3 +411,28 @@ def test_harness_scratch_dirs_are_not_artifact_output(tmp_path):
     (tmp_path / "results.csv").write_text("a\n", encoding="utf-8")
 
     assert set(snapshot(tmp_path)) == {"results.csv"}
+
+
+@pytest.mark.parametrize("runner", [RScriptRunner(), RMarkdownRunner()], ids=lambda r: r.id)
+def test_r_runs_get_a_writable_home_and_cache(tmp_path, runner):
+    """Without one, R_user_dir / knitr / renv writes fail under the read-only
+    rootfs with errors that read like the artifact's own."""
+    target = "a.R" if runner.id == "r" else "a.Rmd"
+    cmd = _bash(runner.build_command(_ctx(tmp_path, RunStep(target=target, kind=runner.id))))
+    assert "export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache R_LIBS_USER=/work/.reprobe_Rlib;" in cmd
+
+
+def test_python_runs_unbuffered_and_without_an_empty_pythonpath_entry(tmp_path):
+    """An empty PYTHONPATH left `deps:` — the trailing empty entry puts the cwd
+    on sys.path, so the harness ran scripts with imports plain `python` lacks.
+    Buffered stdout is lost when the time budget kills the step."""
+    cmd = _bash(PythonScriptRunner().build_command(_ctx(tmp_path, RunStep(target="a.py", kind="python"))))
+    assert "PYTHONUNBUFFERED=1" in cmd
+    export = cmd[cmd.index("export PYTHONPATH="):].split(";", 1)[0]
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash")
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    out = subprocess.run([bash, "-c", f'{export}; printf %s "$PYTHONPATH"'], env=env,
+                         capture_output=True, text=True).stdout
+    assert out == "/work/.reprobe_deps"

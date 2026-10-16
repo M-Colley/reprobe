@@ -27,5 +27,5 @@ class PythonScriptRunner(BaseRunner):
         # PYTHONPATH lets a gated-egress install phase drop deps into /work/.reprobe_deps
         return ["bash", "-c",
                 f"export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache MPLCONFIGDIR=/tmp; "
-                f"export PYTHONPATH=/work/.reprobe_deps:$PYTHONPATH; "
+                f"export PYTHONPATH=/work/.reprobe_deps${{PYTHONPATH:+:$PYTHONPATH}} PYTHONUNBUFFERED=1; "
                 f"{env_path_prefix(ctx)}python {_q(target)} {extra}".rstrip()]

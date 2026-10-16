@@ -84,7 +84,7 @@ def decide(
                          "auto-granted; reporting at most candidate")
         if all(s.status == "skipped" for s in primary):
             functional = "not-evaluated"
-            notes.append(f"no step was executed (no matching runner) — {_NO_STATEMENT}")
+            notes.append(f"no step was executed ({_skip_reasons(primary)}) — {_NO_STATEMENT}")
         elif declared_env_error and not all(s.status == "pass" for s in primary) \
                 and not any(_infra_error(s) for s in primary):
             # The artifact's OWN dependency declaration did not install. That is a
@@ -190,6 +190,12 @@ def _unexecuted(steps: list[RunResult]) -> list[RunResult]:
     or a host-only structural check failed. Invisible to a verdict computed from
     executed steps only, which then read "all declared steps ran"."""
     return [s for s in steps if not s.executed and s.status in ("skipped", "fail", "error")]
+
+
+def _skip_reasons(steps: list[RunResult]) -> str:
+    reasons = list(dict.fromkeys(str(s.diagnostics.get("reason") or "no matching runner")
+                                 for s in steps if s.status == "skipped"))
+    return "; ".join(reasons) or "no matching runner"
 
 
 def _any_declared(detect: DetectResult) -> bool:
@@ -355,7 +361,11 @@ def verdict(steps: list[RunResult], ran: bool,
     runnable = [s for s in steps if s.executed]
     statuses = [s.status for s in runnable]
     if not runnable:
-        overall = "structural-only"
+        # host-only structural checks (Unity T0) did run; steps that were only
+        # ever skipped — no runner, a refused manifest path, the daemon gone —
+        # say nothing at all, and must not read as a structural result
+        overall = ("structural-only" if any(s.status != "skipped" for s in steps)
+                   else "nothing-executed")
     elif all(s == "pass" for s in statuses):
         # Every step ran clean — but if outputs were declared and NOT ONE was
         # produced, the run is not clean. Steps carrying only broadcast outputs
@@ -396,7 +406,7 @@ def verdict(steps: list[RunResult], ran: bool,
         detail = f" ({install_error})" if install_error else ""
         notes.append(f"harness/infrastructure error{detail} — {_NO_STATEMENT}")
     elif overall == "nothing-executed":
-        notes.append(f"no step was executed (no matching runner) — {_NO_STATEMENT}")
+        notes.append(f"no step was executed ({_skip_reasons(steps)}) — {_NO_STATEMENT}")
     elif overall == "resource-limit":
         # "no statement beyond that" would contradict a declared-environment
         # failure reported in the same note: that IS a statement about the artifact

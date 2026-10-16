@@ -136,6 +136,39 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
   retry rule (mutation-checked); new extras `parquet` and the `paper`/`swh` real
   libraries are installed in CI; the sandbox CPU check follows the daemon clamp.
 
+### Steps, verdicts, exit codes
+
+- **A manifest step must name a file inside the deposit.** `run: steps:` targets
+  are verbatim strings: `/usr/lib/python3/this.py`, `../x.py` or a symlink out of
+  the tree ran code the deposit does not contain — and could pass, crediting the
+  artifact with someone else's file. A missing path failed with an interpreter
+  error that read like the artifact's own. Both are now refused before any
+  container starts, with the reason in the verdict note.
+- **A run where nothing ran is `nothing-executed`, not `structural-only`.** The
+  orchestrator records unrun steps (no runner, refused path) with
+  `executed=False`, which left no runnable step and fell through to the Unity
+  structural verdict. Only a host-only check that actually ran is structural.
+- **renv libraries survive into the run phase.** renv installs into its global
+  cache and symlinks the project library to it; the cache was in the install
+  container's HOME (or the `--reuse-downloads` mount), so the offline run saw
+  dangling links and failed with "there is no package called ..." — read as the
+  artifact's fault. Restores now copy (`RENV_CONFIG_CACHE_SYMLINKS=FALSE`, and no
+  cache at all without `--reuse-downloads`). New e2e fixture `r-renv`.
+- R steps get a writable `HOME` and cache like Python steps (`R_user_dir`,
+  knitr and renv write there). Python steps run unbuffered, so a step killed at
+  the time budget keeps its last output for the diagnosis, and an empty
+  `PYTHONPATH` no longer leaves a trailing `:` that put the cwd on `sys.path`.
+- **Exit status:** `run` and `batch` exit 3 when the harness made no statement
+  (`infra-error`) and, with `--strict`, 1 when a verdict needs human review;
+  otherwise 0. A finding about the artifact is the tool's output, not its failure.
+- **`batch` CSV:** a header-less `url,data` file lost its first submission
+  (taken for the header); a header without a `url` column batched its first
+  column; `#` rows were read as URLs in CSV form. All three fixed — a header
+  without `url` is now an error.
+- `reprobe run .` with the default `--workroot work` copied the tree into
+  itself; the in-tree work directory is now left out (and named), and the
+  GitHub Action keeps its work dir in `$RUNNER_TEMP`.
+
 ### Known limits
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:

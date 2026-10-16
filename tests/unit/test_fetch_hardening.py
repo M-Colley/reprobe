@@ -263,3 +263,28 @@ def test_the_dns_pin_applies_however_urllib3_spells_the_host(asked):
     with base._pinned_dns("example.com.", pinned):
         assert socket.getaddrinfo(asked, 443) == pinned
     assert socket.getaddrinfo is not None
+
+
+def test_a_workroot_inside_the_artifact_is_not_copied_into_it(tmp_path):
+    """`reprobe run .` with the default --workroot work: copytree walked into its
+    own output, and every earlier run's work dir became part of the artifact."""
+    from reprobe.fetch.local import LocalFetcher
+    art = tmp_path / "repo"
+    (art / "work" / "old-sub" / "src").mkdir(parents=True)
+    (art / "work" / "old-sub" / "src" / "stale.py").write_text("x = 1\n", encoding="utf-8")
+    (art / "analysis.py").write_text("print(1)\n", encoding="utf-8")
+    dest = art / "work" / "this-sub" / "src"
+
+    res = LocalFetcher().fetch(str(art), dest)
+    assert sorted(p.name for p in dest.iterdir()) == ["analysis.py"]
+    assert any("work/` was left out" in w for w in res.warnings)
+
+
+def test_a_workroot_outside_the_artifact_changes_nothing(tmp_path):
+    from reprobe.fetch.local import LocalFetcher
+    art = tmp_path / "repo"
+    (art / "work").mkdir(parents=True)                 # the author's own "work" dir
+    (art / "work" / "notes.txt").write_text("n\n", encoding="utf-8")
+    res = LocalFetcher().fetch(str(art), tmp_path / "wk" / "sid" / "src")
+    assert (tmp_path / "wk" / "sid" / "src" / "work" / "notes.txt").is_file()
+    assert not any("left out" in w for w in res.warnings)
