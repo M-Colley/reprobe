@@ -417,12 +417,28 @@ def test_the_generated_import_install_code_runs_and_does_what_it_says(monkeypatc
 
 def test_an_activated_renv_project_is_restored_into_its_own_library(tmp_path):
     """Without activation renv restores into the first library on the path — the
-    harness's — and a project whose activate.R then drops that library from the
-    path cannot see a single restored package. Verified against renv 1.3.1."""
-    from reprobe.envbuild.base import _activates_renv, _renv_restore_command
-    assert not _activates_renv(tmp_path)
+    harness's — and a project whose activate.R then drops that library cannot
+    see a single restored package; activate.R also loads renv itself from the
+    project library, and offline it cannot download it. Verified against renv."""
+    from reprobe.envbuild.base import _renv_activation, _renv_restore_command
+    assert _renv_activation(tmp_path) is None
     (tmp_path / ".Rprofile").write_text('source("renv/activate.R")\n', encoding="utf-8")
-    assert _activates_renv(tmp_path)
-    assert "library=renv::paths$library(project=getwd())" in _renv_restore_command("r", [], activated=True)
-    assert "library=" not in _renv_restore_command("r", [], activated=False)
-    assert "'" not in _renv_restore_command("r", ["x"], activated=True).split("-e '", 1)[1][:-1]
+    assert _renv_activation(tmp_path) == ""
+    (tmp_path / "renv").mkdir()
+    (tmp_path / "renv" / "activate.R").write_text(
+        'local({\n\n  # the requested version of renv\n  version <- "1.2.3"\n', encoding="utf-8")
+    assert _renv_activation(tmp_path) == "1.2.3"
+    cmd = _renv_restore_command("r", [], "1.2.3")
+    assert "library=lib" in cmd and 'v <- "1.2.3"' in cmd and 'renv::install(paste0("renv@", v)' in cmd
+    assert "library=" not in _renv_restore_command("r", [], None)
+    for c in (cmd, _renv_restore_command("r", ["x"], ""), _renv_restore_command("r", [], None)):
+        assert "'" not in c.split("-e '", 1)[1][:-1]
+
+
+def test_an_activate_version_that_is_not_a_plain_version_is_not_used(tmp_path):
+    from reprobe.envbuild.base import _renv_activation
+    (tmp_path / ".Rprofile").write_text('source("renv/activate.R")\n', encoding="utf-8")
+    (tmp_path / "renv").mkdir()
+    for bad in ('version <- "1.0; system(x)"\n', 'version <- "1.0\\" + 1"\n', 'version <- "dev"\n'):
+        (tmp_path / "renv" / "activate.R").write_text(bad, encoding="utf-8")
+        assert _renv_activation(tmp_path) == "", bad

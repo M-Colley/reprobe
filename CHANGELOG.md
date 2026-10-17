@@ -161,7 +161,10 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
   every restored package was invisible ("there is no package called ...").
   Found by the new e2e fixture on the published images, reproduced against
   renv 1.3.1, fixed by restoring into `renv::paths$library()` when the project
-  activates renv. Fixtures `r-renv` (a real activated project) and
+  activates renv — and installing renv itself there, at the version the
+  project's `activate.R` asks for: `activate.R` loads renv from the project
+  library and otherwise tries to download it, which the offline run cannot.
+  Fixtures `r-renv` (a real activated project) and
   `r-renv-plain` (a lockfile alone) cover both shapes.
 - R steps get a writable `HOME` and cache like Python steps (`R_user_dir`,
   knitr and renv write there). Python steps run unbuffered, so a step killed at

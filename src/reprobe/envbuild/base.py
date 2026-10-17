@@ -68,17 +68,35 @@ _REQ_DIR = "/work/.reprobe_req"
 INSTALL_HOME = "/var/tmp/reprobe-home"
 
 
-def _activates_renv(src: Path) -> bool:
-    """Whether the project's .Rprofile sources renv's activate.R — the R session
-    of every step then runs on renv's project library, not the user library."""
-    prof = src / ".Rprofile"
+#: What renv's generated activate.R pins: `version <- "1.2.3"`. Only a plain
+#: version number is accepted — it is put into R source in the install phase.
+_ACTIVATE_VERSION_RE = re.compile(r'^\s*version\s*<-\s*"(\d+(?:\.\d+){1,3}(?:-\d+)?)"', re.M)
+
+
+def _renv_activation(src: Path) -> Optional[str]:
+    """None if the project does not activate renv; else the renv version its
+    activate.R asks for ("" when it names none we accept).
+
+    Activation means the project's .Rprofile sources renv/activate.R, so every
+    step's R session runs on renv's project library — and activate.R loads renv
+    ITSELF from that library, downloading it when absent, which the offline run
+    cannot do."""
+    prof, act = src / ".Rprofile", src / "renv" / "activate.R"
     if not inside_tree(src, prof) or not prof.is_file():
-        return False
+        return None
     try:
-        text = prof.read_text(encoding="utf-8", errors="replace")[:20000]
+        if "renv/activate.R" not in prof.read_text(encoding="utf-8", errors="replace")[:20000]:
+            return None
+        text = act.read_text(encoding="utf-8", errors="replace")[:4000] \
+            if inside_tree(src, act) and act.is_file() else ""
     except OSError:
-        return False
-    return "renv/activate.R" in text
+        return None
+    m = _ACTIVATE_VERSION_RE.search(text)
+    return m.group(1) if m else ""
+
+
+def _activates_renv(src: Path) -> bool:
+    return _renv_activation(src) is not None
 
 
 def _needs(kinds: set[str], *want: str) -> bool:
@@ -88,7 +106,8 @@ def _needs(kinds: set[str], *want: str) -> bool:
 # Same invocation for manifest-declared and auto-detected lockfiles: guarded so
 # an image without renv fails loudly (non-zero -> install noted failed/skipped)
 # instead of a cryptic traceback or a silent "ok".
-def _renv_restore_command(cran_repo: str, excluded: list[str], activated: bool = False) -> str:
+def _renv_restore_command(cran_repo: str, excluded: list[str],
+                          activation: Optional[str] = None) -> str:
     """Restore an renv.lock from the pinned CRAN snapshot, minus every package the
     lockfile sources from somewhere else (GitHub, a URL, a local path).
 
@@ -96,17 +115,29 @@ def _renv_restore_command(cran_repo: str, excluded: list[str], activated: bool =
     else the author put there) is not sourced during the network phase. Without
     activation renv restores into the FIRST library on the path — the harness's
     R_LIBS_USER, which the run phase also puts on the path. That is right for a
-    lockfile alone, and wrong for a project that activates renv: its activate.R
-    sets the library paths to the project library plus the system library,
-    dropping R_LIBS_USER, so every restored package would be invisible to the
-    run ("there is no package called ...", read as the artifact's fault). An
-    activated project is restored into exactly the library activate.R uses."""
+    lockfile alone, and wrong for a project that activates renv (``activation``
+    not None, see ``_renv_activation``): its activate.R puts only the project
+    library and the system library on the path, so every restored package would
+    be invisible ("there is no package called ...", read as the artifact's
+    fault). Such a project is restored into the library activate.R uses, and
+    renv itself — at the version activate.R asks for — is installed there too:
+    activate.R loads renv from that library and, finding it absent, tries to
+    download it, which the offline run cannot. Verified against renv 1.3.1."""
     repo = cran_repo or "https://cloud.r-project.org"
     excl = "c(" + ", ".join(f'"{n}"' for n in excluded) + ")" if excluded else "NULL"
-    lib = ", library=renv::paths$library(project=getwd())" if activated else ""
+    repos = f'c(CRAN=\"{repo}\")'
+    if activation is None:
+        body = f"renv::restore(project=getwd(), prompt=FALSE, repos={repos}, exclude={excl})"
+    else:
+        want = f'\"{activation}\"' if activation else 'as.character(packageVersion(\"renv\"))'
+        body = ("{ lib <- renv::paths$library(project=getwd()); "
+                f"renv::restore(project=getwd(), library=lib, prompt=FALSE, repos={repos}, exclude={excl}); "
+                f"v <- {want}; have <- tryCatch(as.character(packageVersion(\"renv\", lib.loc=lib)), "
+                "error=function(e) \"\"); "
+                f"if (!identical(have, v)) renv::install(paste0(\"renv@\", v), library=lib, "
+                f"repos={repos}, prompt=FALSE) }}")
     return ("Rscript --vanilla -e 'if (requireNamespace(\"renv\", quietly=TRUE)) "
-            f'renv::restore(project=getwd(){lib}, prompt=FALSE, repos=c(CRAN=\"{repo}\"), '
-            f'exclude={excl}) '
+            f"{body} "
             "else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'")
 
 
@@ -615,7 +646,7 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
         ip.warnings.extend(_dropped_warnings(rel, notes))
         if excluded is None:                    # refused: nothing is restored from it
             return
-        ip.add(_renv_restore_command(cran_repo, excluded, activated=_activates_renv(src)), AUTHOR)
+        ip.add(_renv_restore_command(cran_repo, excluded, _renv_activation(src)), AUTHOR)
 
     # explicit manifest dependency file
     if dep and not (src / dep).exists():
