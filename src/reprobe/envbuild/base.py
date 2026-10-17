@@ -68,6 +68,19 @@ _REQ_DIR = "/work/.reprobe_req"
 INSTALL_HOME = "/var/tmp/reprobe-home"
 
 
+def _activates_renv(src: Path) -> bool:
+    """Whether the project's .Rprofile sources renv's activate.R — the R session
+    of every step then runs on renv's project library, not the user library."""
+    prof = src / ".Rprofile"
+    if not inside_tree(src, prof) or not prof.is_file():
+        return False
+    try:
+        text = prof.read_text(encoding="utf-8", errors="replace")[:20000]
+    except OSError:
+        return False
+    return "renv/activate.R" in text
+
+
 def _needs(kinds: set[str], *want: str) -> bool:
     return any(k in kinds for k in want)
 
@@ -75,18 +88,25 @@ def _needs(kinds: set[str], *want: str) -> bool:
 # Same invocation for manifest-declared and auto-detected lockfiles: guarded so
 # an image without renv fails loudly (non-zero -> install noted failed/skipped)
 # instead of a cryptic traceback or a silent "ok".
-def _renv_restore_command(cran_repo: str, excluded: list[str]) -> str:
+def _renv_restore_command(cran_repo: str, excluded: list[str], activated: bool = False) -> str:
     """Restore an renv.lock from the pinned CRAN snapshot, minus every package the
     lockfile sources from somewhere else (GitHub, a URL, a local path).
 
     ``--vanilla``: the project's ``.Rprofile`` (renv's activate.R, plus whatever
-    else the author put there) is not sourced during the network phase. The
-    packages land in renv's project library, which the offline run — which does
-    start from the project directory — then uses."""
+    else the author put there) is not sourced during the network phase. Without
+    activation renv restores into the FIRST library on the path — the harness's
+    R_LIBS_USER, which the run phase also puts on the path. That is right for a
+    lockfile alone, and wrong for a project that activates renv: its activate.R
+    sets the library paths to the project library plus the system library,
+    dropping R_LIBS_USER, so every restored package would be invisible to the
+    run ("there is no package called ...", read as the artifact's fault). An
+    activated project is restored into exactly the library activate.R uses."""
     repo = cran_repo or "https://cloud.r-project.org"
     excl = "c(" + ", ".join(f'"{n}"' for n in excluded) + ")" if excluded else "NULL"
+    lib = ", library=renv::paths$library(project=getwd())" if activated else ""
     return ("Rscript --vanilla -e 'if (requireNamespace(\"renv\", quietly=TRUE)) "
-            f'renv::restore(prompt=FALSE, repos=c(CRAN=\"{repo}\"), exclude={excl}) '
+            f'renv::restore(project=getwd(){lib}, prompt=FALSE, repos=c(CRAN=\"{repo}\"), '
+            f'exclude={excl}) '
             "else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'")
 
 
@@ -595,7 +615,7 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
         ip.warnings.extend(_dropped_warnings(rel, notes))
         if excluded is None:                    # refused: nothing is restored from it
             return
-        ip.add(_renv_restore_command(cran_repo, excluded), AUTHOR)
+        ip.add(_renv_restore_command(cran_repo, excluded, activated=_activates_renv(src)), AUTHOR)
 
     # explicit manifest dependency file
     if dep and not (src / dep).exists():

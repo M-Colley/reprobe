@@ -75,10 +75,10 @@ def test_an_artifact_whose_declared_environment_cannot_install_is_its_own_findin
 
 
 def test_an_renv_projects_restored_library_is_usable_offline(tmp_path):
-    """renv installs into its global cache and symlinks the project library to
-    it. The cache lived in the install container's HOME, so every restored
-    package was a dangling link in the run phase — and the step's "there is no
-    package called" was read as the artifact's fault."""
+    """A real renv project (its .Rprofile sources renv/activate.R). Two bugs hid
+    here, both read as the artifact's fault: renv restored into the harness
+    library, which activate.R drops from the path; and renv symlinks the project
+    library into a cache that the offline run never sees."""
     report, logs = _run(tmp_path, "r-renv")
     install = report.environment["install_results"]["r"]
     assert install["ok"], f"install phase failed: {install}\n{logs}"
@@ -87,6 +87,14 @@ def test_an_renv_projects_restored_library_is_usable_offline(tmp_path):
     assert step.expected_met == ["results/version.txt"]
     produced = tmp_path / report.submission_id / "run" / "results" / "version.txt"
     assert produced.read_text(encoding="utf-8").strip() == "1.0.0"
+
+
+def test_a_bare_renv_lock_restores_where_the_run_looks(tmp_path):
+    report, logs = _run(tmp_path, "r-renv-plain")
+    assert report.environment["install_results"]["r"]["ok"], logs
+    step = report.steps[0]
+    assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
+    assert step.expected_met == ["results/version.txt"]
 
 
 def test_doctor_smoke_holds_inside_every_pinned_image():

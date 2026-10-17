@@ -413,3 +413,16 @@ def test_the_generated_import_install_code_runs_and_does_what_it_says(monkeypatc
     assert len(installs) == 1 and "--no-index" in installs[0] and installs[0][-1] == "reprobe-absent-ok"
     assert "--target=/work/.reprobe_deps" in installs[0]
     assert "pip could NOT install (reported, not faked): ['reprobe-absent-bad']" in out
+
+
+def test_an_activated_renv_project_is_restored_into_its_own_library(tmp_path):
+    """Without activation renv restores into the first library on the path — the
+    harness's — and a project whose activate.R then drops that library from the
+    path cannot see a single restored package. Verified against renv 1.3.1."""
+    from reprobe.envbuild.base import _activates_renv, _renv_restore_command
+    assert not _activates_renv(tmp_path)
+    (tmp_path / ".Rprofile").write_text('source("renv/activate.R")\n', encoding="utf-8")
+    assert _activates_renv(tmp_path)
+    assert "library=renv::paths$library(project=getwd())" in _renv_restore_command("r", [], activated=True)
+    assert "library=" not in _renv_restore_command("r", [], activated=False)
+    assert "'" not in _renv_restore_command("r", ["x"], activated=True).split("-e '", 1)[1][:-1]

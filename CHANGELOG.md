@@ -154,6 +154,15 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
   dangling links and failed with "there is no package called ..." — read as the
   artifact's fault. Restores now copy (`RENV_CONFIG_CACHE_SYMLINKS=FALSE`, and no
   cache at all without `--reuse-downloads`). New e2e fixture `r-renv`.
+- **An renv project is restored into its own library.** Restored with `--vanilla`
+  (its `.Rprofile` is not run in the network phase), renv put every package in
+  the first library on the path — the harness's — and the project's
+  `activate.R`, which the run does source, drops that library from the path:
+  every restored package was invisible ("there is no package called ...").
+  Found by the new e2e fixture on the published images, reproduced against
+  renv 1.3.1, fixed by restoring into `renv::paths$library()` when the project
+  activates renv. Fixtures `r-renv` (a real activated project) and
+  `r-renv-plain` (a lockfile alone) cover both shapes.
 - R steps get a writable `HOME` and cache like Python steps (`R_user_dir`,
   knitr and renv write there). Python steps run unbuffered, so a step killed at
   the time budget keeps its last output for the diagnosis, and an empty
