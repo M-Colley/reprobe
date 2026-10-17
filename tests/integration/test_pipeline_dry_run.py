@@ -698,3 +698,61 @@ def test_renv_restores_copies_not_links_into_a_cache_the_run_cannot_see(tmp_path
     assert "renv::restore" in script
     assert "export RENV_CONFIG_CACHE_SYMLINKS=FALSE;" in script
     assert ("RENV_CONFIG_CACHE_ENABLED=FALSE" in script) is (not reuse)
+
+
+def _rstudio_artifact(tmp_path):
+    art = tmp_path / "artifact"
+    art.mkdir()
+    (art / "analysis.R").write_text(
+        "setwd(dirname(rstudioapi::getActiveDocumentContext()$path))\nwriteLines('1', 'out.txt')\n",
+        encoding="utf-8")
+    (art / "autoui-repro.yml").write_text(
+        "version: 1\nrun:\n  steps: [analysis.R]\nexpected_outputs: [out.txt]\n", encoding="utf-8")
+    return art
+
+
+def _rstudio_run(spec, log, assisted_outcome):
+    """First attempt: R's error outside the IDE. The assisted retry: whatever the test says."""
+    from reprobe.models import RawRunOutput
+    work = Path(spec.mounts[0].source)
+    if "harness-assisted retry" not in spec.command[-1]:
+        Path(log).write_text("Error: RStudio not running\nExecution halted\n", encoding="utf-8")
+        return RawRunOutput(exit_code=1, duration_s=0.1, image=spec.image, log_path=str(log))
+    text, code = assisted_outcome
+    if code == 0:
+        (work / "out.txt").write_text("1\n", encoding="utf-8")
+    Path(log).write_text(text, encoding="utf-8")
+    return RawRunOutput(exit_code=code, duration_s=0.1, image=spec.image, log_path=str(log))
+
+
+def test_an_rstudio_only_script_is_retried_with_the_ide_answer_but_still_fails(tmp_path, monkeypatch):
+    """The deposit does not run with Rscript, and the verdict says so. The retry
+    only adds whether the IDE call was the sole blocker — in a scratch copy, so
+    nothing it writes reaches the run directory or a later step."""
+    art = _rstudio_artifact(tmp_path)
+    _simulate(monkeypatch, lambda spec, log: _rstudio_run(spec, log, ("done\n", 0)))
+    report = Orchestrator(workroot=tmp_path / "wk").run(str(art), use_llm=False)
+    [step] = report.steps
+    assert step.status == "fail" and step.expected_met == []
+    assert report.verdict["overall"] == "runs-with-failures"
+    retry = step.diagnostics["assisted_retry"]
+    assert retry["status"] == "pass" and retry["counted_in_verdict"] is False
+    assert retry["expected_met"] == ["out.txt"]
+    assert "the only thing found in the way" in retry["summary"]
+    run = tmp_path / "wk" / report.submission_id / "run"
+    assert not (run / "out.txt").exists()
+    assert not (run.parent / "run-assisted").exists()
+    md = (tmp_path / "wk" / report.submission_id / "report" / "report.md").read_text(encoding="utf-8")
+    assert "Assisted retry:" in md
+
+
+def test_an_assisted_retry_that_fails_next_names_the_next_problem(tmp_path, monkeypatch):
+    art = _rstudio_artifact(tmp_path)
+    nxt = ("Error in file(file, \"rt\") : cannot open the connection\n"
+           "In addition: Warning message:\nIn file(file, \"rt\") :\n"
+           "  cannot open file 'data/raw.csv': No such file or directory\nExecution halted\n", 1)
+    _simulate(monkeypatch, lambda spec, log: _rstudio_run(spec, log, nxt))
+    report = Orchestrator(workroot=tmp_path / "wk").run(str(art), use_llm=False)
+    retry = report.steps[0].diagnostics["assisted_retry"]
+    assert retry["status"] == "fail" and "not the only problem" in retry["summary"]
+    assert "next_diagnosis" in retry

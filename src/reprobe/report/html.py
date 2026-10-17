@@ -95,6 +95,7 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
  {% for c in s.claims %}✓ {{ c }}<br>{% endfor %}{% for c in s.not_verified %}<span class="muted">✗ {{ c }}</span><br>{% endfor %}
  {% if s.diagnostics.llm_advisory %}<div class="adv" style="margin-top:6px">💡 <b>diagnosis (advisory{% if s.diagnostics.llm_advisory.meets_threshold == false %}; below the confidence threshold — shown, not applied{% endif %}):</b> {{ s.diagnostics.llm_advisory.likely_cause }}{% for f in s.diagnostics.llm_advisory.suggested_fixes %}<br>→ {{ f }}{% endfor %}</div>{% endif %}
  {% if s.diagnostics.harness_diagnosis %}<div class="adv" style="margin-top:6px">🔎 <b>diagnosis (deterministic, not an LLM guess):</b> {{ s.diagnostics.harness_diagnosis.likely_cause }}{% for f in s.diagnostics.harness_diagnosis.suggested_fixes %}<br>→ {{ f }}{% endfor %}</div>{% endif %}
+ {% if s.diagnostics.assisted_retry and s.diagnostics.assisted_retry.summary %}<div class="adv" style="margin-top:6px">🔁 <b>assisted retry:</b> {{ s.diagnostics.assisted_retry.summary }}</div>{% endif %}
  {#- The evidence, last. Without it a failed step renders as a bare "fail":
      the markdown report has carried the tail all along, and the HTML — the copy
      the dashboard links to, and so the one most people actually read — did not.

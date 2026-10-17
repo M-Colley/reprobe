@@ -206,6 +206,20 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
   `environment.r_packages` (combined with detected packages, not an override),
   and DESIGN's pipeline no longer names JSON files the harness never writes.
 
+### RStudio-only scripts: an assisted retry
+
+- An R script that fails only because it asks a running RStudio which file is
+  open (`setwd(dirname(rstudioapi::getActiveDocumentContext()$path))`) is now
+  re-run once with that answer supplied — the script's own path, as the IDE
+  would give it — and nothing else changed: the author's file is not edited, and
+  the script sees the same `commandArgs()` as under `Rscript`.
+- The retry is evidence, not the verdict. The deposit as submitted does not run
+  with `Rscript`, and the step and verdict still say so. What the retry adds is
+  whether the IDE call was the only thing in the way (a one-line fix) or the
+  script fails next on something else, which it names. It runs in a scratch copy
+  of the run directory, so its outputs never reach the report's artifacts or a
+  later step; it is skipped for run directories over 2 GiB.
+
 ### Known limits
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:

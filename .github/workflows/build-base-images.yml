@@ -6,6 +6,11 @@
 # exists: a tag must name one set of bytes forever, or reports that cite it stop
 # meaning one thing.
 #
+# The workflow's GITHUB_TOKEN can push only to packages that grant this
+# repository write access: GHCR package → Package settings → Manage Actions
+# access → add M-Colley/reprobe with role Write (once per package). Without it the
+# push fails with `denied: permission_denied: write_package`.
+#
 # Why this exists: 2026.4 became unpullable. Its index still pointed at per-
 # platform manifests the registry no longer had (MANIFEST_UNKNOWN) — the
 # signature of "delete untagged versions" in the GHCR UI, which lists an image's
@@ -19,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       which:
-        description: "which images: all | py | r"
+        description: "which images: all | py | r | controller"
         default: all
         required: true
 
@@ -56,37 +61,46 @@ jobs:
           b = yaml.safe_load(open("config/pins.yaml"))["base_images"]
           print(f"py={b['python']}")
           print(f"r={b['r']}")
+          print(f"ctrl={b['controller']}")
           PY
       - name: Refuse to overwrite a published tag
         env:
           WHICH: ${{ inputs.which }}
           PY_TAG: ${{ steps.tags.outputs.py }}
           R_TAG: ${{ steps.tags.outputs.r }}
+          CTRL_TAG: ${{ steps.tags.outputs.ctrl }}
         run: |
-          for t in $( [ "$WHICH" != r ] && echo "$PY_TAG" ) $( [ "$WHICH" != py ] && echo "$R_TAG" ); do
+          for t in $(case "$WHICH" in all) echo "$PY_TAG $R_TAG $CTRL_TAG";; py) echo "$PY_TAG";; r) echo "$R_TAG";; controller) echo "$CTRL_TAG";; esac); do
             if docker manifest inspect "$t" >/dev/null 2>&1; then
               echo "::error::$t already exists. Bump 'revision' in config/pins.yaml (tags are never reused)."
               exit 1
             fi
           done
       - name: Build
-        run: bash images/build-images.sh "${{ inputs.which }}"
+        env:
+          WHICH: ${{ inputs.which }}
+        run: |
+          case "$WHICH" in all|py|r|controller) ;; *) echo "::error::which must be all, py, r or controller"; exit 1;; esac
+          bash images/build-images.sh "$WHICH"
       - name: Push
         env:
           WHICH: ${{ inputs.which }}
           PY_TAG: ${{ steps.tags.outputs.py }}
           R_TAG: ${{ steps.tags.outputs.r }}
+          CTRL_TAG: ${{ steps.tags.outputs.ctrl }}
         run: |
-          [ "$WHICH" = r ]  || docker push "$PY_TAG"
-          [ "$WHICH" = py ] || docker push "$R_TAG"
+          for t in $(case "$WHICH" in all) echo "$PY_TAG $R_TAG $CTRL_TAG";; py) echo "$PY_TAG";; r) echo "$R_TAG";; controller) echo "$CTRL_TAG";; esac); do
+            docker push "$t"
+          done
       - name: Verify the published tags are pullable
         env:
           WHICH: ${{ inputs.which }}
           PY_TAG: ${{ steps.tags.outputs.py }}
           R_TAG: ${{ steps.tags.outputs.r }}
+          CTRL_TAG: ${{ steps.tags.outputs.ctrl }}
         run: |
           docker logout ghcr.io
-          for t in $( [ "$WHICH" != r ] && echo "$PY_TAG" ) $( [ "$WHICH" != py ] && echo "$R_TAG" ); do
+          for t in $(case "$WHICH" in all) echo "$PY_TAG $R_TAG $CTRL_TAG";; py) echo "$PY_TAG";; r) echo "$R_TAG";; controller) echo "$CTRL_TAG";; esac); do
             docker rmi "$t"
             docker pull "$t"
             docker image inspect "$t" --format '{{index .RepoDigests 0}}'

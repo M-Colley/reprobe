@@ -491,3 +491,11 @@ def test_an_image_without_a_notebook_executor_is_the_harness_s_failure(tmp_path)
     assert res.status == "error" and "`r` base image" in res.diagnostics["harness_error"]
     from reprobe.report import badges
     assert badges.verdict([res], ran=True)["overall"] == "infra-error"
+
+
+def test_the_rstudio_shim_survives_bash_single_quoting(tmp_path):
+    from reprobe.runners.r_script import _RSTUDIO_SHIM
+    assert "'" not in _RSTUDIO_SHIM
+    cmd = _bash(RScriptRunner().assisted_rstudio_command(
+        _ctx(tmp_path, RunStep(target="a.R", kind="r", argv=["x"]))))
+    assert f"Rscript -e '{_RSTUDIO_SHIM}' 'a.R' 'x'" in cmd

@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import shutil
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -290,6 +291,11 @@ class Orchestrator:
                                         work_root=rundir)
                     res = runner.interpret(raw, ctx)
                     self._diagnose(res, llm_client, env_plan, step, logdir, runner.image_key_for(step))
+                    if (not dry_run and hasattr(runner, "assisted_rstudio_command")
+                            and (res.diagnostics.get("harness_diagnosis") or {}).get("kind") == "rstudio"):
+                        res.diagnostics["assisted_retry"] = _rstudio_retry(
+                            runner, ctx, logdir / f"step{i:02d}-{runner.id}-assisted.log",
+                            allow_egress=allow_egress_runtime)
                 results.append(res)
                 if _daemon_down(res):
                     # Once the daemon is gone every remaining step fails in
@@ -995,6 +1001,64 @@ class Orchestrator:
 
 
 # ---------------------------------------------------------------------- #
+#: The retry copies the whole run directory; past this it is not attempted.
+_RETRY_COPY_CAP = 2 * 1024 ** 3
+
+
+def _rstudio_retry(runner, ctx: RunContext, log_path: Path, *, allow_egress: bool) -> dict[str, Any]:
+    """Re-run an R script that failed only because no RStudio IDE was running,
+    with the IDE's answer supplied, and say what happened.
+
+    Supplementary evidence, never the verdict: the verdict is about the deposit
+    as submitted, and that does not run without RStudio. What this adds is
+    whether the IDE call was the only thing in the way — the difference between
+    a one-line fix and a script that would fail next on something else. It runs
+    in a scratch copy of the run directory, so no later step sees its outputs."""
+    from .fetch.base import _dir_bytes_over
+    from .runners.base import _tail
+    change = ("rstudioapi's document-context calls answered with the script's own path, as "
+              "RStudio would have; the script itself unchanged")
+    out: dict[str, Any] = {"counted_in_verdict": False, "change": change}
+    if _dir_bytes_over(ctx.rundir, _RETRY_COPY_CAP):
+        out["status"] = "not-attempted"
+        out["summary"] = ("Harness-assisted retry not attempted: the run directory is over "
+                          f"{_RETRY_COPY_CAP // 1024 ** 3} GiB to copy.")
+        return out
+    scratch = ctx.rundir.parent / f"{ctx.rundir.name}-assisted"
+    shutil.rmtree(scratch, ignore_errors=True)
+    try:
+        shutil.copytree(ctx.rundir, scratch, symlinks=True)
+        rctx = replace(ctx, rundir=scratch, pre_index=snapshot(scratch))
+        spec = runner.container_spec(rctx).model_copy(
+            update={"command": runner.assisted_rstudio_command(rctx)})
+        raw = run_container(spec, ctx.limits, log_path, allow_egress=allow_egress, work_root=scratch)
+        rr = runner.interpret(raw, rctx)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    out.update(status=rr.status, exit_code=rr.exit_code, duration_s=rr.duration_s,
+               expected_met=rr.expected_met, log_path=str(log_path))
+    head = "Harness-assisted retry (not counted in the verdict), with " + change + ": "
+    if rr.status in ("pass", "partial"):
+        made = f", producing {len(rr.expected_met)} declared output(s)" if rr.expected_met else ""
+        out["summary"] = (head + f"the script ran to completion (exit 0){made}. The IDE call was "
+                          "the only thing found in the way of running it with Rscript.")
+    elif rr.status in ("timeout", "resource-limit"):
+        out["summary"] = head + ("it got past the IDE call and then ran out of the sandbox's "
+                                 "budget, so whether anything else is in the way is unknown.")
+    else:
+        tail = _tail(str(log_path))
+        nxt = known_failure_diagnosis(tail, rr.exit_code, ctx.step.target)
+        if nxt and nxt.get("kind") != "rstudio":
+            out["next_diagnosis"] = nxt
+            why = str(nxt.get("likely_cause", "")).split(". ")[0].rstrip(".")
+        else:
+            lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+            why = f"it ended with `{lines[-1][:200]}`" if lines else "no output"
+        out["summary"] = (head + f"it still failed (exit {rr.exit_code}) — {why}. The IDE call is "
+                          "not the only problem.")
+    return out
+
+
 def _step_target_problem(target: str, rundir: Path) -> Optional[str]:
     """Why a step's target must not be run, or None.
 
@@ -1145,6 +1209,7 @@ def known_failure_diagnosis(log_tail: str, exit_code: Optional[int],
     if _RSTUDIO_RE.search(log_tail):
         return {
             "source": _DETERMINISTIC,
+            "kind": "rstudio",
             "likely_cause": (
                 "the script calls rstudioapi (typically "
                 "`setwd(dirname(getActiveDocumentContext()$path))`, to set the working "

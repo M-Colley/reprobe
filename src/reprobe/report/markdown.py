@@ -204,6 +204,9 @@ def render(r: Report) -> str:
                      f"{_ml(hdiag.get('likely_cause', ''))}")
             for fix in hdiag.get("suggested_fixes", []):
                 L.append(f"  - 💡 {_ml(fix)}")
+        retry = s.diagnostics.get("assisted_retry")
+        if retry and retry.get("summary"):
+            L.append(f"- **Assisted retry:** {_ml(retry['summary'])}")
         if s.diagnostics.get("log_tail"):
             tail = str(s.diagnostics["log_tail"]).splitlines()[-15:]
             fence = _fence("\n".join(tail))   # author stdout must not close the fence
