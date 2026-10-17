@@ -1,0 +1,4 @@
+version: 1
+run:
+  steps: [analysis/model.R]
+expected_outputs: [analysis/answer.txt]

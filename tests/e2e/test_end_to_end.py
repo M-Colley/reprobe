@@ -114,3 +114,17 @@ def test_an_r_kernel_notebook_runs_in_the_r_image(tmp_path):
     assert step.expected_met == ["results/sum.txt"]
     produced = tmp_path / report.submission_id / "run" / "results" / "sum.txt"
     assert produced.read_text(encoding="utf-8").strip() == "55"
+
+
+def test_an_rstudio_only_script_fails_and_its_assisted_retry_passes(tmp_path):
+    """The deposit does not run under Rscript, and the verdict says so; the retry
+    with the IDE's answer supplied shows that was the only thing in the way."""
+    report, logs = _run(tmp_path, "r-rstudio")
+    step = report.steps[0]
+    assert step.status == "fail", f"{step.status}: {step.diagnostics}\n{logs}"
+    assert step.diagnostics["harness_diagnosis"]["kind"] == "rstudio"
+    retry = step.diagnostics["assisted_retry"]
+    assert retry["status"] == "pass", f"{retry}\n{logs}"
+    assert retry["expected_met"] == ["analysis/answer.txt"]
+    assert report.verdict["overall"] == "runs-with-failures"
+    assert not (tmp_path / report.submission_id / "run" / "analysis" / "answer.txt").exists()
