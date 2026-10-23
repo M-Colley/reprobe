@@ -221,6 +221,7 @@ class Orchestrator:
 
         # -- (4) RUN (sandboxed) ---------------------------------------- #
         results: list[RunResult] = []
+        install_key: dict[int, str] = {}      # id(result) -> install group the step ran against
         used_images: set[str] = set()        # every distinct image that ran a container
         unity_section = None
         ran = False
@@ -291,13 +292,16 @@ class Orchestrator:
                                         allow_egress=allow_egress_runtime, dry_run=dry_run,
                                         work_root=rundir)
                     res = runner.interpret(raw, ctx)
-                    self._diagnose(res, llm_client, env_plan, step, logdir, runner.image_key_for(step))
+                    self._diagnose(res, llm_client, env_plan, step, logdir, runner.image_key_for(step),
+                                   offline=not allow_egress_runtime)
                     if (not dry_run and hasattr(runner, "assisted_rstudio_command")
                             and (res.diagnostics.get("harness_diagnosis") or {}).get("kind") == "rstudio"):
                         res.diagnostics["assisted_retry"] = _rstudio_retry(
                             runner, ctx, logdir / f"step{i:02d}-{runner.id}-assisted.log",
                             allow_egress=allow_egress_runtime)
                 results.append(res)
+                install_key[id(res)] = runner.image_key_for(step)
+                self._collect_artifacts([res], rundir, outdir)
                 if _daemon_down(res):
                     # Once the daemon is gone every remaining step fails in
                     # milliseconds for the same host reason, and each one reads in
@@ -310,7 +314,6 @@ class Orchestrator:
                             diagnostics={"reason": "not attempted — the Docker daemon became "
                                                    f"unreachable during `{step.target}`"}))
                     break
-            self._collect_artifacts(results, rundir, outdir)
             # Pin the exact image bytes that ran (pins.yaml carries a mutable tag).
             # A mixed python+R run uses more than one base, so record a digest per
             # distinct image actually used — not just the single env image (which
@@ -332,7 +335,9 @@ class Orchestrator:
         # -- (5) BADGES + VERDICT --------------------------------------- #
         # An install phase that never finished makes every downstream step
         # unjudgeable, so both the badge and the verdict have to hear about it.
-        install_err = badge_rules.install_error(report.environment)
+        failing_keys = {install_key.get(id(r)) for r in results
+                        if r.executed and r.status != "pass"} - {None}
+        install_err = badge_rules.install_error(report.environment, keys=failing_keys)
         declared_err = badge_rules.declared_env_error(report.environment)
         report.badges = badge_rules.decide(
             fetch_res, results, detect_res,
@@ -653,7 +658,9 @@ class Orchestrator:
         for key, items in by_key.items():
             if not items:
                 continue
-            image = (env_plan.image if env_plan.env_provenance == "fallback-generic"
+            # The generic fallback is a Python image: R installs never go there
+            # (no Rscript, and the failure would read as the author's lockfile).
+            image = (env_plan.image if env_plan.env_provenance == "fallback-generic" and key == "python"
                      else self.config.base_image(key) or env_plan.image)
             spec = ContainerSpec(image=image, command=["bash", "-c", prep + _attributed_script(items)],
                                  workdir="/work",
@@ -830,7 +837,8 @@ class Orchestrator:
         report.llm["results_check"] = section
 
     def _diagnose(self, res: RunResult, llm_client, env_plan: EnvPlan, step,
-                  logdir: Path | None = None, image_key: str | None = None) -> None:
+                  logdir: Path | None = None, image_key: str | None = None,
+                  offline: bool = True) -> None:
         if res.status in ("pass", "skipped"):
             return
         if res.diagnostics.get("infra"):
@@ -853,7 +861,7 @@ class Orchestrator:
         # When one matches, the model is not asked: we already know the cause, and
         # a small local model's second opinion beside a known fact can only
         # contradict it.
-        known = known_failure_diagnosis(run_tail, res.exit_code, step.target)
+        known = known_failure_diagnosis(run_tail, res.exit_code, step.target, offline=offline)
         if known:
             res.diagnostics["harness_diagnosis"] = known
             return
@@ -891,7 +899,13 @@ class Orchestrator:
 
         art_dir = outdir / "artifacts"
         for res in results:
-            keep = set(expand_expected(res.expected_met, res.artifacts)) \
+            # Called right after each step, so the copy is what THAT step left:
+            # collected at the end, a later step that crashed while rewriting the
+            # file would have been filed as this step's declared output. A step
+            # that did not finish contributes only its executed notebook (the
+            # evidence of where it stopped), never "declared outputs".
+            finished = res.executed and res.status in ("pass", "partial")
+            keep = (set(expand_expected(res.expected_met, res.artifacts)) if finished else set()) \
                 | {a for a in res.artifacts if a.endswith(".executed.ipynb")}
             for rel in keep:
                 # /work is writable by author code, which can plant a link there to
@@ -956,12 +970,24 @@ class Orchestrator:
         Evidence for the human reviewer only: it never sets a badge."""
         from . import compare
 
-        # Only a step that FINISHED can have regenerated a file. A crashed or
-        # timed-out step that truncated out.csv left a half-written file, and
-        # comparing it reported "regenerated with different values".
-        regenerated = sorted({a for r in results for a in r.artifacts
-                              if r.executed and r.status in ("pass", "partial")
-                              and (srcdir / a).is_file()})
+        # A file is compared as its LAST writer left it, and only if that step
+        # FINISHED: a crashed or timed-out step that truncated out.csv left a
+        # half-written file — even one an earlier step had produced in full —
+        # and comparing it reported "regenerated with different values". Files
+        # merged in from a data deposit are inputs, not committed outputs.
+        last: dict[str, RunResult] = {}
+        for r in results:
+            for a in r.artifacts:
+                last[a] = r
+        committed = {a: r for a, r in last.items()
+                     if (srcdir / a).is_file() and a not in getattr(self, "_merged_data_paths", set())}
+        regenerated = sorted(a for a, r in committed.items()
+                             if r.executed and r.status in ("pass", "partial"))
+        unfinished = sorted(a for a in committed if a not in regenerated)
+        if unfinished:
+            report.not_verified.append(
+                f"{len(unfinished)} committed output(s) were last rewritten by a step that did not "
+                "finish and were not compared: " + ", ".join(unfinished[:8]))
         if not regenerated:
             return
         cfg = ((self.config.badges.get("acm") or {}).get("results_reproduced") or {})
@@ -1054,8 +1080,11 @@ def _rstudio_retry(runner, ctx: RunContext, log_path: Path, *, allow_egress: boo
                               f"copied ({type(e).__name__}).")
             return out
         rctx = replace(ctx, rundir=scratch, pre_index=snapshot(scratch))
-        spec = runner.container_spec(rctx).model_copy(
-            update={"command": runner.assisted_rstudio_command(rctx)})
+        # the same envelope as the attempt it repeats, --allow-net included
+        update: dict[str, Any] = {"command": runner.assisted_rstudio_command(rctx)}
+        if allow_egress:
+            update["network"] = "egress"
+        spec = runner.container_spec(rctx).model_copy(update=update)
         raw = run_container(spec, ctx.limits, log_path, allow_egress=allow_egress, work_root=scratch)
         rr = runner.interpret(raw, rctx)
     finally:
@@ -1063,6 +1092,11 @@ def _rstudio_retry(runner, ctx: RunContext, log_path: Path, *, allow_egress: boo
     out.update(status=rr.status, exit_code=rr.exit_code, duration_s=rr.duration_s,
                expected_met=rr.expected_met, log_path=str(log_path))
     head = "Harness-assisted retry (not counted in the verdict), with " + change + ": "
+    if rr.status == "error" and rr.diagnostics.get("harness_error"):
+        out["status"] = "harness-error"
+        out["summary"] = (f"Harness-assisted retry could not be run ({rr.diagnostics['harness_error']}); "
+                          "it says nothing about the script.")
+        return out
     if rr.status in ("pass", "partial"):
         made = f", producing {len(rr.expected_met)} declared output(s)" if rr.expected_met else ""
         out["summary"] = (head + f"the script ran to completion (exit 0){made}. The IDE call was "
@@ -1072,7 +1106,7 @@ def _rstudio_retry(runner, ctx: RunContext, log_path: Path, *, allow_egress: boo
                                  "budget, so whether anything else is in the way is unknown.")
     else:
         tail = _tail(str(log_path))
-        nxt = known_failure_diagnosis(tail, rr.exit_code, ctx.step.target)
+        nxt = known_failure_diagnosis(tail, rr.exit_code, ctx.step.target, offline=not allow_egress)
         if nxt and nxt.get("kind") != "rstudio":
             out["next_diagnosis"] = nxt
             why = str(nxt.get("likely_cause", "")).split(". ")[0].rstrip(".")
@@ -1215,7 +1249,7 @@ def _rstudio_fixes(target: str) -> list[str]:
 
 
 def known_failure_diagnosis(log_tail: str, exit_code: Optional[int],
-                            target: str = "") -> Optional[dict[str, Any]]:
+                            target: str = "", offline: bool = True) -> Optional[dict[str, Any]]:
     """Name a failure whose console output has exactly one possible cause.
 
     These are worth recognising deterministically rather than leaving to the
@@ -1246,27 +1280,29 @@ def known_failure_diagnosis(log_tail: str, exit_code: Optional[int],
             "suggested_fixes": _rstudio_fixes(target),
         }
 
-    if (m := _NO_FUNCTION_RE.search(log_tail)):
+    if (m := _NO_FUNCTION_RE.search(log_tail)) and (owner := _R_FUNCTION_OWNER.get(m.group("fn"))):
+        # Only for a function the curated table knows: an unknown name may be the
+        # author's own undefined function, and nothing here can say which package
+        # (if any) it belongs to. Nor does the message say whether the package is
+        # installed — only that it was not attached when the call ran.
         fn = m.group("fn")
-        owner = _R_FUNCTION_OWNER.get(fn)
-        where = (f"`{fn}()` is exported by **{owner}**" if owner
-                 else f"`{fn}()` belongs to a package that is installed but not attached")
-        fix = (f"add `library({owner})` near the other library() calls" if owner
-               else f"add the `library()` call for whichever package exports `{fn}()`, "
-                    "or namespace the call as `pkg::" + fn + "()`")
         return {
             "source": _DETERMINISTIC,
             "likely_cause": (
-                f"{where}, and the script never attaches it. The package is present — the "
-                "install phase put it there, which is why nothing failed earlier — so this is "
-                "not a missing dependency. It works in the author's session because something "
-                "else attached the package first; in a clean one, nothing has."),
-            "suggested_fixes": [fix,
+                f"`{fn}()` is exported by **{owner}**, and {owner} was not attached when the "
+                "script called it: R looks a bare function name up only in attached packages. "
+                "In the author's session something else attached it first; in a clean one, "
+                f"nothing has. (Whether {owner} was installed is a separate question — the "
+                "install section of this report says what was.)"),
+            "suggested_fixes": [f"add `library({owner})` near the other library() calls, or "
+                                f"namespace the call as `{owner}::{fn}()`",
                                 "the same file may use other functions from that package; "
                                 "attaching it once at the top fixes them all"],
         }
 
-    if _NO_NETWORK_RE.search(log_tail):
+    if offline and _NO_NETWORK_RE.search(log_tail):
+        # (with --allow-net the run HAD network: a failed request there is not
+        # the sandbox, and "offline by design" would be false)
         urls = _URL_IN_LOG_RE.findall(log_tail)
         what = f" (it tried to reach {urls[0]})" if urls else ""
         return {

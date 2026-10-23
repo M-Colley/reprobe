@@ -16,6 +16,7 @@ import fnmatch
 import hashlib
 import os
 import posixpath
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
@@ -215,7 +216,10 @@ class BaseRunner:
         # An expected output counts ONLY if THIS run created or modified it — a
         # committed-but-unchanged output file does not count (it would otherwise
         # falsely inflate the Functional signal for repos that commit their figures).
-        return match_expected(list(ctx.step.expected_outputs), produced)
+        # The executed notebook is the HARNESS's file: it must not satisfy a
+        # declared directory or glob (`notebooks/`, `*.ipynb`) on its own.
+        theirs = [p for p in produced if not p.endswith(".executed.ipynb")]
+        return match_expected(list(ctx.step.expected_outputs), theirs)
 
     def interpret(self, raw: Optional[RawRunOutput], ctx: RunContext) -> RunResult:
         caps = self.capabilities()
@@ -281,12 +285,13 @@ class BaseRunner:
                 diagnostics={"limit": which, "cap": cap, "log_tail": _tail(raw.log_path)},
                 not_verified=list(caps.cannot_verify),
             )
-        if raw.exit_code in (126, 127) or (raw.exit_code == 125 and docker_cli_failed(raw.log_path)):
-            # docker-launcher reserved codes: 125 = docker run itself failed (only
-            # when the CLI says so — an artifact may exit 125 itself, and docker
-            # passes that through), 126/127 = command not executable/found. Blame
-            # the harness/image, not the author's code (126/127 CAN also come from
-            # an author script invoking a missing binary — hence the hedged wording).
+        if (raw.exit_code in (126, 127) and _launcher_failed(raw.log_path))                 or (raw.exit_code == 125 and docker_cli_failed(raw.log_path)):
+            # Launcher codes, blamed on the harness only on the launcher's own
+            # evidence: 125 when the docker CLI says it failed (an artifact may
+            # exit 125 itself, and docker passes that through); 126/127 when bash
+            # says OUR interpreter could not start, or the runtime found no shell.
+            # A 127 from inside the author's run (a shell-out to a missing tool,
+            # `quit(status=127)`) is the artifact's, like any other exit code.
             return RunResult(
                 runner=self.id, target=ctx.step.target, status="error",
                 exit_code=raw.exit_code, duration_s=raw.duration_s, log_path=raw.log_path,
@@ -336,6 +341,18 @@ class BaseRunner:
             artifacts=produced, expected_met=expected_met,
             claims=claims, not_verified=not_verified, diagnostics=diagnostics,
         )
+
+
+#: The launcher's own words: bash naming the interpreter a runner starts (the
+#: `bash -c` command line is line 1), or the runtime finding no executable.
+_LAUNCH_FAILED_RE = re.compile(
+    r"bash: (?:line \d+: )?(?:\S*/)?(?:python3?|Rscript|R|papermill|jupyter|bash)"
+    r": (?:command not found|Permission denied|No such file or directory)"
+    r"|executable file not found in \$PATH|OCI runtime (?:create|exec) failed")
+
+
+def _launcher_failed(log_path: Optional[str]) -> bool:
+    return bool(log_path) and bool(_LAUNCH_FAILED_RE.search(_tail(log_path, 80)))
 
 
 _TAIL_CAP_BYTES = 64 * 1024

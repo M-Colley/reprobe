@@ -101,13 +101,31 @@ def _raw(exit_code=0, **kw):
     return RawRunOutput(exit_code=exit_code, duration_s=0.1, **kw)
 
 
-@pytest.mark.parametrize("code", [126, 127])
-def test_launcher_exit_codes_are_harness_errors_not_author_fails(tmp_path, code):
+@pytest.mark.parametrize("code, line", [
+    (127, "bash: line 1: python: command not found"),
+    (126, "bash: line 1: /opt/conda/bin/python: Permission denied"),
+    (127, "docker: Error response from daemon: failed to create task: OCI runtime create failed: "
+          'exec: "bash": executable file not found in $PATH'),
+])
+def test_launcher_exit_codes_are_harness_errors_on_the_launchers_evidence(tmp_path, code, line):
     ctx = _ctx(tmp_path, RunStep(target="run.py", kind="python"))
-    res = PythonScriptRunner().interpret(_raw(exit_code=code), ctx)
+    log = tmp_path / "s.log"
+    log.write_text(line + "\n", encoding="utf-8")
+    res = PythonScriptRunner().interpret(_raw(exit_code=code, log_path=str(log)), ctx)
     assert res.status == "error"
     assert "could not start" in res.diagnostics["harness_error"]
     assert "log_tail" in res.diagnostics
+
+
+@pytest.mark.parametrize("code", [126, 127])
+def test_a_127_from_inside_the_authors_run_is_the_artifacts(tmp_path, code):
+    """The analysis ran for ten minutes, then shelled out to a tool the deposit
+    never declared: that is the artifact's failure, not a broken image."""
+    ctx = _ctx(tmp_path, RunStep(target="run.py", kind="python"))
+    log = tmp_path / "s.log"
+    log.write_text("fitting model...\nsh: 1: pdflatex: not found\n", encoding="utf-8")
+    res = PythonScriptRunner().interpret(_raw(exit_code=code, log_path=str(log)), ctx)
+    assert res.status == "fail" and "harness_error" not in res.diagnostics
 
 
 def test_125_is_the_harness_only_when_the_docker_cli_says_so(tmp_path):

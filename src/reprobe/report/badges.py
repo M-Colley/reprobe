@@ -85,6 +85,12 @@ def decide(
         if all(s.status == "skipped" for s in primary):
             functional = "not-evaluated"
             notes.append(f"no step was executed ({_skip_reasons(primary)}) — {_NO_STATEMENT}")
+        elif any(s.status == "skipped" for s in primary):
+            functional = "not-evaluated"
+            notes.append("part of the analysis did not run ("
+                         + ", ".join(f"{s.target}: {s.diagnostics.get('reason') or 'skipped'}"
+                                     for s in primary if s.status == "skipped")
+                         + ") — Functional is not judged on the rest alone")
         elif declared_env_error and not all(s.status == "pass" for s in primary) \
                 and not any(_infra_error(s) for s in primary):
             # The artifact's OWN dependency declaration did not install. That is a
@@ -148,7 +154,10 @@ def decide(
 
 
 def _primary_steps(steps: list[RunResult], detect: DetectResult) -> list[RunResult]:
-    runnable = [s for s in steps if s.executed]   # host-only tiers (Unity T0) are structural, not functional
+    # Host-only tiers (Unity T0) are structural, not functional. A planned step
+    # that was SKIPPED stays in: dropping it let a passing helper step earn the
+    # Functional candidate while the main analysis never ran.
+    runnable = [s for s in steps if s.executed or s.status == "skipped"]
     primary_targets = {d.target for d in detect.steps if getattr(d, "primary", True)}
     gated = [s for s in runnable if s.target in primary_targets]
     return gated or runnable   # defensive: if targets don't line up, gate on everything
@@ -302,7 +311,7 @@ def declared_env_error(environment: dict[str, Any]) -> Optional[str]:
             + ") — the steps ran without it, so their results may follow from that")
 
 
-def install_error(environment: dict[str, Any]) -> Optional[str]:
+def install_error(environment: dict[str, Any], keys: Optional[set[str]] = None) -> Optional[str]:
     """Why the harness's own dependency install did not complete, if it didn't.
 
     No author code runs in that container — it is reprobe installing what the
@@ -311,9 +320,16 @@ def install_error(environment: dict[str, Any]) -> Optional[str]:
     reporting OUR missing install, and calling that runs-with-failures publishes a
     false statement about someone's artifact. The failure is also invisible from
     the step's own traceback, which looks exactly like an undeclared dependency —
-    the very defect the install phase exists to distinguish it from."""
+    the very defect the install phase exists to distinguish it from.
+
+    ``keys`` limits this to the install groups ("python", "r") the failing steps
+    actually ran against: an R install that did not finish says nothing about
+    why a Python step failed, and must not turn that step's own failure into
+    "no statement about the artifact"."""
     why = []
     for k, v in _failures(environment):
+        if keys is not None and k not in keys:
+            continue
         if v.get("timed_out"):
             why.append(f"{k}: killed at the install-phase wall-clock limit")
         elif v.get("error"):
@@ -360,6 +376,7 @@ def verdict(steps: list[RunResult], ran: bool,
         return {"overall": "not-run", "human_review_required": True}
     runnable = [s for s in steps if s.executed]
     statuses = [s.status for s in runnable]
+    never: list[str] = []
     if not runnable:
         # host-only structural checks (Unity T0) did run; steps that were only
         # ever skipped — no runner, a refused manifest path, the daemon gone —
@@ -372,9 +389,13 @@ def verdict(steps: list[RunResult], ran: bool,
         # are no longer marked "partial" individually (that denied healthy
         # pipelines the Functional candidate), so without this the pipeline-wide
         # miss would silently read as a green "runs" with no human review.
-        declared = any(s.expected_met or s.diagnostics.get("expected_missing") for s in runnable)
-        produced = any(s.expected_met for s in runnable)
-        overall = "runs" if (produced or not declared) else "runs-with-warnings"
+        # Completeness is pipeline-wide: an output broadcast onto every step is
+        # missing only if NO step produced it. One that was declared and never
+        # produced keeps the run from being clean (it used to need just one).
+        declared = {o for s in runnable for o in (*s.expected_met, *s.diagnostics.get("expected_missing", []))}
+        produced = {o for s in runnable for o in s.expected_met}
+        never = sorted(declared - produced)
+        overall = "runs-with-warnings" if never else "runs"
     elif _artifact_failure(runnable):
         overall = "runs-with-failures"
     elif any(_infra_error(s) for s in runnable):
@@ -419,6 +440,9 @@ def verdict(steps: list[RunResult], ran: bool,
                          "which proves nothing about the environment the artifact declares")
         if install_error:
             notes.append(f"in addition, {install_error}")
+    if never:
+        notes.append(f"every step passed, but {len(never)} declared output(s) were never produced: "
+                     + ", ".join(never[:8]) + (" …" if len(never) > 8 else ""))
     if unrun and overall not in ("infra-error", "nothing-executed"):
         notes.append(f"{len(unrun)} planned step(s) produced no result about the code: "
                      + ", ".join(f"{s.target} ({s.status}: "

@@ -91,26 +91,22 @@ def test_rstudio_is_recognised_whatever_the_exit_code(exit_code):
 # --- classes the benchmark surfaced repeatedly --------------------------------
 
 def test_an_unattached_r_package_names_the_library_line_to_add():
-    """The most common failure across the benchmark (7 of them). The package is
-    INSTALLED — the install phase put it there — so this is not a missing
-    dependency, and saying "install X" would send an author to fix the one thing
-    that is not broken."""
+    """The most common failure across the benchmark (7 of them). The message
+    proves the package was not ATTACHED; it does not prove it was installed, so
+    the diagnosis must not claim that (when tidyr failed to install, it would
+    have told the author the package was present)."""
     d = diagnose('Error in gather(x) : could not find function "gather"\n', 1)
     assert d is not None
-    assert "tidyr" in d["likely_cause"]
+    assert "tidyr" in d["likely_cause"] and "was not attached" in d["likely_cause"]
     assert any("library(tidyr)" in f for f in d["suggested_fixes"])
-    assert "not a missing dependency" in d["likely_cause"]
+    assert "install phase put it there" not in d["likely_cause"]
 
 
-def test_an_unknown_function_is_named_without_inventing_a_package():
-    """The map is curated. A function not in it still gets the class named — but
-    a guessed package would be a wrong instruction stated as fact."""
-    d = diagnose('could not find function "some_private_helper"\n', 1)
-    assert d is not None
-    assert "some_private_helper" in d["likely_cause"]
-    assert "library(" in " ".join(d["suggested_fixes"])
-    for pkg in ("tidyr", "report", "bayestestR"):
-        assert f"library({pkg})" not in " ".join(d["suggested_fixes"])
+def test_an_unknown_function_gets_no_deterministic_diagnosis():
+    """A name the curated map does not know may be the author's own undefined
+    function: calling it "a package that is installed but not attached" would be
+    a guess stated as fact. It falls through to the (labelled) advisory."""
+    assert diagnose('could not find function "some_private_helper"\n', 1) is None
 
 
 def test_a_runtime_download_is_reported_as_a_reproducibility_finding():
