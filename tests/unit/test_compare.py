@@ -373,3 +373,24 @@ def test_tiny_values_are_not_absorbed_by_the_absolute_tolerance(tmp_path):
     """p = 1e-10 and p = 9e-10 differ ninefold. With atol=1e-9 both were "zero"."""
     assert _one(tmp_path, "p.csv", "p\n1e-10\n", "p\n9e-10\n")["status"] == "differs"
     assert _one(tmp_path, "z.csv", "r\n0\n", "r\n1e-16\n")["status"] == "equivalent"   # noise around zero
+
+
+def test_csv_values_parse_to_exactly_the_doubles_they_spell():
+    """Before pandas 3.1 the C parser's default is lossy and round_trip is needed;
+    from 3.1 the default is exact and round_trip is deprecated. Whichever pandas
+    is installed, a regenerated CSV must be read as the exact doubles, or
+    "identical" and "within 1e-12" are claims about the parser."""
+    import random
+    import warnings
+
+    import pandas as pd
+
+    from reprobe.compare import _read_delimited
+    rng = random.Random(1)
+    vals = [repr(rng.uniform(-1e6, 1e6)) for _ in range(5000)] + \
+           [repr(rng.random() * 10 ** rng.randint(-300, 300)) for _ in range(5000)]
+    data = ("x\n" + "\n".join(vals) + "\n").encode()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                 # no deprecated argument either
+        col = _read_delimited(pd, data, ",", headerless=False)["x"].tolist()
+    assert col == [float(v) for v in vals]

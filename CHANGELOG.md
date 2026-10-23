@@ -239,6 +239,10 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
   the published bytes even if a tag were ever overwritten. The map is keyed by
   the full tag, so after a republish an old digest stops applying instead of
   pinning a new tag to old bytes; `build-base-images` prints the lines to paste.
+- Regenerated CSVs are parsed exactly on every pandas: before 3.1 the C
+  parser's default is lossy (measured on 40,000 doubles: 8,888 off by an ulp)
+  and `round_trip` is kept; from 3.1 the default is exact and the deprecated
+  argument is dropped. A test checks exactness on whatever is installed.
 - `micromamba_base` is pinned to its multi-arch index digest, so a rebuild from
   the committed locks starts from the same base.
 

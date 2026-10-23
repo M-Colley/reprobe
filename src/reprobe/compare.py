@@ -544,14 +544,24 @@ def _compare_tabular(com: bytes, reg: bytes, suffix: str, d: _Diffs,
                           f"tolerance ({d.tolerance()}; {d.magnitude_text()})"), ev
 
 
+def _exact_default_parser(pd: Any) -> bool:
+    from packaging.version import Version
+    return Version(pd.__version__).release >= (3, 1)
+
+
 def _read_delimited(pd: Any, data: bytes, sep: str, headerless: bool) -> Any:
     first = data.split(b"\n", 1)[0]
     if first.count(sep.encode()) + 1 > _MAX_COLUMNS:
         raise _Skip("too-many-columns", f"the file has more than {_MAX_COLUMNS:,} columns")
-    # round_trip parsing so "same values" means the same doubles, not values
-    # that merely survived a faster, slightly lossy float parser.
+    # Exact parsing, so "same values" means the same doubles, not values that
+    # merely survived a lossy float parser. Before pandas 3.1 the C parser's
+    # default is lossy (measured: ~1 in 5 random doubles off by an ulp) and
+    # round_trip is required; from 3.1 the default is exact and the argument is
+    # deprecated. tests/unit/test_compare.py checks exactness on whatever is
+    # installed.
+    precise = {} if _exact_default_parser(pd) else {"float_precision": "round_trip"}
     df = pd.read_csv(io.BytesIO(data), sep=sep, header=None if headerless else 0, engine="c",
-                     encoding="utf-8", low_memory=False, float_precision="round_trip")
+                     encoding="utf-8", low_memory=False, **precise)
     if df.shape[1] > _MAX_COLUMNS:
         raise _Skip("too-many-columns", f"the file has more than {_MAX_COLUMNS:,} columns")
     return df
