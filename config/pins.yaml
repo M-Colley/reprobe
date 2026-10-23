@@ -19,12 +19,22 @@ year: 2026
 revision: 5                       # base-image tag becomes "<year>.<revision>"
 
 base_images:
-  # The immutable build base. Add the @sha256:... digest after first pull:
-  #   docker pull mambaorg/micromamba:1.5.10-noble && docker inspect ...
-  micromamba_base: "mambaorg/micromamba:1.5.10-noble"
+  # The immutable build base, pinned to its multi-arch index digest (Docker Hub),
+  # so a rebuild from the committed locks starts from the same bytes.
+  micromamba_base: "mambaorg/micromamba:1.5.10-noble@sha256:a0a4da2d5315f0d5b9d98196f2e9ecf50152c750bed4023bb127baade7e8faca"
   python:     "ghcr.io/m-colley/reprobe-base-py:2026.5"   # built by images/build-images.sh
   r:          "ghcr.io/m-colley/reprobe-base-r:2026.5"
   controller: "ghcr.io/m-colley/reprobe-controller:2026.5"
+
+# The bytes each published tag must be. Runs use "<tag>@<digest>", so docker runs
+# exactly these images even if a tag were ever overwritten. Keyed by the FULL tag:
+# after a republish under a new tag an old entry no longer applies, so it can
+# never pin a new tag to old bytes. build-base-images prints these lines after it
+# publishes. A locally built image is not these bytes — remove its entry to use it.
+base_image_digests:
+  "ghcr.io/m-colley/reprobe-base-py:2026.5": "sha256:39522da7f383c6d7b30548282eb9249fc4162e76982158fa93ffde1941d6f738"
+  "ghcr.io/m-colley/reprobe-base-r:2026.5": "sha256:ac0b977ee1455d54f9ad1f81ebb1c29a260b6f026c1a0ae7bf11e6c307b43a41"
+  "ghcr.io/m-colley/reprobe-controller:2026.5": "sha256:727f93ce6ad055375702671c111ec58b2fe864e2c20be9c5d613cd941846cd4c"
 
 llm:
   enabled: true

@@ -59,9 +59,13 @@ class Config:
 
     # -- convenience accessors -------------------------------------------- #
     def base_image(self, key: str | None) -> str | None:
+        """The image reference a run uses: ``<tag>@<digest>`` when pins.yaml
+        records the digest for exactly this tag, else the tag alone."""
         if not key:
             return None
-        return (self.pins.get("base_images") or {}).get(key)
+        ref = (self.pins.get("base_images") or {}).get(key)
+        digest = (self.pins.get("base_image_digests") or {}).get(ref) if ref else None
+        return f"{ref}@{digest}" if digest and "@" not in ref else ref
 
     def limits_for(self, runner_id: str) -> dict[str, Any]:
         base = dict(self.limits.get("defaults", {}))

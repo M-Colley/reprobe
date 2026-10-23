@@ -112,3 +112,13 @@ jobs:
             docker pull "$t"
             docker image inspect "$t" --format '{{index .RepoDigests 0}}'
           done
+          # What to paste under base_image_digests in config/pins.yaml, so runs
+          # use exactly the bytes just published.
+          {
+            echo '### base_image_digests for config/pins.yaml'
+            echo '```yaml'
+            for t in $(case "$WHICH" in all) echo "$PY_TAG $R_TAG $CTRL_TAG";; py) echo "$PY_TAG";; r) echo "$R_TAG";; controller) echo "$CTRL_TAG";; esac); do
+              d=$(docker image inspect "$t" --format '{{index .RepoDigests 0}}'); echo "  \"$t\": \"${d#*@}\""
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

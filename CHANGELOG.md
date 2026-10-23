@@ -232,6 +232,16 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
   of the run directory, so its outputs never reach the report's artifacts or a
   later step; it is skipped for run directories over 2 GiB.
 
+### Images pinned by digest
+
+- `2026.5` is published (base-py, base-r, controller) and every run now uses
+  `<tag>@<digest>` from `base_image_digests` in `pins.yaml`: docker runs exactly
+  the published bytes even if a tag were ever overwritten. The map is keyed by
+  the full tag, so after a republish an old digest stops applying instead of
+  pinning a new tag to old bytes; `build-base-images` prints the lines to paste.
+- `micromamba_base` is pinned to its multi-arch index digest, so a rebuild from
+  the committed locks starts from the same base.
+
 ### Known limits
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:
@@ -239,13 +249,10 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
   mapping, OOM detection, timeout kill with no orphan). The install phase inside
   the real base images now has end-to-end tests (`tests/e2e`: a pip deposit with
   `-e .`, a CRAN deposit, a deposit whose declared environment cannot install),
-  run on every push to main. **They have not passed yet:** the published
-  `2026.4` tags are unpullable (`MANIFEST_UNKNOWN` — the per-platform manifests
-  were deleted from GHCR), so the pins move to `2026.5`, built by the new
-  `build-base-images` workflow, which publishes one plain manifest per tag (no
-  attestation, no index) and refuses to overwrite a tag that exists. Until that
-  workflow has run, the e2e job fails at `reprobe pull`, and `reprobe pull` now
-  says why.
+  run on every push to main, on the published `2026.5` images. (`2026.4` became
+  unpullable — `MANIFEST_UNKNOWN`, its per-platform manifests deleted from GHCR —
+  so `2026.5` was built by the new `build-base-images` workflow, which publishes
+  one plain manifest per tag and refuses to overwrite a tag that exists.)
 - **Install-attribution markers can be forged** by output from third-party build
   code running in the same container (a nonce would be readable from the
   container's own command line). The worst case is an author's failure mislabelled
