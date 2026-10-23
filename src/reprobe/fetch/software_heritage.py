@@ -136,7 +136,7 @@ class SoftwareHeritageFetcher:
                         break
                     time.sleep(5)
                 if bundle:
-                    ok, note = download(bundle, dest / "swh_bundle.tar.gz", timeout=600)
+                    ok, note = download(bundle, dest / "swh_bundle.tar.gz", timeout=600, restrict_public=True)
                     if ok:
                         maybe_unzip(dest, warnings)
                         root = _bundle_root(dest, dir_swhid)

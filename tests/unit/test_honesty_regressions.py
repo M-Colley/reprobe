@@ -430,7 +430,8 @@ def test_an_activated_renv_project_is_restored_into_its_own_library(tmp_path):
     assert _renv_activation(tmp_path) == "1.2.3"
     cmd = _renv_restore_command("r", [], "1.2.3")
     assert "library=lib" in cmd and 'v <- "1.2.3"' in cmd and 'renv::install(paste0("renv@", v)' in cmd
-    assert "library=" not in _renv_restore_command("r", [], None)
+    plain = _renv_restore_command("r", [], None)
+    assert 'lib <- Sys.getenv("R_LIBS_USER")' in plain and "paths$library" not in plain
     for c in (cmd, _renv_restore_command("r", ["x"], ""), _renv_restore_command("r", [], None)):
         assert "'" not in c.split("-e '", 1)[1][:-1]
 

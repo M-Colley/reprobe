@@ -67,7 +67,8 @@ class FigshareFetcher:
             if not url:
                 warnings.append(f"no download_url for {name}")
                 continue
-            ok, note = download(url, safe_join(dest, name), expected_md5=md5)
+            # a figshare file can be a link to an author-chosen external URL
+            ok, note = download(url, safe_join(dest, name), expected_md5=md5, restrict_public=True)
             record_download(stats, ok, note, bool(md5))
             if not ok:
                 warnings.append(f"{name}: {note}")

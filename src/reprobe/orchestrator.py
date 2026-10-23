@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1001,6 +1002,21 @@ class Orchestrator:
 
 
 # ---------------------------------------------------------------------- #
+def _special_files(dirpath: str, names: list[str]) -> set[str]:
+    """copytree ignore hook: drop everything that is not a regular file, a
+    directory or a symlink (FIFOs, sockets, device nodes)."""
+    out = set()
+    for n in names:
+        try:
+            mode = os.lstat(os.path.join(dirpath, n)).st_mode
+        except OSError:
+            out.add(n)
+            continue
+        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+            out.add(n)
+    return out
+
+
 #: The retry copies the whole run directory; past this it is not attempted.
 _RETRY_COPY_CAP = 2 * 1024 ** 3
 
@@ -1027,7 +1043,16 @@ def _rstudio_retry(runner, ctx: RunContext, log_path: Path, *, allow_egress: boo
     scratch = ctx.rundir.parent / f"{ctx.rundir.name}-assisted"
     shutil.rmtree(scratch, ignore_errors=True)
     try:
-        shutil.copytree(ctx.rundir, scratch, symlinks=True)
+        # Author code has just had write access to the run dir: it can leave a
+        # FIFO or device node there, which copytree would block on or fail over.
+        # Only regular files, directories and links are copied.
+        try:
+            shutil.copytree(ctx.rundir, scratch, symlinks=True, ignore=_special_files)
+        except (shutil.Error, OSError) as e:
+            out["status"] = "not-attempted"
+            out["summary"] = ("Harness-assisted retry not attempted: the run directory could not be "
+                              f"copied ({type(e).__name__}).")
+            return out
         rctx = replace(ctx, rundir=scratch, pre_index=snapshot(scratch))
         spec = runner.container_spec(rctx).model_copy(
             update={"command": runner.assisted_rstudio_command(rctx)})

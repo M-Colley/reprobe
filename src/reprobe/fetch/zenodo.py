@@ -52,7 +52,7 @@ class ZenodoFetcher:
             if not url:
                 warnings.append(f"no download link for {key}")
                 continue
-            ok, note = download(url, safe_join(dest, key), expected_md5=md5)
+            ok, note = download(url, safe_join(dest, key), expected_md5=md5, restrict_public=True)
             record_download(stats, ok, note, bool(md5))
             if not ok:
                 warnings.append(f"{key}: {note}")

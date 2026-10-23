@@ -6,6 +6,7 @@ local (non-archival) pin."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -756,3 +757,14 @@ def test_an_assisted_retry_that_fails_next_names_the_next_problem(tmp_path, monk
     retry = report.steps[0].diagnostics["assisted_retry"]
     assert retry["status"] == "fail" and "not the only problem" in retry["summary"]
     assert "next_diagnosis" in retry
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_the_retry_copy_skips_special_files_author_code_left_behind(tmp_path):
+    """A FIFO planted in the run dir would block or fail copytree and crash the
+    run with no report."""
+    from reprobe.orchestrator import _special_files
+    (tmp_path / "f.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "d").mkdir()
+    os.mkfifo(tmp_path / "pipe")
+    assert _special_files(str(tmp_path), ["f.txt", "d", "pipe"]) == {"pipe"}

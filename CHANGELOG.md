@@ -246,6 +246,30 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
 - `micromamba_base` is pinned to its multi-arch index digest, so a rebuild from
   the committed locks starts from the same base.
 
+### Third review: the trust boundary
+
+- An `renv.lock` record whose key is not an R package name, or disagrees with its
+  own `Package` field, could slip past the exclusion of non-CRAN sources and be
+  fetched from wherever it says, with network. Such a lockfile is now refused.
+- renv restores from a clean temporary project holding only a copy of the
+  lockfile, into a library named explicitly: the artifact's own `renv/` folder
+  (`settings.json`, a profile switching the lockfile) no longer steers a step
+  that has network. (Tested on renv 1.3.1: a tarball planted in `renv/cellar` is
+  NOT used for a CRAN record, binary or source — the review over-stated that.)
+- `git checkout` of the submitted ref, and `git lfs pull`, are size-capped like
+  the clone: a tree pointing one compressible blob at many paths is small in the
+  pack and large on disk.
+- Downloads from URLs a platform API returned (figshare link-only files, an
+  absolute Dryad href, Zenodo, OSF, Software Heritage, anonymous GitHub) get the
+  per-hop public-address check. Untrusted URLs use a session that ignores
+  `HTTP(S)_PROXY` (a proxy re-resolves the host, defeating the DNS pin) and
+  `~/.netrc` (which would hand stored credentials to the author's host).
+- Archive member caps apply while headers are read: tar members are streamed
+  and refused past the cap, and a zip's declared entry count is read from its
+  end-of-central-directory record before `ZipFile()` parses the directory.
+- The RStudio retry's copy skips FIFOs and device nodes author code may leave,
+  and a failed copy is recorded as "not attempted" instead of ending the run.
+
 ### Known limits
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:

@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 import socket
+import struct
 import subprocess
 import sys
 import tarfile
@@ -65,6 +66,12 @@ def _make_session() -> requests.Session:
 
 
 _SESSION = _make_session()
+#: For URLs an author chose. Not trust_env: an HTTP(S)_PROXY from the environment
+#: would resolve the host itself (the DNS pin then guards nothing — the proxy can
+#: be rebound to an internal address), and ~/.netrc would hand the chair's stored
+#: credentials to whatever host the author named.
+_DIRECT = _make_session()
+_DIRECT.trust_env = False
 
 
 def get(url: str, **kwargs) -> requests.Response:
@@ -366,6 +373,40 @@ def guard_zip(z: zipfile.ZipFile) -> None:
         raise FetchError(f"archive uncompressed size {total} exceeds {_MAX_EXTRACT_BYTES}-byte cap (decompression bomb?)")
 
 
+def zip_entry_count(path: Path) -> int | None:
+    """Entries a zip declares in its end-of-central-directory record (zip64
+    included), read WITHOUT parsing the central directory — which ZipFile() does
+    in full on open, so a small file declaring millions of entries exhausts host
+    memory before guard_zip can count them. None when unreadable (ZipFile then
+    reports the error itself)."""
+    end = getattr(zipfile, "_EndRecData", None)        # the stdlib's own EOCD reader
+    if end is None:
+        return None
+    try:
+        with open(path, "rb") as fp:
+            rec = end(fp)
+    except (OSError, struct.error, ValueError):
+        return None
+    return int(rec[zipfile._ECD_ENTRIES_TOTAL]) if rec else None
+
+
+def _tar_members(t: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    """The archive's members, read one header at a time and refused as soon as
+    the count or the declared size passes its cap — getmembers() would read
+    every header into memory first."""
+    members: list[tarfile.TarInfo] = []
+    total = 0
+    while (m := t.next()) is not None:
+        members.append(m)
+        total += m.size
+        if len(members) > _MAX_ARCHIVE_MEMBERS:
+            raise ValueError(f"archive has too many members (> {_MAX_ARCHIVE_MEMBERS})")
+        if total > _MAX_EXTRACT_BYTES:
+            raise ValueError(f"archive uncompressed size exceeds {_MAX_EXTRACT_BYTES}-byte cap "
+                             "(decompression bomb?)")
+    return members
+
+
 def _guard_tar_members(members: list[tarfile.TarInfo]) -> None:
     if len(members) > _MAX_ARCHIVE_MEMBERS:
         raise ValueError(f"archive has too many members ({len(members)} > {_MAX_ARCHIVE_MEMBERS})")
@@ -408,8 +449,7 @@ _TAR_FILTER_SOUND = (sys.version_info >= (3, 13, 4)
 def _extract_tar(t: tarfile.TarFile, dest: Path, warnings: list[str]) -> None:
     if not hasattr(tarfile, "data_filter"):
         raise FetchError("tar extraction needs Python >= 3.11.4 (tarfile filter='data')")
-    members = t.getmembers()
-    _guard_tar_members(members)             # reject bombs before writing anything
+    members = _tar_members(t)              # reject bombs before writing anything
     if not _TAR_FILTER_SOUND:
         links = [m for m in members if m.issym() or m.islnk()]
         if links:
@@ -427,6 +467,9 @@ def maybe_unzip(dest: Path, warnings: list[str]) -> None:
     tars = list(dest.glob("*.tar.gz")) + list(dest.glob("*.tgz"))
     try:
         if len(zips) == 1 and not tars:
+            n = zip_entry_count(zips[0])
+            if n is not None and n > _MAX_ARCHIVE_MEMBERS:
+                raise FetchError(f"archive has too many members ({n} > {_MAX_ARCHIVE_MEMBERS})")
             with zipfile.ZipFile(zips[0]) as z:
                 guard_zip(z)                # reject a decompression bomb first
                 z.extractall(dest)          # zipfile sanitizes member paths itself
@@ -457,7 +500,7 @@ def _open_stream(url: str, params: dict | None, timeout: int, restrict_public: b
         port = explicit_port or (443 if scheme == "https" else 80)
         infos = _resolve_public(host, port)                   # raises on non-public
         with _pinned_dns(host, infos):
-            r = _SESSION.get(cur, params=params, stream=True, timeout=timeout, allow_redirects=False)
+            r = _DIRECT.get(cur, params=params, stream=True, timeout=timeout, allow_redirects=False)
         params = None                           # query params apply to the first hop only
         if getattr(r, "is_redirect", False) or getattr(r, "is_permanent_redirect", False):
             loc = r.headers.get("Location")

@@ -75,8 +75,9 @@ class DryadFetcher:
             algo = hash_algorithm(f.get("digestType"))
             digest = (algo, str(f["digest"])) if algo and f.get("digest") else None
             attempted += 1
+            # href comes from the API and may be absolute: guard every hop
             ok, note = download(urljoin(_SITE, href), safe_join(dest, path),
-                                expected_digest=digest, timeout=600)
+                                expected_digest=digest, timeout=600, restrict_public=True)
             record_download(stats, ok, note, bool(digest))
             if not ok:
                 notes.append(note)

@@ -490,7 +490,7 @@ def test_download_restrict_public_refuses_redirect_to_internal(tmp_path, monkeyp
     class S:
         def get(self, url, **k):
             return _Redirect("http://169.254.169.254/latest/meta-data/")   # -> internal
-    monkeypatch.setattr(base, "_SESSION", S())
+    monkeypatch.setattr(base, "_DIRECT", S())
     ok, note = base.download("https://93.184.216.34/x", tmp_path / "f.bin", restrict_public=True)
     assert not ok and "internal" in note.lower()
     assert not (tmp_path / "f.bin").exists()
@@ -817,3 +817,9 @@ def test_the_public_probe_never_raises(monkeypatch):
         raise RuntimeError("network is down")
     monkeypatch.setattr(git_host, "probe_status", boom)
     assert "could not complete" in git_host._public_probe("https://github.com/a/b")
+
+
+def test_untrusted_urls_ignore_proxy_and_netrc_from_the_environment():
+    """A proxy would resolve the author's host itself (the DNS pin then guards
+    nothing), and ~/.netrc would hand the chair's credentials to it."""
+    assert base._DIRECT.trust_env is False

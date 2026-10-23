@@ -126,16 +126,23 @@ def _renv_restore_command(cran_repo: str, excluded: list[str],
     repo = cran_repo or "https://cloud.r-project.org"
     excl = "c(" + ", ".join(f'"{n}"' for n in excluded) + ")" if excluded else "NULL"
     repos = f'c(CRAN=\"{repo}\")'
-    if activation is None:
-        body = f"renv::restore(project=getwd(), prompt=FALSE, repos={repos}, exclude={excl})"
-    else:
+    # Restored from a clean project holding only a copy of the lockfile: the
+    # artifact's own renv/ folder (settings.json can add library paths, a
+    # profile file switches the lockfile) must not steer a step that has network.
+    # The target library is named explicitly either way.
+    lib = ("renv::paths$library(project=getwd())" if activation is not None
+           else 'Sys.getenv(\"R_LIBS_USER\")')
+    body = ("{ p <- file.path(tempdir(), \"reprobe-renv\"); dir.create(p, showWarnings=FALSE); "
+            "stopifnot(file.copy(\"renv.lock\", file.path(p, \"renv.lock\"), overwrite=TRUE)); "
+            f"lib <- {lib}; dir.create(lib, recursive=TRUE, showWarnings=FALSE); "
+            f"renv::restore(project=p, library=lib, prompt=FALSE, repos={repos}, exclude={excl})")
+    if activation is not None:
         want = f'\"{activation}\"' if activation else 'as.character(packageVersion(\"renv\"))'
-        body = ("{ lib <- renv::paths$library(project=getwd()); "
-                f"renv::restore(project=getwd(), library=lib, prompt=FALSE, repos={repos}, exclude={excl}); "
-                f"v <- {want}; have <- tryCatch(as.character(packageVersion(\"renv\", lib.loc=lib)), "
-                "error=function(e) \"\"); "
-                f"if (!identical(have, v)) renv::install(paste0(\"renv@\", v), library=lib, "
-                f"repos={repos}, prompt=FALSE) }}")
+        body += (f"; v <- {want}; have <- tryCatch(as.character(packageVersion(\"renv\", lib.loc=lib)), "
+                 "error=function(e) \"\"); "
+                 f"if (!identical(have, v)) renv::install(paste0(\"renv@\", v), project=p, library=lib, "
+                 f"repos={repos}, prompt=FALSE)")
+    body += " }"
     return ("Rscript --vanilla -e 'if (requireNamespace(\"renv\", quietly=TRUE)) "
             f"{body} "
             "else { message(\"renv not preinstalled in image; renv.lock NOT restored\"); quit(status=3) }'")

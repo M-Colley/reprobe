@@ -328,15 +328,23 @@ def classify_renv_lock(text: str) -> tuple[list[str] | None, list[tuple[str, str
     notes: list[tuple[str, str]] = []
     for name, info in sorted(packages.items()):
         info = info if isinstance(info, dict) else {}
+        # Exclusion is by key, and a key that is not an R package name cannot be
+        # passed to `exclude=` at all; a key that disagrees with the record's own
+        # `Package` excludes one name while renv installs another. Either way a
+        # record would slip past the exclusion and be fetched from wherever it
+        # says, with network — so the lockfile is refused, not partly trusted.
+        pkg = info.get("Package", name)
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9.]*", str(name)) or pkg != name:
+            why = ("is not a valid R package name" if pkg == name
+                   else f"names a different package ({str(pkg)[:40]!r})")
+            return None, [(str(name)[:60], f"the record {why}; restoring this lockfile is refused "
+                                           "— nothing was restored from it")]
         source = str(info.get("Source") or "").lower() if isinstance(info.get("Source"), str) else ""
         repo = info.get("Repository")
         if source == "repository" and isinstance(repo, str) and repo.strip().lower() not in _RENV_OK_REPOSITORIES:
             source = f"repository {repo.strip()[:30]!r}"
         if source not in _RENV_OK_SOURCES:
-            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9.]*", str(name)):
-                notes.append((str(name)[:60], "not a valid R package name"))
-            else:
-                excluded.append(str(name))
-                notes.append((str(name), f"source {source or 'unknown'!r} is fetched from where the "
-                                         "lockfile says, not from a CRAN-like repository"))
+            excluded.append(str(name))
+            notes.append((str(name), f"source {source or 'unknown'!r} is fetched from where the "
+                                     "lockfile says, not from a CRAN-like repository"))
     return excluded, notes

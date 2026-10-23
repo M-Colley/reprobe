@@ -153,7 +153,7 @@ def _pull_lfs(dest: Path, warnings: list[str], files: list[str]) -> None:
         warnings.append(f"git-lfs NOT pulled: declared LFS payload {total} bytes exceeds the "
                         f"{_MAX_LFS_TOTAL_BYTES}-byte cap (fetch the data manually)")
         return
-    pull = run_git(["lfs", "pull"], cwd=dest, timeout=1800)
+    pull = run_git(["lfs", "pull"], cwd=dest, timeout=1800, watch=dest, max_bytes=_MAX_CLONE_BYTES)
     if pull.returncode == 0:
         warnings.append(f"git-lfs: pulled {sized} file(s) (~{total} bytes; LFS objects are "
                         "content-addressed, so this data is reproducibly pinned by the commit)")
@@ -278,7 +278,11 @@ class GitHostFetcher:
             raise FetchError(_clone_failure(url, clone.stderr))
 
         if want_ref:
-            co = run_git(["checkout", "--quiet", want_ref], cwd=dest)
+            # Watched like the clone: the ref is the submitter's choice, and a tree
+            # that points one compressible blob at many paths is small in the pack
+            # and far larger once written out.
+            co = run_git(["checkout", "--quiet", want_ref], cwd=dest,
+                         watch=dest, max_bytes=_MAX_CLONE_BYTES)
             if co.returncode != 0:
                 raise FetchError(f"git checkout {want_ref} failed: {co.stderr.strip()[:200]}")
 

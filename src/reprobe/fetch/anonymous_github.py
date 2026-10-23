@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 from ..models import FetchResult, Pin
-from .base import FetchError, download, guard_zip
+from .base import _MAX_ARCHIVE_MEMBERS, FetchError, download, guard_zip, zip_entry_count
 
 _ID_RE = re.compile(r"anonymous\.4open\.science/(?:r|api/repo)/([A-Za-z0-9_-]+)", re.I)
 
@@ -32,10 +32,13 @@ class AnonymousGithubFetcher:
         # Stream to disk with a byte cap instead of buffering the whole response
         # in RAM (r.content) — a large/hostile snapshot could otherwise OOM the host.
         zip_path = dest / "_anon_repo.zip"
-        ok, note = download(url, zip_path, timeout=120)
+        ok, note = download(url, zip_path, timeout=120, restrict_public=True)
         if not ok:
             raise FetchError(f"anonymous github download failed: {note}")
         try:
+            n = zip_entry_count(zip_path)   # before ZipFile() parses the whole directory
+            if n is not None and n > _MAX_ARCHIVE_MEMBERS:
+                raise FetchError(f"archive has too many members ({n} > {_MAX_ARCHIVE_MEMBERS})")
             with zipfile.ZipFile(zip_path) as z:
                 guard_zip(z)                # reject a decompression bomb
                 z.extractall(dest)

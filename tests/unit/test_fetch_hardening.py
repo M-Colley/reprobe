@@ -53,7 +53,8 @@ def test_a_url_with_a_userinfo_trick_is_judged_by_its_real_host():
 def test_probe_status_refuses_an_internal_start_without_connecting(monkeypatch):
     def boom(*a, **k):                  # a request here would be the port scan
         raise AssertionError("connected to an internal host")
-    monkeypatch.setattr(base._SESSION, "get", boom, raising=False)
+    for sess in (base._SESSION, base._DIRECT):
+        monkeypatch.setattr(sess, "get", boom, raising=False)
     with pytest.raises(FetchError):
         base.probe_status("http://10.0.0.5/admin")
 
@@ -232,7 +233,8 @@ def test_the_backslash_bypass_cannot_reach_a_local_server(monkeypatch):
     """Reproduced from the review: assert_safe_url passed and the download fetched
     a local server's bytes into the run tree."""
     called = []
-    monkeypatch.setattr(base._SESSION, "get", lambda *a, **k: called.append(a) or None, raising=False)
+    for sess in (base._SESSION, base._DIRECT):
+        monkeypatch.setattr(sess, "get", lambda *a, **k: called.append(a) or None, raising=False)
     ok, note = base.download("http://127.0.0.1:80" + _BACKSLASH + "@8.8.8.8/x", __import__("pathlib").Path("x"),
                              restrict_public=True)
     assert ok is False and not called
@@ -249,7 +251,7 @@ def test_every_redirect_hop_gets_the_same_strict_check(monkeypatch):
             pass
 
     monkeypatch.setattr(base, "_resolve_public", lambda h, p: [(2, 1, 6, "", ("8.8.8.8", p))])
-    monkeypatch.setattr(base._SESSION, "get", lambda *a, **k: Hop(), raising=False)
+    monkeypatch.setattr(base._DIRECT, "get", lambda *a, **k: Hop(), raising=False)
     with pytest.raises(FetchError, match="backslash"):
         base._open_stream("http://93.184.216.34/x", None, 5, restrict_public=True)
 
@@ -288,3 +290,108 @@ def test_a_workroot_outside_the_artifact_changes_nothing(tmp_path):
     res = LocalFetcher().fetch(str(art), tmp_path / "wk" / "sid" / "src")
     assert (tmp_path / "wk" / "sid" / "src" / "work" / "notes.txt").is_file()
     assert not any("left out" in w for w in res.warnings)
+
+
+# --- third review: the trust boundary ---------------------------------------
+
+@pytest.mark.parametrize("packages", [
+    {"evil pkg": {"Package": "evil pkg", "Source": "GitHub", "RemoteRepo": "x/y"}},
+    {"praise": {"Package": "evilpkg", "Source": "Repository", "Repository": "CRAN"}},
+])
+def test_an_renv_record_that_could_slip_past_the_exclusion_refuses_the_lockfile(packages):
+    """Exclusion is by key. A key R cannot name, or one that disagrees with the
+    record's own Package, would have been restored from wherever it says — with
+    network — so the whole lockfile is refused."""
+    import json
+
+    from reprobe.envbuild.sanitize import classify_renv_lock
+    excluded, notes = classify_renv_lock(json.dumps({"Packages": packages}))
+    assert excluded is None and "refused" in notes[0][1]
+
+
+def test_renv_restores_from_a_clean_project_with_a_named_library():
+    """The artifact's renv/ folder (settings.json, a profile switching the
+    lockfile) must not steer a restore that runs with network."""
+    from reprobe.envbuild.base import _renv_restore_command
+    for activation in (None, "", "1.2.3"):
+        cmd = _renv_restore_command("https://r", [], activation)
+        assert 'renv::restore(project=p, library=lib' in cmd
+        assert 'file.path(tempdir(), "reprobe-renv")' in cmd
+        assert "project=getwd()," not in cmd.replace("paths$library(project=getwd())", "")
+
+
+def test_checking_out_the_submitted_ref_is_size_capped_like_the_clone(tmp_path, monkeypatch):
+    import reprobe.fetch.git_host as gh
+    calls = []
+
+    class R:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake(args, cwd=None, timeout=600, **kw):
+        calls.append((args[0], kw))
+        return R()
+    monkeypatch.setattr(gh, "run_git", fake)
+    monkeypatch.setattr(gh, "_lfs_tracked_files", lambda dest: (True, []))
+    try:
+        gh.GitHostFetcher().fetch("https://github.com/a/b/tree/v1.0", tmp_path / "d")
+    except Exception:
+        pass                                   # later steps need a real repo; only the calls matter
+    by = {a: kw for a, kw in calls}
+    assert by["clone"].get("max_bytes") and by["checkout"].get("max_bytes") == by["clone"]["max_bytes"]
+
+
+def test_a_zip_declaring_too_many_entries_is_refused_before_it_is_opened(tmp_path, monkeypatch):
+    import zipfile
+    z = tmp_path / "a.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for i in range(5):
+            zf.writestr(f"f{i}.txt", "x")
+    assert base.zip_entry_count(z) == 5
+    monkeypatch.setattr(base, "_MAX_ARCHIVE_MEMBERS", 3)
+    opened = []
+    monkeypatch.setattr(zipfile, "ZipFile", lambda *a, **k: opened.append(a) or (_ for _ in ()).throw(AssertionError))
+    warnings: list[str] = []
+    base.maybe_unzip(tmp_path, warnings)
+    assert not opened and "too many members" in warnings[0]
+
+
+def test_tar_headers_are_counted_as_they_are_read(tmp_path, monkeypatch):
+    import io
+    import tarfile
+    t = tmp_path / "a.tar.gz"
+    with tarfile.open(t, "w:gz") as tf:
+        for i in range(10):
+            info = tarfile.TarInfo(f"f{i}")
+            tf.addfile(info, io.BytesIO(b""))
+    monkeypatch.setattr(base, "_MAX_ARCHIVE_MEMBERS", 3)
+    read = []
+    real_next = tarfile.TarFile.next
+
+    def counting(self):
+        m = real_next(self)
+        read.append(m)
+        return m
+    monkeypatch.setattr(tarfile.TarFile, "next", counting)
+    warnings: list[str] = []
+    base.maybe_unzip(tmp_path, warnings)
+    assert "too many members" in warnings[0]
+    # open() reads the first header itself; then it stops at the first one past the cap
+    assert {m.name for m in read if m} == {"f0", "f1", "f2", "f3"}
+    assert not (tmp_path / "f0").exists()
+
+
+@pytest.mark.parametrize("module, call", [
+    ("figshare", "download"), ("zenodo", "download"), ("osf", "download"),
+    ("dryad", "download"), ("software_heritage", "download"), ("anonymous_github", "download"),
+])
+def test_downloads_from_platform_api_urls_guard_every_hop(module, call):
+    """The URL comes from an API response — figshare link-only files, an
+    absolute Dryad href — so the per-hop public-address check applies."""
+    import importlib
+    import inspect
+    src = inspect.getsource(importlib.import_module(f"reprobe.fetch.{module}"))
+    calls = [ln for ln in src.splitlines() if f"{call}(" in ln and "def " not in ln
+             and "import" not in ln and "record_download" not in ln]
+    assert calls
+    body = src[src.index(calls[0].strip()):]
+    assert "restrict_public=True" in body[:400], (module, calls[0])

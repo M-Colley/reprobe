@@ -140,7 +140,7 @@ class OSFFetcher:
                     if dl:
                         md5 = ((attr.get("extra") or {}).get("hashes") or {}).get("md5")
                         ok, note = download(dl, safe_join(dest, name),
-                                            expected_md5=md5, params=params)
+                                            expected_md5=md5, params=params, restrict_public=True)
                         record_download(stats, ok, note, bool(md5))
                         count += 1 if ok else 0
                         if not ok:
