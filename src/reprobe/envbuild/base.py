@@ -35,6 +35,7 @@ from __future__ import annotations
 import re
 import shutil
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -49,6 +50,7 @@ from .sanitize import (
     MAX_EMBED_BYTES,
     classify_renv_lock,
     embed_file_command,
+    filter_requirement_lines,
     filter_requirements,
     inside_tree,
     sanitize_conda_env,
@@ -316,7 +318,8 @@ def plan(
         py_needed=py_needed,
         detected_py_packages=detect_result.py_packages,
         conda_channels=tuple((config.pins.get("install") or {}).get("conda_channels")
-                             or DEFAULT_CONDA_CHANNELS))
+                             or DEFAULT_CONDA_CHANNELS),
+        step_dirs=_step_dirs(detect_result))
     install, dep_warnings, conda_prefix = ip.commands, ip.warnings, ip.conda_prefix
 
     flags = detect_result.flags
@@ -514,20 +517,62 @@ def _requirements_command(src: Path, req_file: str,
     if len(content.encode("utf-8")) > MAX_EMBED_BYTES:
         return None, warnings + [f"'{req_file}' is too large to embed in the install command; it was "
                                  "NOT installed"]
-    dest = f"{_REQ_DIR}/requirements.txt"
+    return _pip_install_embedded(content, "requirements.txt", conda_prefix), warnings
+
+
+def _pip_install_embedded(content: str, name: str, conda_prefix: Optional[str]) -> str:
+    """`pip install -r` of requirement lines embedded in the command (never read
+    from the artifact's tree), into the conda env when there is one."""
+    dest = f"{_REQ_DIR}/{name}"
     target = "" if conda_prefix else " --target=/work/.reprobe_deps"
     # cd first: pip reads a requirement ending in an archive suffix as a file in ITS
     # working directory, which must not be the artifact's tree
     return (f"{embed_file_command(content, dest)} && cd {_REQ_DIR} && "
-            f"{_py(conda_prefix)} -m pip install --no-input{target} -r {dest}"), warnings
+            f"{_py(conda_prefix)} -m pip install --no-input{target} -r {dest}")
+
+
+def _pyproject_command(src: Path, rel: str,
+                       conda_prefix: Optional[str]) -> tuple[Optional[str], list[str]]:
+    """The PEP 621 ``[project].dependencies`` of a pyproject.toml, through the same
+    filter as a requirements file. The project itself is never built or installed:
+    its build backend is the artifact's code, and this phase has network."""
+    path = src / rel
+    if not inside_tree(src, path):
+        return None, [f"'{rel}' is outside the artifact (or a symbolic link); it was NOT read"]
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (tomllib.TOMLDecodeError, OSError, RecursionError):
+        return None, [f"'{rel}' could not be parsed as TOML; its dependencies were NOT installed"]
+    proj = data.get("project") if isinstance(data.get("project"), dict) else {}
+    warnings: list[str] = []
+    tool = data.get("tool") if isinstance(data.get("tool"), dict) else {}
+    if isinstance(tool.get("poetry"), dict) and tool["poetry"].get("dependencies"):
+        warnings.append(f"'{rel}' declares [tool.poetry.dependencies], whose constraint syntax is "
+                        "Poetry's own; they were NOT installed (only PEP 621 [project].dependencies "
+                        "are read)")
+    if "dependencies" in (proj.get("dynamic") or []):
+        warnings.append(f"'{rel}' computes its dependencies in the build backend (dynamic), which "
+                        "is never run in the install phase; they were NOT installed")
+    deps = proj.get("dependencies")
+    if not isinstance(deps, list) or not deps:
+        return None, warnings
+    kept, dropped = filter_requirement_lines([str(d) for d in deps])
+    warnings += _dropped_warnings(rel, dropped)
+    if not kept:
+        return None, warnings
+    content = "\n".join(kept) + "\n"
+    if len(content.encode("utf-8")) > MAX_EMBED_BYTES:
+        return None, warnings + [f"'{rel}' dependencies are too large to embed; NOT installed"]
+    return _pip_install_embedded(content, "pyproject-requirements.txt", conda_prefix), warnings
 
 
 def _conda_disclosures(path: Path, notebooks: bool) -> list[str]:
     """What building the env does NOT reproduce. Never let a built environment
     read as a faithful one."""
     out = [
-        f"conda file '{path.name}' was built with micromamba into {CONDA_ENV_PREFIX} and the "
-        "analysis runs with that interpreter. Not reproduced: conda `activate` hooks and any "
+        f"conda file '{path.name}' was built with micromamba into {CONDA_ENV_PREFIX}; Python "
+        "steps run with its interpreter, and R steps with its R when it declares one (r-base) — "
+        "else with the base image's R. Not reproduced: conda `activate` hooks and any "
         "environment variables the author's env sets, and channel pins are resolved fresh "
         "(no lock file), so package versions may differ from the authors' run."]
     if notebooks:
@@ -601,6 +646,20 @@ def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
     return ip.commands, ip.warnings, ip.conda_prefix
 
 
+def _step_dirs(detect_result: DetectResult) -> tuple[str, ...]:
+    """The directories the planned steps live in, nearest first, each followed by
+    its parents (never the root itself): where a dependency file kept next to the
+    code is looked for when the root has none."""
+    out: list[str] = []
+    for st in detect_result.steps:
+        parts = Path(str(st.target).replace("\\", "/")).parts[:-1]
+        for i in range(len(parts), 0, -1):
+            d = "/".join(parts[:i])
+            if d not in out and ".." not in parts:
+                out.append(d)
+    return tuple(out)
+
+
 def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                   detected_r_packages: list[str] | tuple[str, ...] = (),
                   cran_repo: str = "",
@@ -608,7 +667,8 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                   notebooks: bool = False,
                   py_needed: bool = False,
                   detected_py_packages: list[str] | tuple[str, ...] = (),
-                  conda_channels: tuple[str, ...] = DEFAULT_CONDA_CHANNELS) -> _InstallPlan:
+                  conda_channels: tuple[str, ...] = DEFAULT_CONDA_CHANNELS,
+                  step_dirs: tuple[str, ...] = ()) -> _InstallPlan:
     """Any declared or detected dependency file the pinned-base builder does NOT
     install must surface as a warning — the report says what was not installed
     (never over-claim)."""
@@ -680,17 +740,36 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
     # Read the file before spending an install phase on it: one unsatisfiable
     # line means nothing installs, and the resulting error names an innocent
     # package. Cheap, offline, and it fires whether or not the file is declared.
-    if (src / "requirements.txt").is_file() and inside_tree(src, src / "requirements.txt"):
-        ip.warnings.extend(lint_requirements(src / "requirements.txt"))
+    def find(*names: str) -> Optional[str]:
+        """A dependency file at the root, else the nearest one beside the code
+        (`code/requirements.txt`): ignoring it installed nothing the author
+        declared, and then accused the artifact of declaring nothing."""
+        for d in ("", *step_dirs):
+            for n in names:
+                rel = f"{d}/{n}" if d else n
+                if (src / rel).is_file() and inside_tree(src, src / rel):
+                    return rel
+        return None
+
+    req_file = find("requirements.txt")
+    if req_file:
+        ip.warnings.extend(lint_requirements(src / req_file))
     if not ip.commands and not handled:
         # auto-detect common manifests (repo2docker-style conventions). Conda
         # first: when there is an env to build, pip has to install INTO it.
         conda_file = next((c for c in ("environment.yml", "environment.yaml",
-                                       "binder/environment.yml") if (src / c).is_file()), None)
+                                       "binder/environment.yml") if (src / c).is_file()), None) \
+            or find("environment.yml", "environment.yaml")
         if conda_file:
             conda(conda_file)
-        if (src / "requirements.txt").is_file():
-            requirements("requirements.txt", ip.conda_prefix)
+        if req_file:
+            requirements(req_file, ip.conda_prefix)
+        elif (pyproject := find("pyproject.toml")):
+            cmd, w = _pyproject_command(src, pyproject, ip.conda_prefix)
+            ip.warnings.extend(w)
+            if cmd:
+                ip.add(cmd, AUTHOR)
+                uses_pip_target = uses_pip_target or not ip.conda_prefix
         if (src / "renv.lock").is_file():
             if r_needed:
                 renv("renv.lock")
@@ -767,7 +846,7 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
     # environment it needs. Without this the report shows an empty warnings list
     # and a green step, which reads as "self-contained and reproducible".
     from ..detect.signatures import DEP_MANIFESTS
-    if executes_code and not any((src / m).is_file() for m in DEP_MANIFESTS):
+    if executes_code and not any((src / d / m).is_file() for d in ("", *step_dirs) for m in DEP_MANIFESTS):
         ip.warnings.append(
             "the artifact declares NO dependency manifest (no requirements.txt, environment.yml, "
             "renv.lock, pyproject.toml, DESCRIPTION, ...). Every library its code uses came from the "

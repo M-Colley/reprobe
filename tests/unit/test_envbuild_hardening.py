@@ -293,3 +293,50 @@ def test_the_channel_allow_list_is_configuration_not_code(tmp_path):
     p = plan_env(DetectResult(artifact_types=["python"], steps=[]), {}, cfg, tmp_path)
     spec = yaml.safe_load(_embedded(p.install_commands)["/work/.reprobe_req/environment.yml"])
     assert spec["channels"] == ["my-lab-channel"]
+
+
+# --- third review: dependency files the author did declare ------------------
+
+def _env_plan(tmp_path, files):
+    import reprobe.envbuild.base as eb
+    from reprobe.config import load_config
+    from reprobe.detect import detect
+    for rel, txt in files.items():
+        f = tmp_path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(txt, encoding="utf-8")
+    res, meta = detect(tmp_path)
+    real = eb.docker_available
+    eb.docker_available = lambda: False
+    try:
+        return eb.plan(res, meta, load_config(), tmp_path)
+    finally:
+        eb.docker_available = real
+
+
+def test_pyproject_dependencies_are_installed_through_the_same_filter(tmp_path):
+    import base64
+    import re
+    p = _env_plan(tmp_path, {"pyproject.toml": "[project]\nname='x'\ndependencies=['numpy==1.26.4', "
+                                               "'evil @ git+https://e.example/x.git']\n",
+                             "run.py": "import numpy\n"})
+    cmd = next(c for c in p.install_commands if "pyproject-requirements.txt" in c)
+    content = base64.b64decode(re.search(r"printf %s '([A-Za-z0-9+/=]+)'", cmd).group(1)).decode()
+    assert content == "numpy==1.26.4\n"                      # the VCS requirement was dropped
+    assert any("were NOT applied" in w for w in p.warnings)
+    assert not any("declares NO dependency manifest" in w for w in p.warnings)
+
+
+def test_poetry_and_dynamic_dependencies_are_named_not_installed(tmp_path):
+    p = _env_plan(tmp_path, {"pyproject.toml": "[project]\nname='x'\ndynamic=['dependencies']\n"
+                                               "[tool.poetry.dependencies]\npandas='^2'\n",
+                             "run.py": "x = 1\n"})
+    assert any("Poetry" in w for w in p.warnings) and any("dynamic" in w for w in p.warnings)
+
+
+def test_a_requirements_file_beside_the_code_is_used(tmp_path):
+    """code/requirements.txt was ignored, and the artifact then accused of
+    declaring no dependency manifest at all."""
+    p = _env_plan(tmp_path, {"code/requirements.txt": "pandas==1.5.3\n", "code/main.py": "import pandas\n"})
+    assert any("/work/.reprobe_req/requirements.txt" in c and "pip install" in c for c in p.install_commands)
+    assert not any("declares NO dependency manifest" in w for w in p.warnings)

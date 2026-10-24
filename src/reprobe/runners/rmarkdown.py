@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from ..models import Capabilities, RawRunOutput, RunResult
-from .base import _R_ENV, BaseRunner, RunContext, _q
+from .base import _R_ENV, BaseRunner, RunContext, _q, env_r_prefix
 
 _NO_LATEX = "[reprobe] PDF output requested but the image has no LaTeX; rendering as HTML"
 
@@ -41,7 +41,7 @@ class RMarkdownRunner(BaseRunner):
         # The author-controlled path reaches R via commandArgs(TRUE), never by
         # interpolation into R source or a double-quoted (shell-active) string.
         return ["bash", "-c",
-                f"mkdir -p /work/.reprobe_Rlib; {_R_ENV}"
+                f"mkdir -p /work/.reprobe_Rlib; {_R_ENV}{env_r_prefix(ctx)}"
                 f"Rscript -e '{_RENDER}' {_q(t)} {_q(f'/work/{outdir}')}"]
 
     def interpret(self, raw: Optional[RawRunOutput], ctx: RunContext) -> RunResult:

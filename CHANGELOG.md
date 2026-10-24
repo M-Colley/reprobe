@@ -303,6 +303,45 @@ Each confirmed by a snippet against the real code before it was fixed.
 - R installs never run in the generic Python fallback image, where a missing
   `Rscript` read as the author's lockfile failing.
 
+### Third review: planning realistic repositories
+
+All ten claims reproduced against the real detector and planner first.
+
+- **Unnumbered steps follow their stage before their language.** Grouped by
+  runner, `results.ipynb` ran before `train.py` and `report.Rmd` before the
+  script that writes its data. Names now order prep, model fitting, other,
+  evaluation, then analysis/plots/reports; at equal stage an R Markdown report
+  renders last. The "order is inferred" note covers every multi-step plan.
+- **Numbered scripts are always steps** (up to one directory down), added to
+  whatever else runs: `01_clean_data.py` beside notebooks, and `01_prep.R`
+  beside an entry-named `analysis_plots.R`, were dropped.
+- **Scripts one directory down are named when not run** (they were dropped
+  without a word), and `src/01_clean.py` + `src/02_model.py` alone no longer read
+  as "no runnable analyses".
+- **knitr children and bookdown chapters are not rendered on their own**; they
+  failed without the parent's objects, blamed on the artifact. A bookdown book
+  is named as not rendered.
+- **Quarto documents are named as not run**, and their R packages are scanned
+  and installed (they were filtered out of the scan).
+- **An R helper `source()`d only by an R Markdown or Quarto document** is not a
+  step of its own; **vendored third-party directories** never are.
+- **Packages loaded through a vector** — `lapply(pkgs, library, character.only =
+  TRUE)`, `sapply(c(...), require, ...)`, `for (p in pkgs) library(p, ...)`,
+  `pacman::p_load(char = pkgs)` — are detected and installed.
+- **An R script in an RStudio project folder runs from that folder** (the
+  nearest `*.Rproj` between it and the root), as it did for its author; its
+  `source()`d helpers resolve there too. New e2e fixture `r-rproj`.
+- **A conda environment that declares R is used by R steps** (it was built and
+  then ignored), without the base image's R library on its path.
+- **`pyproject.toml` dependencies are installed** (PEP 621, through the same
+  filter as requirements.txt; Poetry and dynamic dependencies are named, not
+  installed), and **the artifact's own package goes on PYTHONPATH** as `pip
+  install -e .` would make it importable — the project is never built. New e2e
+  fixture `py-srclayout`.
+- **A dependency file beside the code** (`code/requirements.txt`) is used when
+  the root has none, and its presence stops the false "declares NO dependency
+  manifest" finding.
+
 ### Known limits
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:

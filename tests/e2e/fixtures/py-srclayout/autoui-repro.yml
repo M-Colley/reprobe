@@ -1,0 +1,4 @@
+version: 1
+run:
+  steps: [scripts/run_analysis.py]
+expected_outputs: [results/mean.txt]

@@ -53,11 +53,18 @@ def detect(
             # which image runs a notebook depends on its kernel, which the
             # manifest does not state; read it from the notebook itself
             root = src_dir.resolve()
+            pkg_root = signatures.own_package_root(root)
             for s in m_result.steps:
+                f = (src_dir / s.target).resolve()
+                if not (f.is_relative_to(root) and f.is_file()):
+                    continue
                 if s.kind == "jupyter" and "language" not in s.args:
-                    nb = (src_dir / s.target).resolve()
-                    if nb.is_relative_to(root) and nb.is_file():
-                        s.args["language"] = signatures.notebook_language(nb)
+                    s.args["language"] = signatures.notebook_language(f)
+                elif s.kind == "r" and "cwd" not in s.args and (wd := signatures.r_working_dir(f, root)):
+                    s.args["cwd"] = wd
+                if pkg_root is not None and "pythonpath" not in s.args and (
+                        s.kind == "python" or s.args.get("language") == "python"):
+                    s.args["pythonpath"] = pkg_root
             return m_result, meta
         # codecheck or partial manifest: use heuristic steps + lifted expected outputs
         exp = meta.get("expected_outputs", [])

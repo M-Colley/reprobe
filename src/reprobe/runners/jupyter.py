@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 from typing import Optional
 
 from ..models import Capabilities, RawRunOutput, RunResult, RunStep
-from .base import _R_ENV, BaseRunner, RunContext, _q, env_path_prefix
+from .base import _R_ENV, BaseRunner, RunContext, _q, env_path_prefix, own_pythonpath
 
 #: Printed, with this exit status, when the image has no notebook executor at all:
 #: the harness chose an image that cannot run notebooks — not the artifact's fault.
@@ -71,7 +71,8 @@ class JupyterRunner(BaseRunner):
         # artifact failing. The LANGUAGE is the notebook's own.
         cmd = (
             "export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache MPLCONFIGDIR=/tmp; "
-            "export PYTHONPATH=/work/.reprobe_deps${PYTHONPATH:+:$PYTHONPATH} PYTHONUNBUFFERED=1; "
+            f"export PYTHONPATH=/work/.reprobe_deps{own_pythonpath(ctx)}${{PYTHONPATH:+:$PYTHONPATH}} "
+            "PYTHONUNBUFFERED=1; "
             + (_R_ENV if lang == "r" else "")
             + f"{env_path_prefix(ctx)}"
             f"if command -v papermill >/dev/null 2>&1; then "

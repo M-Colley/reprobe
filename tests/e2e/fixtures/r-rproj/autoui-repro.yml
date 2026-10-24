@@ -1,0 +1,4 @@
+version: 1
+run:
+  steps: [code/main.R]
+expected_outputs: [code/out/sum.txt]

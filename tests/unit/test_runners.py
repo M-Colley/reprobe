@@ -517,3 +517,34 @@ def test_the_rstudio_shim_survives_bash_single_quoting(tmp_path):
     cmd = _bash(RScriptRunner().assisted_rstudio_command(
         _ctx(tmp_path, RunStep(target="a.R", kind="r", argv=["x"]))))
     assert f"Rscript -e '{_RSTUDIO_SHIM}' 'a.R' 'x'" in cmd
+
+
+def test_an_r_step_with_a_project_folder_runs_from_it(tmp_path):
+    step = RunStep(target="code/main.R", kind="r", args={"cwd": "code"})
+    cmd = _bash(RScriptRunner().build_command(_ctx(tmp_path, step)))
+    assert "cd '/work/code'; Rscript 'main.R'" in cmd
+    for bad in ({"cwd": "../x"}, {"cwd": "other"}):      # must contain the script
+        cmd = _bash(RScriptRunner().build_command(_ctx(tmp_path, RunStep(target="code/main.R", kind="r", args=bad))))
+        assert "cd " not in cmd and "Rscript 'code/main.R'" in cmd
+
+
+def test_an_environment_with_its_own_r_runs_r_steps_without_the_base_library(tmp_path):
+    step = RunStep(target="a.R", kind="r")
+    cmd = _bash(RScriptRunner().build_command(_ctx(tmp_path, step, conda_env_prefix="/work/.reprobe_env")))
+    assert "export PATH=/work/.reprobe_env/bin:$PATH" in cmd
+    assert "if [ -x '/work/.reprobe_env/bin/Rscript' ]; then unset R_LIBS_USER; fi" in cmd
+    assert "unset R_LIBS_USER" not in _bash(RScriptRunner().build_command(_ctx(tmp_path, step)))
+    rmd = _bash(RMarkdownRunner().build_command(
+        _ctx(tmp_path, RunStep(target="a.Rmd", kind="rmarkdown"), conda_env_prefix="/work/.reprobe_env")))
+    assert "/work/.reprobe_env/bin" in rmd
+
+
+def test_the_artifacts_package_root_is_on_pythonpath_and_nothing_else(tmp_path):
+    def pp(args):
+        c = _bash(PythonScriptRunner().build_command(_ctx(tmp_path, RunStep(target="s/a.py", kind="python",
+                                                                                args=args))))
+        return c[c.index("PYTHONPATH="):].split(" ")[0]
+    assert pp({"pythonpath": "src"}).startswith("PYTHONPATH=/work/.reprobe_deps:/work/src$")
+    assert pp({"pythonpath": ""}).startswith("PYTHONPATH=/work/.reprobe_deps:/work$")
+    assert pp({"pythonpath": "../etc"}).startswith("PYTHONPATH=/work/.reprobe_deps$")
+    assert pp({}).startswith("PYTHONPATH=/work/.reprobe_deps$")

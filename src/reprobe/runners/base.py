@@ -88,6 +88,30 @@ def env_path_prefix(ctx: "RunContext") -> str:
     return f"export PATH={prefix}/bin:$PATH; " if prefix else ""
 
 
+def own_pythonpath(ctx: "RunContext") -> str:
+    """``:/work/<dir>`` for the artifact's own package root (see
+    signatures.own_package_root), or "". Only a plain relative directory."""
+    d = (ctx.step.args or {}).get("pythonpath")
+    if d is None:
+        return ""
+    d = str(d).strip("/")
+    if d and (".." in d.split("/") or not re.fullmatch(r"[\w./-]+", d)):
+        return ""
+    return ":/work" + (f"/{d}" if d else "")
+
+
+def env_r_prefix(ctx: "RunContext") -> str:
+    """``env_path_prefix`` for R steps. When the artifact's environment provides
+    its own R (an environment.yml declaring r-base), that R runs — and the
+    harness's R library, built for the base image's R, is left off its path:
+    packages compiled for one R version can fail to load in another."""
+    prefix = getattr(ctx, "conda_env_prefix", None)
+    if not prefix:
+        return ""
+    return (f"{env_path_prefix(ctx)}if [ -x {_q(prefix + '/bin/Rscript')} ]; "
+            "then unset R_LIBS_USER; fi; ")
+
+
 def snapshot(rundir: Path) -> dict[str, float]:
     """Cheap mtime snapshot of files under rundir, to detect produced files."""
     idx: dict[str, float] = {}

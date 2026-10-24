@@ -128,3 +128,22 @@ def test_an_rstudio_only_script_fails_and_its_assisted_retry_passes(tmp_path):
     assert retry["expected_met"] == ["analysis/answer.txt"]
     assert report.verdict["overall"] == "runs-with-failures"
     assert not (tmp_path / report.submission_id / "run" / "analysis" / "answer.txt").exists()
+
+
+def test_a_src_layout_project_imports_its_own_package_and_pyproject_deps(tmp_path):
+    """The project is never built (its backend is the artifact's code, and the
+    install phase has network); its package goes on PYTHONPATH and its
+    [project].dependencies are installed through the requirements filter."""
+    report, logs = _run(tmp_path, "py-srclayout")
+    assert report.environment["install_results"]["python"]["ok"], logs
+    step = report.steps[0]
+    assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
+    assert step.expected_met == ["results/mean.txt"]
+
+
+def test_an_rstudio_project_in_a_subfolder_runs_from_that_folder(tmp_path):
+    report, logs = _run(tmp_path, "r-rproj")
+    step = report.steps[0]
+    assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
+    produced = tmp_path / report.submission_id / "run" / "code" / "out" / "sum.txt"
+    assert produced.read_text(encoding="utf-8").strip() == "6"

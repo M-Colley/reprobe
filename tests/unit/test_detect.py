@@ -811,10 +811,11 @@ def test_only_a_leading_number_is_a_step_number(tmp_path):
 
 
 def test_scripts_not_run_are_named_even_when_an_entry_point_exists(tmp_path):
-    res = _plan(tmp_path, {"analysis.R": R1, "01_prep.R": R1, "02_figs.R": R1})
-    assert [s.target for s in res.steps] == ["analysis.R"]
+    res = _plan(tmp_path, {"analysis.R": R1, "01_prep.R": R1, "02_figs.R": R1, "plot_extra.R": R1})
+    # numbered scripts are pipeline steps even beside an entry point (review #2)
+    assert [s.target for s in res.steps] == ["01_prep.R", "02_figs.R", "analysis.R"]
     note = next(n for n in res.notes if "NOT run" in n)
-    assert "01_prep.R" in note and "02_figs.R" in note
+    assert "plot_extra.R" in note
 
 
 def test_an_r_entry_name_needs_a_word_boundary(tmp_path):
@@ -883,3 +884,92 @@ def test_an_r_notebook_alone_plans_r_installs(tmp_path):
     assert "praise" in res.r_packages
     env = plan(res, {}, load_config(), tmp_path)
     assert any(c.startswith("Rscript") and "praise" in c for c in env.install_commands)
+
+
+# --- third review: planning realistic repositories --------------------------
+
+NB_PY = '{"metadata": {"kernelspec": {"name": "python3", "language": "python"}}, "nbformat": 4, "cells": []}'
+
+
+def test_unnumbered_steps_follow_their_stage_before_their_language(tmp_path):
+    """Grouped by runner, results.ipynb ran before train.py."""
+    res = _plan(tmp_path, {"train.py": PY1, "evaluate.py": PY1, "results.ipynb": [NB_PY]})
+    assert [s.target for s in res.steps] == ["train.py", "evaluate.py", "results.ipynb"]
+    assert any("run order is inferred" in n for n in res.notes)
+
+
+def test_a_report_document_renders_after_the_script_at_the_same_stage(tmp_path):
+    res = _plan(tmp_path, {"run_analysis.R": R1, "report.Rmd": ["---", "---", "```{r}", "x <- 1", "```"]})
+    assert [s.target for s in res.steps] == ["run_analysis.R", "report.Rmd"]
+
+
+def test_numbered_scripts_run_beside_notebooks(tmp_path):
+    res = _plan(tmp_path, {"01_clean_data.py": PY1, "02_analysis.ipynb": [NB_PY], "03_figures.ipynb": [NB_PY]})
+    assert [s.target for s in res.steps] == ["01_clean_data.py", "02_analysis.ipynb", "03_figures.ipynb"]
+
+
+def test_numbered_scripts_one_directory_down_are_steps(tmp_path):
+    res = _plan(tmp_path, {"scripts/01_clean.py": PY1, "scripts/02_stats.py": PY1, "scripts/03_plots.R": R1})
+    assert [s.target for s in res.steps] == ["scripts/01_clean.py", "scripts/02_stats.py", "scripts/03_plots.R"]
+    res = _plan(tmp_path / "b", {"src/01_clean.py": PY1, "src/02_model.py": PY1})
+    assert [s.target for s in res.steps] == ["src/01_clean.py", "src/02_model.py"]
+
+
+def test_python_scripts_below_the_root_are_named_when_not_run(tmp_path):
+    res = _plan(tmp_path, {"main.py": PY1, "scripts/helper_stats.py": PY1})
+    assert [s.target for s in res.steps] == ["main.py"]
+    assert any("NOT run" in n and "scripts/helper_stats.py" in n for n in res.notes)
+
+
+def test_quarto_documents_are_named_and_their_packages_installed(tmp_path):
+    res = _plan(tmp_path, {"analysis.qmd": ["---", "---", "```{r}", "library(lme4)", "```"]})
+    assert "lme4" in res.r_packages
+    assert any("Quarto" in n and "analysis.qmd" in n for n in res.notes)
+
+
+def test_knitr_children_and_bookdown_chapters_are_not_rendered_alone(tmp_path):
+    res = _plan(tmp_path, {
+        "paper.Rmd": ["---", "---", "```{r child='sections/results.Rmd'}", "```"],
+        "sections/results.Rmd": ["y"],
+        "book/_bookdown.yml": ["x: 1"], "book/index.Rmd": ["---", "---"], "book/01-methods.Rmd": ["x"]})
+    assert [s.target for s in res.steps] == ["paper.Rmd"]
+    assert any("knitr children" in n for n in res.notes)
+    assert any("bookdown" in n and "book" in n for n in res.notes)
+
+
+def test_an_r_helper_sourced_only_by_a_document_is_not_a_step(tmp_path):
+    res = _plan(tmp_path, {"report.Rmd": ["---", "---", "```{r}", 'source("analysis_functions.R")', "```"],
+                           "analysis_functions.R": ["f <- function() 1"]})
+    assert [s.target for s in res.steps] == ["report.Rmd"]
+
+
+def test_vendored_third_party_code_is_never_a_step(tmp_path):
+    res = _plan(tmp_path, {"third_party/yolov5/train.py": PY1, "main.py": PY1})
+    assert [s.target for s in res.steps] == ["main.py"]
+
+
+def test_packages_loaded_through_a_vector_are_detected(tmp_path):
+    res = _plan(tmp_path, {"a.R": ['pkgs <- c("lme4", "emmeans")',
+                                   "invisible(lapply(pkgs, library, character.only = TRUE))",
+                                   'sapply(c("car"), require, character.only = TRUE)',
+                                   'b <- c("brms")', "for (p in b) library(p, character.only = TRUE)",
+                                   'files <- c("data.csv")', "lapply(files, read.csv)"]})
+    assert {"lme4", "emmeans", "car", "brms"} <= set(res.r_packages)
+    assert "data.csv" not in res.r_packages
+
+
+def test_an_r_script_runs_from_its_rstudio_project_folder(tmp_path):
+    res = _plan(tmp_path, {"code/analysis.Rproj": ["Version: 1.0"], "code/main.R": ['source("helpers.R")'],
+                           "code/helpers.R": ["f <- function() 1"], "run_other.R": R1})
+    by = {s.target: s for s in res.steps}
+    assert by["code/main.R"].args == {"cwd": "code"} and by["run_other.R"].args == {}
+    assert "code/helpers.R" not in by
+
+
+def test_the_artifacts_own_package_goes_on_pythonpath(tmp_path):
+    res = _plan(tmp_path, {"pyproject.toml": ["[project]", "name = 'hcistudy'"],
+                           "src/hcistudy/__init__.py": [], "scripts/run_analysis.py": ["import hcistudy"]})
+    assert res.steps[0].args == {"pythonpath": "src"}
+    assert any("PYTHONPATH" in n for n in res.notes)
+    res = _plan(tmp_path / "plain", {"main.py": PY1})
+    assert "pythonpath" not in res.steps[0].args

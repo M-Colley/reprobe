@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from ..models import Capabilities
-from .base import _R_ENV, BaseRunner, RunContext, _q
+from .base import _R_ENV, BaseRunner, RunContext, _q, env_r_prefix
 
 #: Answers getActiveDocumentContext / getSourceEditorContext / documentPath with
 #: the script's own path, then runs the script with source(). commandArgs is
@@ -40,19 +42,31 @@ class RScriptRunner(BaseRunner):
         )
 
     def build_command(self, ctx: RunContext) -> list[str]:
-        t = ctx.step.target
+        cd, t = _working_dir(ctx)
         extra = " ".join(_q(a) for a in ctx.step.argv)
         # R_LIBS_USER points at packages installed during the gated-egress phase.
         return ["bash", "-c",
-                f"mkdir -p /work/.reprobe_Rlib; {_R_ENV}Rscript {_q(t)} {extra}".rstrip()]
+                f"mkdir -p /work/.reprobe_Rlib; {_R_ENV}{env_r_prefix(ctx)}{cd}"
+                f"Rscript {_q(t)} {extra}".rstrip()]
 
     def assisted_rstudio_command(self, ctx: RunContext) -> list[str]:
         """The same run, with rstudioapi's document-context calls answered as the
         IDE would answer them: the path of this script. Nothing else changes and
         the author's file is not edited. Used only for the supplementary retry
         after the RStudio diagnosis; its result never enters the verdict."""
-        t = ctx.step.target
+        cd, t = _working_dir(ctx)
         extra = " ".join(_q(a) for a in ctx.step.argv)
         return ["bash", "-c",
-                f"mkdir -p /work/.reprobe_Rlib; {_R_ENV}"
+                f"mkdir -p /work/.reprobe_Rlib; {_R_ENV}{env_r_prefix(ctx)}{cd}"
                 f"Rscript -e '{_RSTUDIO_SHIM}' {_q(t)} {extra}".rstrip()]
+
+
+def _working_dir(ctx: RunContext) -> tuple[str, str]:
+    """(`cd ...; ` or "", the target relative to that directory). A step's
+    ``cwd`` (an RStudio project folder, see signatures.r_working_dir) must
+    contain the script; anything else runs from the repository root."""
+    t = ctx.step.target
+    wd = str((ctx.step.args or {}).get("cwd") or "").strip("/")
+    if not wd or ".." in PurePosixPath(wd).parts or not t.startswith(wd + "/"):
+        return "", t
+    return f"cd {_q('/work/' + wd)}; ", t[len(wd) + 1:]

@@ -653,6 +653,85 @@ def _r_loaded_packages(clean: str, masked: str) -> set[str]:
     return found
 
 
+_R_VEC_ASSIGN_RE = re.compile(r"(?<![\w.$@])([A-Za-z.][\w.]*)\s*(?:<-|=)\s*c\s*\(")
+_R_APPLY_RE = re.compile(r"(?<![\w.$@])(?:\w+::)?(?:lapply|sapply|vapply|walk|map)\s*\(")
+_R_FOR_IN_RE = re.compile(r"(?<![\w.])for\s*\(\s*[A-Za-z.][\w.]*\s+in\s+")
+_R_LOADERS = {"library", "require", "requireNamespace", "loadNamespace"}
+
+
+def _r_string_vector(clean: str, masked: str, open_idx: int, pairs: dict[int, int]) -> list[str]:
+    """The string literals of ``c(...)`` whose '(' is at ``open_idx``."""
+    close = pairs.get(open_idx)
+    if close is None or close - open_idx > _R_MAX_CALL_ARGS:
+        return []
+    out = []
+    for a in _split_args(clean[open_idx + 1:close]):
+        sm = _R_STRING_ARG_RE.match(a.strip())
+        if sm and re.fullmatch(_R_PKG, sm.group(2)):
+            out.append(sm.group(2))
+    return out
+
+
+def _r_indirect_packages(clean: str, masked: str) -> set[str]:
+    """Packages loaded through a character vector rather than by name — the
+    idioms research scripts use to load a list at once:
+
+        pkgs <- c("lme4", "emmeans"); invisible(lapply(pkgs, library, character.only = TRUE))
+        sapply(c("car", "psych"), require, character.only = TRUE)
+        for (p in pkgs) library(p, character.only = TRUE)
+        pacman::p_load(char = pkgs)
+
+    Only vectors of string literals count, and only when they reach a loader;
+    a vector of file names that is never loaded names no package."""
+    pairs = _paren_pairs(masked)
+    vectors: dict[str, list[str]] = {}
+    for m in _R_VEC_ASSIGN_RE.finditer(masked):
+        vals = _r_string_vector(clean, masked, m.end() - 1, pairs)
+        if vals:
+            vectors.setdefault(m.group(1), []).extend(vals)
+
+    def resolve(arg: str) -> list[str]:
+        arg = arg.strip()
+        if arg in vectors:
+            return vectors[arg]
+        cm = re.match(r"c\s*\(", arg)
+        if cm:
+            inner_open = clean.find(arg)          # locate this literal in the text
+            if inner_open >= 0:
+                return _r_string_vector(clean, masked, inner_open + cm.end() - 1, pairs)
+        return []
+
+    found: set[str] = set()
+    for m in _R_APPLY_RE.finditer(masked):
+        close = pairs.get(m.end() - 1)
+        if close is None:
+            continue
+        args = _split_args(clean[m.end():close])
+        if len(args) < 2:
+            continue
+        fun = args[1].split("=", 1)[-1].strip() if args[1].strip().startswith("FUN") else args[1].strip()
+        if fun.split("::")[-1] in _R_LOADERS:
+            found.update(resolve(args[0]))
+    char_only_load = re.search(r"character\.only\s*=\s*(?:TRUE|T)\b", masked) is not None
+    if char_only_load:
+        for m in _R_FOR_IN_RE.finditer(masked):
+            rest = clean[m.end():m.end() + 200]
+            name = re.match(r"([A-Za-z.][\w.]*)\s*\)", rest)
+            if name:
+                found.update(vectors.get(name.group(1), []))
+            elif rest.startswith("c"):
+                found.update(resolve(rest[:rest.find(")") + 1]))
+    for m in re.finditer(r"(?<![\w.])(?:pacman::)?p_load\s*\(", masked):
+        close = pairs.get(m.end() - 1)
+        if close is None:
+            continue
+        for a in _split_args(clean[m.end():close]):
+            nm = _R_NAMED_ARG_RE.match(a)
+            if nm and nm.group(1) == "char":
+                found.update(resolve(nm.group(2)))
+    return found
+
+
 def _first_arg(args: str) -> str:
     """The first top-level argument of an R argument list."""
     depth, cur = 0, []
@@ -770,6 +849,7 @@ def scan_r_packages(files) -> list[str]:
             continue
         clean, masked = _r_views(text)
         found |= _r_loaded_packages(clean, masked)
+        found |= _r_indirect_packages(clean, masked)
         found.update(_R_NS_RE.findall(masked))
         if suf in (".r", *_R_LITERATE):
             found |= _declared_install_packages(text)   # setup.R-style install lists
@@ -821,15 +901,22 @@ _STAGE_EARLY_RE = re.compile(
     r"(?:^|[_\-. ])(?:prep|prepare|preprocess|preprocessing|preproc|clean|cleaning|"
     r"load|loader|download|fetch|ingest|import|extract|setup|build_dataset)(?:[_\-. ]|$)",
     re.IGNORECASE)
+_STAGE_MODEL_RE = re.compile(
+    r"(?:^|[_\-. ])(?:train|training|fit|fitting|model|models|modelling|modeling|estimate|"
+    r"simulate|simulation)(?:[_\-. ]|$)", re.IGNORECASE)
+_STAGE_EVAL_RE = re.compile(
+    r"(?:^|[_\-. ])(?:eval|evaluate|evaluation|test|testing|validate|validation|predict|"
+    r"inference)(?:[_\-. ]|$)", re.IGNORECASE)
 _STAGE_LATE_RE = re.compile(
     r"(?:^|[_\-. ])(?:analyse|analyze|analysis|aggregate|aggregated|combine|combined|"
     r"consensus|summar(?:y|ise|ize|ised|ized)|compare|comparison|report|plot|plots|"
-    r"figure|figures|visuali[sz]e|visuali[sz]ation)(?:[_\-. ]|$)",
+    r"figure|figures|visuali[sz]e|visuali[sz]ation|results?|tables?)(?:[_\-. ]|$)",
     re.IGNORECASE)
 
 
 def _stage_rank(name: str) -> int:
-    """0 = data prep, 1 = unclassified, 2 = downstream aggregation/reporting.
+    """0 = data prep, 1 = model fitting/training, 2 = unclassified,
+    3 = evaluation, 4 = downstream aggregation/reporting.
 
     A repo whose files carry no numeric prefix and whose README does not order
     them falls back to alphabetical, which silently puts an aggregator first when
@@ -839,10 +926,14 @@ def _stage_rank(name: str) -> int:
     broken pipeline green. Ranking by name is a guess, so it ranks BELOW both the
     numeric prefix and README order — it only decides otherwise-arbitrary ties."""
     if _STAGE_LATE_RE.search(name):
-        return 2
+        return 4
+    if _STAGE_EVAL_RE.search(name):
+        return 3
     if _STAGE_EARLY_RE.search(name):
         return 0
-    return 1
+    if _STAGE_MODEL_RE.search(name):
+        return 1
+    return 2
 
 
 def _order_key(path: Path, root: Path, readme: str):
@@ -865,21 +956,22 @@ _R_SOURCE_RE = re.compile(r"""(?<![\w.])(?:sys\.)?source\s*\(\s*(?P<arg>[^)]*)\)
 _R_STR_RE = re.compile(r"""["']([^"']+)["']""")
 
 
-def _sourced_r_files(root: Path, r_scripts: list[Path]) -> set[Path]:
+def _sourced_r_files(root: Path, r_scripts: list[Path], docs: tuple[Path, ...] = ()) -> set[Path]:
     """R scripts that another script loads with ``source("…")`` (a literal path, or
     ``here::here("dir", "x.R")`` / ``file.path("dir", "x.R")``), resolved against the
     repository root and against the sourcing script's own directory. Comments and
     strings elsewhere are ignored (``_r_views``)."""
     by_path = {q.resolve(): q for q in r_scripts}
     found: set[Path] = set()
-    for p in r_scripts:
-        clean, masked = _r_views(_read_head(p))
+    for p in [*r_scripts, *docs]:                   # .Rmd/.qmd chunks source helpers too
+        text = _read_head(p) if p.suffix.lower() == ".r" else _r_literate_code(_read_head(p))
+        clean, masked = _r_views(text)
         for m in _R_SOURCE_RE.finditer(masked):
             parts = _R_STR_RE.findall(clean[m.start("arg"):m.end("arg")])
             if not parts:
                 continue
             rel_path = "/".join(parts) if len(parts) > 1 else parts[0]
-            for base in (root, p.parent):
+            for base in (root, p.parent, root / r_working_dir(p, root)):
                 try:
                     cand = (base / rel_path).resolve()
                 except (OSError, ValueError):
@@ -887,6 +979,79 @@ def _sourced_r_files(root: Path, r_scripts: list[Path]) -> set[Path]:
                 if cand in by_path and by_path[cand] != p:
                     found.add(by_path[cand])
     return found
+
+
+_KNIT_CHILD_RE = re.compile(r"""(?:\bchild\s*=\s*(?:c\s*\(\s*)?|knit_child\s*\(\s*)["']([^"']+\.[Rr]md)["']""")
+#: Directories of vendored third-party code: never the artifact's own steps.
+_THIRD_PARTY_DIRS = {"third_party", "thirdparty", "third-party", "vendor", "vendored",
+                     "external", "extern", "externals", "submodules"}
+
+
+def r_working_dir(script: Path, root: Path) -> str:
+    """Where an R script runs from: the nearest folder between it and the root
+    that holds an RStudio project (`*.Rproj`) — RStudio's working directory, and
+    so the one the author's relative paths were written against — else the
+    root. "" means the root."""
+    try:
+        rel = script.relative_to(root)
+    except ValueError:
+        return ""
+    for i in range(len(rel.parts) - 1, 0, -1):
+        d = root.joinpath(*rel.parts[:i])
+        if any(d.glob("*.Rproj")):
+            return "/".join(rel.parts[:i])
+    return ""
+
+
+_PY_PROJECT_FILES = ("pyproject.toml", "setup.py", "setup.cfg")
+
+
+def own_package_root(root: Path) -> str | None:
+    """Where the artifact's own Python package lives, if it ships one: "src" for
+    a src layout, "" for packages at the root, None when there is none. A script
+    doing `from mypkg import x` relies on `pip install -e .`; the harness never
+    runs the project's build (its backend is the artifact's code, and the install
+    phase has network), so it puts this directory on PYTHONPATH instead."""
+    if not any((root / f).is_file() for f in _PY_PROJECT_FILES):
+        return None
+
+    def has_pkg(d: Path) -> bool:
+        try:
+            return any((c / "__init__.py").is_file() for c in d.iterdir()
+                       if c.is_dir() and c.name not in ("tests", "test", "docs"))
+        except OSError:
+            return False
+    if (root / "src").is_dir() and has_pkg(root / "src"):
+        return "src"
+    return "" if has_pkg(root) else None
+
+
+def _knit_children(rmds: list[Path]) -> set[Path]:
+    """R Markdown files another document includes as a knitr child (a chunk
+    option ``child=`` or ``knit_child()``). Rendered on their own they lack the
+    parent's objects and fail — a failure that is not the artifact's."""
+    by_path = {q.resolve(): q for q in rmds}
+    out: set[Path] = set()
+    for p in rmds:
+        for m in _KNIT_CHILD_RE.finditer(_read_head(p)):
+            try:
+                cand = (p.parent / m.group(1)).resolve()
+            except (OSError, ValueError):
+                continue
+            if cand in by_path and by_path[cand] != p:
+                out.add(by_path[cand])
+    return out
+
+
+def _bookdown_dirs(rmds: list[Path]) -> set[Path]:
+    """Directories holding a bookdown book: a `_bookdown.yml`, or an index.Rmd
+    whose YAML names a bookdown output. Its chapters are rendered together by
+    bookdown::render_book, never one by one."""
+    dirs = {p.parent for p in rmds if (p.parent / "_bookdown.yml").is_file()}
+    for p in rmds:
+        if p.name.lower() == "index.rmd" and "bookdown::" in _read_head(p)[:4000]:
+            dirs.add(p.parent)
+    return dirs
 
 
 def _unity_projects(root: Path) -> list[Path]:
@@ -938,30 +1103,36 @@ def scan(src_dir: str | Path) -> DetectResult:
     if len(files) >= _MAX_SCAN_FILES:
         notes.append(f"file scan stopped at {_MAX_SCAN_FILES} files; detection is best-effort on this deposit")
 
-    # Say so when the run order is a pure guess. Multi-step pipelines are order-
-    # sensitive in a way that does not announce itself: a downstream step run too
-    # early silently consumes the committed outputs of steps that have not re-run,
-    # so it can pass on stale data. A reviewer must be told the order was inferred.
-    ordered = notebooks + rmds
-    if len(ordered) > 1 and not any(_NUM_RE.search(p.name) for p in ordered) \
-            and not any(p.name in readme for p in ordered):
-        notes.append(
-            "run order is inferred, not declared: no numeric filename prefixes and the README does not "
-            "reference these files by name. Names that look downstream (analyse/combine/summary/"
-            "compare/plot) were moved last; everything else is alphabetical. If the real order differs, "
-            "declare `run: steps:` in autoui-repro.yml — a mis-ordered aggregation step can read stale "
-            "committed outputs and pass.")
+    def third_party(p: Path) -> bool:
+        return any(part.lower() in _THIRD_PARTY_DIRS for part in p.relative_to(root).parts[:-1])
 
-    # R helpers that other scripts source() are not steps of their own (running them
-    # standalone executes them twice, and adds trivial "passes"); nor is the R/ of
-    # an R package, whose functions are loaded, not run.
-    sourced = _sourced_r_files(root, r_scripts)
+    def depth(p: Path) -> int:
+        return len(p.relative_to(root).parts)
+
+    def numbered(p: Path) -> bool:
+        return _NUM_RE.search(p.name) is not None
+
+    qmds = [p for p in files if p.suffix.lower() == ".qmd"]
+    vendored = [p for p in notebooks + rmds + r_scripts + py_files if third_party(p)]
+    notebooks = [p for p in notebooks if not third_party(p)]
+    # knitr children and bookdown chapters are rendered as part of their parent
+    children = _knit_children(rmds)
+    books = _bookdown_dirs(rmds)
+    chapters = [p for p in rmds if p.parent in books]
+    rmds = [p for p in rmds if not third_party(p) and p not in children and p.parent not in books]
+
+    # R helpers that other scripts (or R Markdown / Quarto chunks) source() are
+    # not steps of their own (running them standalone executes them twice, and
+    # adds trivial "passes"); nor is the R/ of an R package, whose functions are
+    # loaded, not run.
+    sourced = _sourced_r_files(root, r_scripts, tuple(rmds + qmds + chapters + list(children)))
     is_pkg = (root / "DESCRIPTION").is_file()
-    r_candidates = [p for p in r_scripts if p not in sourced
+    r_candidates = [p for p in r_scripts if p not in sourced and not third_party(p)
                     and not (is_pkg and p.relative_to(root).parts[0] == "R")]
     # Python files inside a package (a directory with __init__.py) are modules: run
     # as a script, `from . import x` fails with an ImportError blamed on the artifact.
-    py_candidates = [p for p in py_files if not (p.parent / "__init__.py").is_file()]
+    py_candidates = [p for p in py_files if not (p.parent / "__init__.py").is_file()
+                     and not third_party(p)]
 
     planned: list[tuple[Path, str]] = []          # (path, runner), ordered below
     unscheduled: dict[str, list[str]] = {}
@@ -972,52 +1143,109 @@ def scan(src_dir: str | Path) -> DetectResult:
         types.append("rmarkdown")
         planned += [(rmd, "rmarkdown") for rmd in rmds]
 
-    # R scripts: entry-named scripts always run; the full set only when no
-    # notebooks/Rmd drive the analysis.
+    # A numbered script is a step of a pipeline wherever the rest of it lives:
+    # `01_clean_data.py` before `02_analysis.ipynb` is not optional preparation,
+    # and an entry-named `analysis_plots.R` does not replace `01_prep.R`.
+    # (One directory deep at most: numbered files further down are fixtures.)
+    # R scripts: entry-named and numbered scripts always run; the full set only
+    # when nothing else is known to drive the analysis.
     if r_scripts:
         types.append("r")
         entry_r = [p for p in r_candidates if _ENTRY_R_RE.match(p.stem) and _entry_shallow(p, root)]
-        chosen = entry_r if (notebooks or rmds or entry_r) else r_candidates
+        numbered_r = [p for p in r_candidates if numbered(p) and depth(p) <= 2]
+        # numbered scripts are ADDED to what runs; they never stand in for the rest
+        driven = notebooks or rmds or entry_r
+        chosen = list(dict.fromkeys(entry_r + numbered_r)) if driven else r_candidates
         planned += [(p, "r") for p in chosen]
         unscheduled["R"] = [rel(p) for p in r_candidates if p not in chosen]
         if sourced:
-            notes.append(f"{len(sourced)} R file(s) are source()d by other scripts and run as part of "
-                         "them, not as steps of their own: " + ", ".join(sorted(rel(p) for p in sourced)[:8]))
+            notes.append(f"{len(sourced)} R file(s) are source()d by other scripts or documents and "
+                         "run as part of them, not as steps of their own: "
+                         + ", ".join(sorted(rel(p) for p in sourced)[:8]))
 
-    # Python scripts: entry-named scripts always run; otherwise notebooks are
-    # assumed to be the entry point and plain scripts are noted, not run.
+    # Python scripts: entry-named and numbered scripts always run; otherwise the
+    # top-level scripts, unless notebooks drive the analysis.
     if py_files:
         entry = [p for p in py_candidates
                  if p.name in _ENTRY_PY or (_entry_shallow(p, root) and _ENTRY_PY_RE.match(p.name))]
-        top = [p for p in py_candidates if len(p.relative_to(root).parts) == 1]
-        chosen = entry if (notebooks or entry) else top
+        numbered_py = [p for p in py_candidates if numbered(p) and depth(p) <= 2]
+        top = [p for p in py_candidates if depth(p) == 1]
+        driven = notebooks or entry
+        chosen = list(dict.fromkeys((entry if driven else top) + numbered_py))
         if chosen or py_candidates:
             types.append("python")
         planned += [(p, "python") for p in chosen]
-        if not entry and not notebooks and len(top) > 3:
+        if not driven and len(top) > 3:
             notes.append("multiple top-level .py scripts and no clear entry point; ordering is best-effort")
-        unscheduled["Python"] = [rel(p) for p in top if p not in chosen]
+        # Scripts one directory down are named too: `scripts/01_x.py` and friends
+        # were dropped without a word when the plan came from elsewhere.
+        unscheduled["Python"] = [rel(p) for p in py_candidates if p not in chosen and depth(p) <= 2]
 
-    # ONE order across languages: `01_preprocess.py` runs before `02_model.R`. Files
-    # with no step number keep their former group order (notebooks, R Markdown, R,
-    # Python) as a tie-break, after README order.
-    group = {"jupyter": 0, "rmarkdown": 1, "r": 2, "python": 3}
-    planned.sort(key=lambda pr: (_order_key(pr[0], root, readme)[:2], group[pr[1]],
-                                 _order_key(pr[0], root, readme)[2:]))
+    # ONE order across languages: `01_preprocess.py` runs before `02_model.R`.
+    # Without step numbers, README order, then the stage a name suggests (prep,
+    # model, other, evaluation, reporting) decide — before the language does:
+    # grouping by runner first ran `results.ipynb` before `train.py`. At equal
+    # stage an R Markdown document goes last: it renders what the scripts made.
+    group = {"jupyter": 0, "python": 1, "r": 2, "rmarkdown": 3}
+
+    def plan_key(pr: tuple[Path, str]):
+        k = _order_key(pr[0], root, readme)
+        return (k[0], k[1], k[2], group[pr[1]], k[3])
+
+    planned.sort(key=plan_key)
+    pkg_root = own_package_root(root)
     for path, runner in planned:
-        steps.append(RunStep(runner=runner, target=rel(path), kind=runner,
-                             args={"language": notebook_language(path)} if runner == "jupyter" else {}))
+        args: dict = {}
+        if runner == "jupyter":
+            args["language"] = notebook_language(path)
+        if pkg_root is not None and (runner == "python" or args.get("language") == "python"):
+            args["pythonpath"] = pkg_root
+        elif runner == "r" and (wd := r_working_dir(path, root)):
+            args["cwd"] = wd
+        steps.append(RunStep(runner=runner, target=rel(path), kind=runner, args=args))
+
+    # Say so when the run order is a pure guess. Multi-step pipelines are order-
+    # sensitive in a way that does not announce itself: a downstream step run too
+    # early silently consumes the committed outputs of steps that have not re-run,
+    # so it can pass on stale data. A reviewer must be told the order was inferred.
+    if len(planned) > 1 and not any(numbered(p) for p, _ in planned) \
+            and not any(p.name in readme for p, _ in planned):
+        notes.append(
+            "run order is inferred, not declared: no numeric filename prefixes and the README does not "
+            "reference these files by name. The order follows what the names suggest (data "
+            "preparation, model fitting, evaluation, then analysis/plots/reports last). If the real "
+            "order differs, declare `run: steps:` in autoui-repro.yml — a mis-ordered aggregation "
+            "step can read stale committed outputs and pass.")
 
     # Never drop a script silently: a verdict of `runs` with 2 of 3 scripts never
     # executed would be read as "the analysis runs".
     for lang, names in unscheduled.items():
         if names:
             why = ("notebooks/R Markdown assumed to drive the analysis" if (notebooks or rmds)
-                   else "an entry-point script was found and is assumed to run the rest")
+                   else "neither entry-named nor numbered, and other scripts were found to run the "
+                        "analysis")
             notes.append(f"{len(names)} {lang} script(s) present but NOT run ({why}): "
                          + ", ".join(names[:8]) + (" …" if len(names) > 8 else "")
                          + ". If they are part of the analysis, declare `run: steps:` in "
                            "autoui-repro.yml")
+    if pkg_root is not None and any(s.args.get("pythonpath") is not None for s in steps):
+        notes.append(f"the artifact's own Python package ({pkg_root or 'repository root'}) was put on "
+                     "PYTHONPATH, as `pip install -e .` would make it importable — without building "
+                     "or installing the project")
+    if qmds:
+        notes.append(f"{len(qmds)} Quarto document(s) present but NOT run (reprobe has no Quarto "
+                     "renderer; their R packages were still installed): "
+                     + ", ".join(rel(p) for p in qmds[:8]))
+    if children:
+        notes.append(f"{len(children)} R Markdown file(s) are knitr children of another document and "
+                     "render as part of it: " + ", ".join(sorted(rel(p) for p in children)[:8]))
+    if books:
+        notes.append("bookdown book(s) in " + ", ".join(sorted(rel(d) or "." for d in books))
+                     + " NOT rendered: chapters only render together, through "
+                       "bookdown::render_book, which reprobe does not run")
+    if vendored:
+        notes.append(f"{len(vendored)} file(s) under third-party directories were not considered as "
+                     "steps (vendored code is not the artifact's own)")
 
     for proj in unity:
         types.append("unity")
@@ -1043,7 +1271,7 @@ def scan(src_dir: str | Path) -> DetectResult:
             notes.append("no runnable analyses detected by heuristic")
 
     r_pkg_files = [p for p in files
-                   if p.suffix.lower() in (".r", ".rmd", ".ipynb") or p.name == "DESCRIPTION"]
+                   if p.suffix.lower() in (".r", *_R_LITERATE, ".ipynb") or p.name == "DESCRIPTION"]
     r_packages = scan_r_packages(r_pkg_files)
     py_packages = scan_py_packages(root, files)
 
