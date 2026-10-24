@@ -484,15 +484,13 @@ def test_install_failures_are_attributed_to_whoever_asked(tmp_path, monkeypatch)
     """One exit code for the whole install chain could not say whether the
     artifact's requirements.txt failed or a package reprobe guessed did."""
     from reprobe.models import EnvPlan, RawRunOutput, Report
+    results = iter([("ERROR: No matching distribution found for itertools\n", 1),
+                    ("pandas==2.2.0\n", 0)])
 
     def install(spec, log_path):
-        script = spec.command[-1]
-        assert "[reprobe-install] begin 0 author-declared" in script
-        Path(log_path).write_text(
-            "[reprobe-install] begin 0 author-declared\nERROR: No matching distribution found for itertools\n"
-            "[reprobe-install] failed 0 author-declared exit 1\n"
-            "[reprobe-install] begin 1 harness-record\npandas==2.2.0\n", encoding="utf-8")
-        return RawRunOutput(exit_code=1, duration_s=1.0, image=spec.image, log_path=str(log_path))
+        text, code = next(results)
+        Path(log_path).write_text(text, encoding="utf-8")
+        return RawRunOutput(exit_code=code, duration_s=1.0, image=spec.image, log_path=str(log_path))
 
     _simulate(monkeypatch, run_phase=None, install_phase=install)
     o = Orchestrator(workroot=tmp_path)
@@ -600,44 +598,6 @@ def test_the_operators_own_data_flag_may_still_name_a_local_directory(tmp_path):
         str(art), use_llm=False, dry_run=True, data_sources=[f"{deposit}::dataset"])
     rec = report.source["data_sources"][0]
     assert rec["status"] == "ok" and rec["declared_by"] == "operator"
-
-
-def test_the_install_script_attributes_failures_and_keeps_going_under_real_bash(tmp_path):
-    """`_attributed_script` leans on bash semantics: `set -e` in the parent, a
-    failing subshell inside an `||` list, and the first failing exit code surviving
-    to the end. Run it for real instead of trusting a reading of it."""
-    import shutil
-    import subprocess
-
-    if shutil.which("bash") is None:
-        pytest.skip("needs bash")
-    items = [(0, "echo declared-ok", "author-declared"),
-             (1, "echo declared-bad && exit 7", "author-declared"),
-             (2, "echo detected-after", "harness-detected"),
-             (3, "echo record-bad; exit 3", "harness-record")]
-    script = "set -e; " + orch_mod._attributed_script(items)
-    log = tmp_path / "install-python.log"
-    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-    log.write_text(r.stdout + r.stderr, encoding="utf-8")
-
-    assert "detected-after" in r.stdout, "a failing command stopped the commands after it"
-    assert r.returncode == 7, "the first failure's exit code must be the phase's"
-    failures = orch_mod._install_failures(log, items)
-    assert [(f["index"], f["origin"], f["exit_code"]) for f in failures] == \
-        [(1, "author-declared", 7), (3, "harness-record", 3)]
-    assert failures[0]["command"] == "echo declared-bad && exit 7"
-
-
-def test_a_fully_successful_install_script_exits_zero(tmp_path):
-    import shutil
-    import subprocess
-
-    if shutil.which("bash") is None:
-        pytest.skip("needs bash")
-    items = [(0, "true", "author-declared"), (1, "echo x", "harness-detected")]
-    r = subprocess.run(["bash", "-c", "set -e; " + orch_mod._attributed_script(items)],
-                       capture_output=True, text=True)
-    assert r.returncode == 0 and "failed" not in r.stdout
 
 
 @pytest.mark.parametrize("target", ["/usr/lib/python3/this.py", "../outside.py", "missing.py",
@@ -779,7 +739,7 @@ def _fake_containers(monkeypatch, step_phase):
     def fake(spec, limits, log_path, **kw):
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         specs.append(spec)
-        if "[reprobe-install]" in spec.command[-1]:
+        if "reprobe-home" in spec.command[-1]:              # the install phase's own HOME
             Path(log_path).write_text("installed\n", encoding="utf-8")
             return RawRunOutput(exit_code=0, duration_s=0.1, image=spec.image, log_path=str(log_path))
         return step_phase(spec, log_path)
@@ -838,5 +798,5 @@ def test_an_r_install_never_runs_in_the_generic_python_fallback(tmp_path, monkey
         return p.model_copy(update={"env_provenance": "fallback-generic", "image": "python:3.13-slim"})
     monkeypatch.setattr(orch_mod, "plan_env", fallback)
     o.run(str(art), use_llm=False)
-    r_installs = [s for s in specs if "[reprobe-install]" in s.command[-1] and "Rscript" in s.command[-1]]
+    r_installs = [s for s in specs if "reprobe-home" in s.command[-1] and "Rscript" in s.command[-1]]
     assert r_installs and all(s.image != "python:3.13-slim" for s in r_installs)

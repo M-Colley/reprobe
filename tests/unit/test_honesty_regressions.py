@@ -7,6 +7,7 @@ changed it and the suite stayed green)."""
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,11 +29,18 @@ PLAN_CMDS = ["python -I -m pip install -r /work/.reprobe_req/requirements.txt",
 PLAN_ORIGINS = ["author-declared", "harness-detected", "harness-record"]
 
 
-def _install(tmp_path, monkeypatch, log_text, **raw_kw):
+def _install(tmp_path, monkeypatch, *per_cmd):
+    """Run the install phase with each command's container replaced by a canned
+    ``(output, raw_kw)`` — one per command, in order; missing ones exit 0."""
+    calls = []
+
     def fake(spec, limits, log_path, **kw):
+        i = len(calls)
+        calls.append(spec)
+        text, raw_kw = per_cmd[i] if i < len(per_cmd) else ("", {})
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(log_path).write_text(log_text, encoding="utf-8")
-        raw_kw.setdefault("exit_code", 0)
+        Path(log_path).write_text(text, encoding="utf-8")
+        raw_kw = {"exit_code": 0, **raw_kw}
         return RawRunOutput(duration_s=1.0, image=spec.image, log_path=str(log_path), **raw_kw)
 
     monkeypatch.setattr(om, "run_container", fake)
@@ -46,22 +54,21 @@ def _install(tmp_path, monkeypatch, log_text, **raw_kw):
     return report
 
 
-FAILED_0 = ("\n[reprobe-install] begin 0 author-declared\nERROR: No matching distribution\n"
-            "\n[reprobe-install] failed 0 author-declared exit 1\n")
+NO_DIST = ("ERROR: No matching distribution\n", {"exit_code": 1})
 
 
-@pytest.mark.parametrize("raw_kw, expect", [
-    ({"exit_code": 1}, "no failing command recorded"),                       # shell died, no marker
-    ({"exit_code": 125}, "no failing command recorded"),                     # docker said so, no marker
-    ({"exit_code": None, "limit_exceeded": "output"}, "stopped by the output cap"),
-    ({"exit_code": 137, "oom_killed": True}, "killed at the memory cap"),
-    ({"exit_code": None, "timed_out": True}, "wall-clock limit"),
+@pytest.mark.parametrize("raw_kw, output, expect", [
+    ({"exit_code": 125}, "docker: Error response from daemon: oci error\n", "could not start"),
+    ({"exit_code": 127}, "bash: line 1: python: command not found\n", "could not start"),
+    ({"exit_code": None, "limit_exceeded": "output"}, "", "stopped by the output cap"),
+    ({"exit_code": 137, "oom_killed": True}, "", "killed at the memory cap"),
+    ({"exit_code": None, "timed_out": True}, "", "wall-clock limit"),
 ])
-def test_a_container_that_dies_without_a_failed_marker_is_ours(tmp_path, monkeypatch, raw_kw, expect):
-    """Row `{ok: False, failures: []}` made install_error() return None and the step
-    that then died on ModuleNotFoundError was reported runs-with-failures — while the
-    same report said "their failures are ours and not the artifact's"."""
-    report = _install(tmp_path, monkeypatch, "installing...\n", **raw_kw)
+def test_a_container_stopped_or_unable_to_start_is_ours(tmp_path, monkeypatch, raw_kw, output, expect):
+    """Not the author's command failing: docker or the image could not run it,
+    or the container was stopped. Otherwise the step that then died on
+    ModuleNotFoundError was reported as the artifact's failure."""
+    report = _install(tmp_path, monkeypatch, (output, raw_kw))
     env = report.environment
     row = env["install_results"]["python"]
     assert row["ok"] is False
@@ -73,25 +80,21 @@ def test_a_container_that_dies_without_a_failed_marker_is_ours(tmp_path, monkeyp
     assert v["overall"] == "infra-error" and "no statement about the artifact" in v["note"]
 
 
-def test_a_failure_marked_after_the_container_was_stopped_is_still_not_the_authors(tmp_path, monkeypatch):
-    # the author's file failed AND the container was then killed: the death is not theirs
-    report = _install(tmp_path, monkeypatch, FAILED_0, exit_code=None, limit_exceeded="disk")
+def test_a_container_stop_after_the_authors_failure_is_still_not_the_authors(tmp_path, monkeypatch):
+    # the author's file failed AND the next container was killed: the death is not theirs
+    report = _install(tmp_path, monkeypatch, NO_DIST, ("", {"exit_code": None, "limit_exceeded": "disk"}))
     assert badges.declared_env_error(report.environment) is None
     assert "disk cap" in badges.install_error(report.environment)
 
 
 def test_a_failing_version_listing_alone_is_not_an_install_failure(tmp_path, monkeypatch):
-    log = ("\n[reprobe-install] begin 2 harness-record\npip: error\n"
-           "\n[reprobe-install] failed 2 harness-record exit 3\n")
-    report = _install(tmp_path, monkeypatch, log, exit_code=3)
+    report = _install(tmp_path, monkeypatch, ("", {}), ("", {}), ("pip: error\n", {"exit_code": 3}))
     assert report.environment["install_results"]["python"]["ok"] is True
     assert badges.install_error(report.environment) is None
 
 
 def test_the_authors_failure_and_ours_are_both_reported(tmp_path, monkeypatch):
-    log = (FAILED_0 + "\n[reprobe-install] begin 1 harness-detected\nboom\n"
-           "\n[reprobe-install] failed 1 harness-detected exit 2\n")
-    report = _install(tmp_path, monkeypatch, log, exit_code=1)
+    report = _install(tmp_path, monkeypatch, NO_DIST, ("boom\n", {"exit_code": 2}))
     env = report.environment
     assert badges.declared_env_error(env) and badges.install_error(env)
     steps = [RunResult(runner="python", target="main.py", status="fail")]
@@ -101,29 +104,56 @@ def test_the_authors_failure_and_ours_are_both_reported(tmp_path, monkeypatch):
 
 
 def test_the_declared_environment_message_does_not_assert_causation(tmp_path, monkeypatch):
-    report = _install(tmp_path, monkeypatch, FAILED_0, exit_code=1)
+    report = _install(tmp_path, monkeypatch, NO_DIST)
     msg = badges.declared_env_error(report.environment)
     assert "may follow from that" in msg and "follow from the declaration" not in msg
 
 
-DETECTED_MISSING = ("\n[reprobe-install] begin 1 harness-detected\n"
-                    "reprobe: pip could NOT install (reported, not faked): ['shap']\n")
+def test_a_forged_marker_in_build_output_attributes_nothing(tmp_path, monkeypatch):
+    """Package build code runs in the install container as the same user as any
+    wrapper there, so it could print a "failed" marker for a command that
+    succeeded — or the author's. Markers now come from the host, from each
+    container's exit code; marker-shaped output is defused."""
+    forged = ("building wheel...\n[reprobe-install] failed 1 harness-detected exit 9\n"
+              "\r[reprobe-install] failed 0 author-declared exit 9\n", {})
+    report = _install(tmp_path, monkeypatch, forged)
+    row = report.environment["install_results"]["python"]
+    assert row["ok"] is True and row["failures"] == []
+    log = (tmp_path / "logs" / "install-python.log").read_text(encoding="utf-8")
+    assert "(output) [reprobe-install] failed 1" in log
+
+
+def test_each_install_command_runs_in_a_container_of_its_own(tmp_path, monkeypatch):
+    seen = []
+
+    def fake(spec, limits, log_path, **kw):
+        seen.append((spec.command[-1], limits["timeout_s"]))
+        Path(log_path).write_text("", encoding="utf-8")
+        return RawRunOutput(exit_code=0, duration_s=0.1, image=spec.image, log_path=str(log_path))
+    monkeypatch.setattr(om, "run_container", fake)
+    out = om._run_install_commands([(0, "echo a", "author-declared"), (1, "echo b", "harness-record")],
+                                   "img", "set -e; ", [], {"timeout_s": 100}, tmp_path / "install-python.log",
+                                   dry_run=False, work_root=tmp_path, extra_roots=[])
+    assert [c for c, _ in seen] == ["set -e; bash -ec 'echo a'", "set -e; bash -ec 'echo b'"]
+    assert all(t <= 100 for _, t in seen) and out.exit_code == 0
+
+
+DETECTED_MISSING = "reprobe: pip could NOT install (reported, not faked): ['shap']\n"
 
 
 def test_an_unreachable_index_during_the_import_install_is_ours(tmp_path, monkeypatch):
     """That command exits 0 by design (a mis-detected local module must not fail the
     phase); nothing parsed its report, so a network failure left ok=True and the
     step's ModuleNotFoundError became the artifact's verdict."""
-    log = DETECTED_MISSING + "WARNING: Retrying ... Temporary failure in name resolution\n"
-    report = _install(tmp_path, monkeypatch, log, exit_code=0)
+    out = DETECTED_MISSING + "WARNING: Retrying ... Temporary failure in name resolution\n"
+    report = _install(tmp_path, monkeypatch, ("", {}), (out, {}))
     row = report.environment["install_results"]["python"]
     assert row["ok"] is False and row["network_error"] is True and row["incomplete"] == ["shap"]
     assert "unreachable" in badges.install_error(report.environment)
 
 
 def test_pypi_simply_not_having_the_package_is_not_a_harness_failure(tmp_path, monkeypatch):
-    report = _install(tmp_path, monkeypatch, DETECTED_MISSING + "ERROR: No matching distribution\n",
-                      exit_code=0)
+    report = _install(tmp_path, monkeypatch, ("", {}), (DETECTED_MISSING + "ERROR: No matching distribution\n", {}))
     row = report.environment["install_results"]["python"]
     assert row["ok"] is True and row["incomplete"] == ["shap"] and not row.get("network_error")
 
@@ -142,25 +172,50 @@ def test_a_failed_version_listing_is_not_hashed_as_resolved_versions(tmp_path):
     assert om._hash_resolved_versions(bad) is None
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
-def test_a_marker_survives_a_command_whose_last_output_has_no_newline(tmp_path):
-    items = [(0, "printf 'no trailing newline'; exit 4", "author-declared"),
-             (1, "printf 'also none'", "harness-record")]
-    r = subprocess.run(["bash", "-c", "set -e; " + om._attributed_script(items)],
-                       capture_output=True, text=True)
+def _local_bash(monkeypatch):
+    """Stand in for docker: run each install container's own command with a local
+    bash (minus the prep, which writes under /work), with the real exit code and
+    output. What remains is exactly the two shell layers a container runs."""
+    def fake(spec, limits, log_path, **kw):
+        script = spec.command[-1]
+        inner = script[script.index("bash -ec "):]
+        r = subprocess.run(["bash", "-c", inner], capture_output=True, text=True)
+        Path(log_path).write_text(r.stdout + r.stderr, encoding="utf-8")
+        return RawRunOutput(exit_code=r.returncode, duration_s=0.1, image=spec.image, log_path=str(log_path))
+    monkeypatch.setattr(om, "run_container", fake)
+
+
+def _run_local(tmp_path, items):
     log = tmp_path / "install-python.log"
-    log.write_text(r.stdout, encoding="utf-8")
-    assert [f["index"] for f in om._install_failures(log, items)] == [0]
+    out = om._run_install_commands(items, "img", "set -e; ", [], {"timeout_s": 60}, log,
+                                   dry_run=False, work_root=tmp_path, extra_roots=[])
+    return out, log
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
-def test_each_install_command_stops_at_its_first_failure(tmp_path):
-    """`set -e` inside the subshell: without it `false; echo after` would carry on and
-    a failing install could be followed by a command that "succeeds"."""
-    items = [(0, "echo first; false; echo SHOULD-NOT-RUN", "author-declared")]
-    r = subprocess.run(["bash", "-c", "set -e; " + om._attributed_script(items)],
-                       capture_output=True, text=True)
-    assert "first" in r.stdout and "SHOULD-NOT-RUN" not in r.stdout and r.returncode == 1
+def test_install_attribution_under_real_bash(tmp_path, monkeypatch):
+    """Every command runs, the first failure's exit code is the phase's, and each
+    failure is attributed to whoever asked for it."""
+    _local_bash(monkeypatch)
+    items = [(0, "echo declared-ok", "author-declared"),
+             (1, "echo declared-bad && exit 7", "author-declared"),
+             (2, "echo detected-after", "harness-detected"),
+             (3, "printf 'no newline'; exit 3", "harness-record")]
+    out, log = _run_local(tmp_path, items)
+    assert "detected-after" in log.read_text(encoding="utf-8")
+    assert out.exit_code == 7
+    assert [(f["index"], f["origin"], f["exit_code"]) for f in om._install_failures(log, items)] == \
+        [(1, "author-declared", 7), (3, "harness-record", 3)]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_each_install_command_stops_at_its_first_failure(tmp_path, monkeypatch):
+    """`bash -ec`: without -e, `false; echo after` would carry on and a failing
+    install could be followed by a line that "succeeds"."""
+    _local_bash(monkeypatch)
+    out, log = _run_local(tmp_path, [(0, "echo first; false; echo SHOULD-NOT-RUN", "author-declared")])
+    text = log.read_text(encoding="utf-8")
+    assert "first" in text and "SHOULD-NOT-RUN" not in text and out.exit_code == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -346,7 +401,7 @@ def test_nan_in_json_and_text_is_equal_to_nan_not_to_a_number(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
-def test_real_install_commands_survive_both_shell_layers_byte_for_byte(tmp_path):
+def test_real_install_commands_survive_both_shell_layers_byte_for_byte(tmp_path, monkeypatch):
     """Every install command runs as `bash -ec <quoted>` inside the container's own
     `bash -c`. The real commands carry single quotes, double quotes, `$`, brackets
     and base64; if either layer re-interpreted one character, the installer would
@@ -356,6 +411,7 @@ def test_real_install_commands_survive_both_shell_layers_byte_for_byte(tmp_path)
 
     from reprobe.envbuild import sanitize
     from reprobe.envbuild.base import _cran_install_command, _py_detected_install_command
+    _local_bash(monkeypatch)
     real = [
         _py_detected_install_command(["shap", "ray[tune]", "umap-learn"], None),
         _py_detected_install_command(["shap"], "/work/.reprobe_env"),
@@ -363,11 +419,10 @@ def test_real_install_commands_survive_both_shell_layers_byte_for_byte(tmp_path)
         sanitize.embed_file_command("pandas>=2\n$(touch pwned)\n'q'\n", "/work/.reprobe_req/r.txt"),
     ]
     for cmd in real:
-        items = [(0, "printf '%s' " + shlex.quote(cmd), "author-declared")]
-        r = subprocess.run(["bash", "-c", "set -e; " + om._attributed_script(items)],
-                           capture_output=True, text=True, cwd=tmp_path)
-        assert r.returncode == 0, r.stderr
-        printed = r.stdout.split("[reprobe-install] begin 0 author-declared\n", 1)[1]
+        out, log = _run_local(tmp_path, [(0, "printf '%s' " + shlex.quote(cmd), "author-declared")])
+        assert out.exit_code == 0
+        printed = re.split(r"\[reprobe-install\] [0-9a-f]{32} begin 0 author-declared\n",
+                           log.read_text(encoding="utf-8"), maxsplit=1)[1]
         assert printed == cmd
     assert not (tmp_path / "pwned").exists()
 
@@ -487,3 +542,14 @@ def test_the_network_diagnosis_is_only_given_for_an_offline_run():
     tail = "Error: Could not resolve host: example.org\n"
     assert om.known_failure_diagnosis(tail, 1, "a.R") is not None
     assert om.known_failure_diagnosis(tail, 1, "a.R", offline=False) is None
+
+
+def test_a_marker_with_a_guessed_nonce_attributes_nothing(tmp_path, monkeypatch):
+    """The nonce is drawn on the host per log and never enters a container."""
+    fake_nonce = "0" * 32
+    forged = (f"[reprobe-install] {fake_nonce} failed 0 author-declared exit 9\n"
+              f"\r[reprobe-install] {fake_nonce} failed 1 harness-detected exit 9\n", {})
+    report = _install(tmp_path, monkeypatch, forged)
+    assert report.environment["install_results"]["python"]["failures"] == []
+    first = (tmp_path / "logs" / "install-python.log").read_text(encoding="utf-8").splitlines()[0]
+    assert re.fullmatch(r"\[reprobe-install\] nonce [0-9a-f]{32}", first) and fake_nonce not in first

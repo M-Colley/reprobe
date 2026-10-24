@@ -342,6 +342,21 @@ All ten claims reproduced against the real detector and planner first.
   the root has none, and its presence stops the false "declares NO dependency
   manifest" finding.
 
+### Install attribution the build code cannot forge
+
+- **Each install command runs in a container of its own, and the host records
+  who asked for it and how it exited.** Attribution used to be printed by a
+  wrapper inside one shared container, where third-party package build code runs
+  as the same user — it could print a "failed" line for any command, and a nonce
+  there would have been readable from the wrapper's command line or memory. Now
+  the markers are written by the host from each container's exit code (the one
+  channel that code cannot write), bound to a random per-log nonce that never
+  enters a container (the log directory is not mounted), and marker-shaped
+  output is defused besides. A container docker could not start, or one where
+  bash could not find the installer, is the harness's failure, not the command's.
+  The phase keeps one shared wall-clock budget. (This was listed under Known
+  limits; it is no longer one.)
+
 ### Known limits
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:
@@ -353,10 +368,6 @@ All ten claims reproduced against the real detector and planner first.
   unpullable — `MANIFEST_UNKNOWN`, its per-platform manifests deleted from GHCR —
   so `2026.5` was built by the new `build-base-images` workflow, which publishes
   one plain manifest per tag and refuses to overwrite a tag that exists.)
-- **Install-attribution markers can be forged** by output from third-party build
-  code running in the same container (a nonce would be readable from the
-  container's own command line). The worst case is an author's failure mislabelled
-  as the harness's — both are human-review verdicts.
 - Third-party package build code (an sdist's `setup.py`, a conda post-link script)
   from the allowed indexes still runs with network; closing that needs an
   allow-listing egress proxy.

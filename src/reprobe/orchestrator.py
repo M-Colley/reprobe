@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import stat
@@ -21,7 +22,7 @@ from . import __version__
 from .config import Config, load_config
 from .detect import detect as detect_artifacts
 from .detect.manifest import declared_data_sources
-from .docker_exec import DAEMON_DOWN_ERRORS, reap_orphans, run_container
+from .docker_exec import DAEMON_DOWN_ERRORS, docker_cli_failed, reap_orphans, run_container
 from .docker_exec import image_digest as _image_digest
 from .envbuild import plan as plan_env
 from .envbuild.base import INSTALL_HOME, describe_install_command
@@ -37,6 +38,7 @@ from .models import (
     FetchResult,
     Mount,
     Pin,
+    RawRunOutput,
     Report,
     RunResult,
 )
@@ -44,7 +46,7 @@ from .report import badges as badge_rules
 from .report import html as html_report
 from .report import markdown as md_report
 from .runners import RunContext, load_runners, runner_for
-from .runners.base import snapshot
+from .runners.base import _launcher_failed, snapshot
 
 
 def _slug(ref: str) -> str:
@@ -662,14 +664,10 @@ class Orchestrator:
             # (no Rscript, and the failure would read as the author's lockfile).
             image = (env_plan.image if env_plan.env_provenance == "fallback-generic" and key == "python"
                      else self.config.base_image(key) or env_plan.image)
-            spec = ContainerSpec(image=image, command=["bash", "-c", prep + _attributed_script(items)],
-                                 workdir="/work",
-                                 mounts=[Mount(source=rundir.as_posix(), target="/work", read_only=False),
-                                         *cache_mounts],
-                                 network="egress")
+            mounts = [Mount(source=rundir.as_posix(), target="/work", read_only=False), *cache_mounts]
             log_path = logdir / f"install-{key}.log"
-            raw = run_container(spec, relaxed, log_path, allow_egress=True, dry_run=dry_run,
-                                work_root=rundir, extra_roots=cache_roots)
+            raw = _run_install_commands(items, image, prep, mounts, relaxed, log_path,
+                                        dry_run=dry_run, work_root=rundir, extra_roots=cache_roots)
             if raw.dry_run:
                 install_results[key] = {"ok": True, "dry_run": True, "exit_code": None}
                 continue
@@ -1505,31 +1503,119 @@ def _env_section(p: EnvPlan) -> dict[str, Any]:
 
 
 _MARK = "[reprobe-install]"
-_MARK_RE = re.compile(r"^\[reprobe-install\] (begin|failed) (\d+) (\S+)(?: exit (\d+))?\s*$", re.M)
+_MARK_RE = re.compile(r"^\[reprobe-install\] (?:(?P<nonce>[0-9a-f]{32}) )?(begin|failed) (\d+) (\S+)"
+                      r"(?: exit (\d+))?\s*$", re.M)
+_NONCE_RE = re.compile(r"^\[reprobe-install\] nonce ([0-9a-f]{32})\s*$")
 
 
-def _attributed_script(items: list[tuple[int, str, str]]) -> str:
-    """The install commands as one bash script that records, per command, who
-    asked for it and whether it failed.
+def _install_marks(log_path: Path):
+    """``(line, (kind, index, origin, exit) | None)`` for each line of an install log.
 
-    One exit code for a whole ``set -e`` chain cannot say whether the artifact's
-    own requirements.txt failed (a finding about the artifact) or a package
-    reprobe guessed from an import did (ours). Each command runs in its own
-    subshell, so one failure no longer stops the rest — the steps then run with
-    as much of the environment as could be built, and the log says what was not."""
-    lines = ["__rc=0"]
-    for i, cmd, origin in items:
-        # `echo;` first: a command whose last output has no newline would otherwise
-        # glue the marker onto that line, and the line-anchored parser would miss it
-        lines.append(f"echo; echo '{_MARK} begin {i} {origin}'")
-        # A fresh `bash -ec`, not `( set -e; … )`: bash IGNORES errexit inside a subshell
-        # that is part of an `||` list, so `false; echo after` carried on past its
-        # first failure. A new process honours -e whatever list its parent is in.
-        lines.append(f"bash -ec {shlex.quote(cmd)} || {{ __e=$?; echo; "
-                     f"echo \"{_MARK} failed {i} {origin} exit $__e\"; "
-                     "[ $__rc -ne 0 ] || __rc=$__e; }")
-    lines.append("exit $__rc")
-    return "\n".join(lines)
+    A log the host wrote starts with a nonce line, and then only markers carrying
+    THAT nonce are markers: build output in the containers never sees the nonce
+    (it is not in any command, and the log directory is not mounted), so a
+    marker-shaped line it prints — even one smuggled in after a carriage return,
+    which the line reader treats as a line break — attributes nothing."""
+    nonce: Optional[str] = None
+    first = True
+    for line in _log_lines(log_path):
+        if first:
+            first = False
+            n = _NONCE_RE.match(line)
+            if n:
+                nonce = n.group(1)
+                continue
+        m = _MARK_RE.match(line)
+        if m and m.group("nonce") == nonce:
+            yield line, (m.group(2), int(m.group(3)), m.group(4), m.group(5))
+        else:
+            yield line, None
+
+
+def _run_install_commands(items: list[tuple[int, str, str]], image: str, prep: str,
+                          mounts: list[Mount], limits: dict[str, Any], log_path: Path, *,
+                          dry_run: bool, work_root: Path,
+                          extra_roots: list[Path]) -> RawRunOutput:
+    """Run each install command in a container of its own and write ONE log in
+    which the HOST records, per command, who asked for it and how it exited.
+
+    One exit code for a whole chain cannot say whether the artifact's own
+    requirements.txt failed (a finding about the artifact) or a package reprobe
+    guessed from an import did (ours). Attribution used to be printed by a
+    wrapper script INSIDE the container — where package build code runs as the
+    same user and could print a forged "failed" line, or read the wrapper's
+    command line and memory to forge one that matched. A container's exit code
+    is the one channel that code cannot write, so each command gets its own
+    container, the markers are written here from those exit codes, and any
+    marker-shaped line in a command's own output is defused before it reaches
+    the parser. A failure no longer stops the rest: the steps then run with as
+    much of the environment as could be built, and the log says what was not.
+    The phase's wall clock is shared: each command gets what is left of it."""
+    import time
+
+    deadline = time.monotonic() + float(limits.get("timeout_s") or 7200)
+    first_rc = 0
+    agg: dict[str, Any] = {"timed_out": False, "error": None, "limit_exceeded": None,
+                           "oom_killed": None}
+    total = 0.0
+    argv: list[str] = []
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    nonce = secrets.token_hex(16)
+    with open(log_path, "wb") as log:
+        log.write(f"{_MARK} nonce {nonce}\n".encode())
+        for i, cmd, origin in items:
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                agg["timed_out"] = True
+                break
+            spec = ContainerSpec(image=image, command=["bash", "-c", prep + f"bash -ec {shlex.quote(cmd)}"],
+                                 workdir="/work", mounts=mounts, network="egress")
+            part = log_path.with_name(f"{log_path.stem}.{i:02d}.part")
+            raw = run_container(spec, {**limits, "timeout_s": remaining}, part, allow_egress=True,
+                                dry_run=dry_run, work_root=work_root, extra_roots=extra_roots)
+            if raw.dry_run:
+                part.unlink(missing_ok=True)
+                return raw
+            argv = argv or raw.argv_redacted
+            total += raw.duration_s
+            if raw.error is None and ((raw.exit_code == 125 and docker_cli_failed(str(part)))
+                                      or (raw.exit_code in (126, 127) and _launcher_failed(str(part)))):
+                # docker could not start it, or bash could not find the installer:
+                # the harness's image or daemon, never the command's own failure
+                raw = raw.model_copy(update={"error": f"the install container could not start the "
+                                                      f"command (exit {raw.exit_code})"})
+            log.write(f"\n{_MARK} {nonce} begin {i} {origin}\n".encode())
+            _copy_defused(part, log)
+            part.unlink(missing_ok=True)
+            stopped = raw.timed_out or raw.error or raw.limit_exceeded or raw.oom_killed
+            if raw.exit_code not in (0, None) and not stopped:
+                log.write(f"\n{_MARK} {nonce} failed {i} {origin} exit {raw.exit_code}\n".encode())
+                first_rc = first_rc or raw.exit_code
+            if stopped:
+                # the container was stopped, not the command refused: what is
+                # left cannot be judged, and the row says why (see the caller)
+                agg.update(timed_out=bool(raw.timed_out), error=raw.error,
+                           limit_exceeded=raw.limit_exceeded, oom_killed=raw.oom_killed)
+                first_rc = first_rc or (raw.exit_code if raw.exit_code is not None else 1)
+                break
+    return RawRunOutput(exit_code=first_rc, duration_s=round(total, 1), image=image,
+                        log_path=str(log_path), argv_redacted=argv, **agg)
+
+
+def _copy_defused(src: Path, dst) -> None:
+    """Append a command's log to the install log with every line that starts like
+    a harness marker prefixed, so only the host's own markers parse as markers."""
+    mark = _MARK.encode()
+    try:
+        with open(src, "rb") as f:
+            at_line_start = True
+            while chunk := f.readline(65_536):
+                if at_line_start and chunk.lstrip(b"\r").startswith(mark):
+                    dst.write(b"(output) ")
+                dst.write(chunk)
+                at_line_start = chunk.endswith(b"\n")
+    except OSError:
+        pass
 
 
 def _log_lines(path: Path, max_line: int = 65_536):
@@ -1575,10 +1661,9 @@ def _install_sections(log_path: Path) -> dict[int, dict[str, Any]]:
         if cur is not None and cur["missing"] and cur["failed_exit"] is None:
             cur["network"] = network_in_tail()
 
-    for line in _log_lines(log_path):
-        m = _MARK_RE.match(line)
+    for line, m in _install_marks(log_path):
         if m:
-            kind, idx, origin = m.group(1), int(m.group(2)), m.group(3)
+            kind, idx, origin, code = m
             if kind == "begin":
                 close_section()
                 cur = sections.setdefault(idx, {"origin": origin, "failed_exit": None,
@@ -1587,7 +1672,7 @@ def _install_sections(log_path: Path) -> dict[int, dict[str, Any]]:
             elif kind == "failed":
                 sec = sections.setdefault(idx, {"origin": origin, "failed_exit": None,
                                                 "network": False, "missing": []})
-                sec["failed_exit"] = int(m.group(4) or 0)
+                sec["failed_exit"] = int(code or 0)
                 sec["network"] = network_in_tail()
                 cur = None
             continue
@@ -1635,10 +1720,9 @@ def _hash_resolved_versions(logdir: Path) -> Optional[str]:
     for log in sorted(logdir.glob("install-*.log")):
         section = None                  # sha256 of the listing being read, or None
         idx = -1
-        for line in _log_lines(log):
-            m = _MARK_RE.match(line)
+        for line, m in _install_marks(log):
             if m:
-                kind, i, origin = m.group(1), int(m.group(2)), m.group(3)
+                kind, i, origin, _ = m
                 if section is not None:
                     if kind == "failed" and i == idx:
                         # the listing itself FAILED: what it printed is an error message,
