@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -1564,7 +1565,7 @@ def _run_install_commands(items: list[tuple[int, str, str]], image: str, prep: s
     with open(log_path, "wb") as log:
         log.write(f"{_MARK} nonce {nonce}\n".encode())
         for i, cmd, origin in items:
-            remaining = int(deadline - time.monotonic())
+            remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
                 agg["timed_out"] = True
                 break
