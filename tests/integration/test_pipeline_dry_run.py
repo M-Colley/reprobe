@@ -768,3 +768,75 @@ def test_the_retry_copy_skips_special_files_author_code_left_behind(tmp_path):
     (tmp_path / "d").mkdir()
     os.mkfifo(tmp_path / "pipe")
     assert _special_files(str(tmp_path), ["f.txt", "d", "pipe"]) == {"pipe"}
+
+
+def _fake_containers(monkeypatch, step_phase):
+    """Like _simulate, but tells the install container by its marker, not its
+    network: under --allow-net the steps have network too."""
+    from reprobe.models import RawRunOutput
+    specs = []
+
+    def fake(spec, limits, log_path, **kw):
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        specs.append(spec)
+        if "[reprobe-install]" in spec.command[-1]:
+            Path(log_path).write_text("installed\n", encoding="utf-8")
+            return RawRunOutput(exit_code=0, duration_s=0.1, image=spec.image, log_path=str(log_path))
+        return step_phase(spec, log_path)
+
+    monkeypatch.setattr(orch_mod, "run_container", fake)
+    monkeypatch.setattr(orch_mod, "reap_orphans", lambda: [])
+    monkeypatch.setattr(orch_mod, "_image_digest", lambda image: None)
+    return specs
+
+
+def test_the_assisted_retry_keeps_allow_net(tmp_path, monkeypatch):
+    """It rebuilt its spec from the runner, offline, so a script that needed the
+    network the operator had granted 'still failed' — on the network."""
+    art = _rstudio_artifact(tmp_path)
+    specs = _fake_containers(monkeypatch, lambda spec, log: _rstudio_run(spec, log, ("done\n", 0)))
+    report = Orchestrator(workroot=tmp_path / "wk").run(str(art), use_llm=False, allow_net=["example.org"])
+    retried = [s for s in specs if "harness-assisted retry" in s.command[-1]]
+    assert retried and retried[0].network == "egress"
+    assert report.steps[0].diagnostics["assisted_retry"]["status"] == "pass"
+
+
+def test_a_harness_failure_during_the_retry_is_not_the_scripts(tmp_path, monkeypatch):
+    from reprobe.models import RawRunOutput
+    art = _rstudio_artifact(tmp_path)
+
+    def phase(spec, log):
+        if "harness-assisted retry" in spec.command[-1]:
+            Path(log).write_text("", encoding="utf-8")
+            return RawRunOutput(exit_code=None, duration_s=0.0, image=spec.image, log_path=str(log),
+                                error="image-not-present")
+        return _rstudio_run(spec, log, ("", 0))
+    _fake_containers(monkeypatch, phase)
+    report = Orchestrator(workroot=tmp_path / "wk").run(str(art), use_llm=False)
+    retry = report.steps[0].diagnostics["assisted_retry"]
+    assert retry["status"] == "harness-error"
+    assert "says nothing about the script" in retry["summary"]
+    assert "not the only problem" not in retry["summary"]
+
+
+def test_an_r_install_never_runs_in_the_generic_python_fallback(tmp_path, monkeypatch):
+    """With the pinned Python image missing, R installs went to the Python
+    fallback image, failed on a missing Rscript, and read as the author's."""
+    art = tmp_path / "artifact"
+    art.mkdir()
+    (art / "a.R").write_text("library(praise)\n", encoding="utf-8")
+    (art / "b.py").write_text("print(1)\n", encoding="utf-8")
+    (art / "autoui-repro.yml").write_text("version: 1\nrun:\n  steps: [a.R, b.py]\n", encoding="utf-8")
+    from reprobe.models import RawRunOutput
+    specs = _fake_containers(monkeypatch, lambda spec, log: RawRunOutput(
+        exit_code=0, duration_s=0.1, image=spec.image, log_path=str(log)))
+    o = Orchestrator(workroot=tmp_path / "wk")
+    real_plan = orch_mod.plan_env
+
+    def fallback(*a, **k):
+        p = real_plan(*a, **k)
+        return p.model_copy(update={"env_provenance": "fallback-generic", "image": "python:3.13-slim"})
+    monkeypatch.setattr(orch_mod, "plan_env", fallback)
+    o.run(str(art), use_llm=False)
+    r_installs = [s for s in specs if "[reprobe-install]" in s.command[-1] and "Rscript" in s.command[-1]]
+    assert r_installs and all(s.image != "python:3.13-slim" for s in r_installs)

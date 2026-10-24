@@ -15,7 +15,7 @@ import pytest
 
 import reprobe.orchestrator as om
 from reprobe.config import load_config
-from reprobe.models import DetectResult, EnvPlan, RawRunOutput, Report, RunResult
+from reprobe.models import DetectResult, EnvPlan, RawRunOutput, Report, RunResult, RunStep
 from reprobe.report import badges
 
 # --------------------------------------------------------------------------- #
@@ -443,3 +443,47 @@ def test_an_activate_version_that_is_not_a_plain_version_is_not_used(tmp_path):
     for bad in ('version <- "1.0; system(x)"\n', 'version <- "1.0\\" + 1"\n', 'version <- "dev"\n'):
         (tmp_path / "renv" / "activate.R").write_text(bad, encoding="utf-8")
         assert _renv_activation(tmp_path) == "", bad
+
+
+# --- third review: outputs, the retry, the fallback image -------------------
+
+def test_a_file_is_compared_as_its_last_finished_writer_left_it(tmp_path):
+    """Step 1 produced out.csv in full; step 2 crashed while rewriting it. The
+    half-written file used to be compared and reported as 'different values'."""
+    src, run = _trees(tmp_path)
+    report = Report(submission_id="x", harness_version="t", timestamp="")
+    _orch(tmp_path)._regenerated_outputs(report, [
+        RunResult(runner="python", target="a.py", status="pass", artifacts=["out.csv"]),
+        RunResult(runner="python", target="b.py", status="fail", artifacts=["out.csv"])], src, run)
+    assert report.results_comparison is None
+    assert any("did not finish" in n and "out.csv" in n for n in report.not_verified)
+
+
+def test_a_failed_step_never_files_a_declared_output(tmp_path):
+    run, out = tmp_path / "run", tmp_path / "out"
+    run.mkdir()
+    (run / "out.csv").write_text("broken", encoding="utf-8")
+    (run / "nb.executed.ipynb").write_text("{}", encoding="utf-8")
+    _orch(tmp_path)._collect_artifacts([RunResult(
+        runner="python", target="b.py", status="fail", expected_met=["out.csv"],
+        artifacts=["out.csv", "nb.executed.ipynb"])], run, out)
+    assert not (out / "artifacts" / "out.csv").exists()
+    assert (out / "artifacts" / "nb.executed.ipynb").exists()     # evidence of where it stopped
+
+
+def test_the_harness_executed_notebook_never_satisfies_a_declared_output(tmp_path):
+    from reprobe.config import load_config
+    from reprobe.runners.base import RunContext
+    from reprobe.runners.jupyter import JupyterRunner
+    cfg = load_config()
+    ctx = RunContext(step=RunStep(target="nb/a.ipynb", kind="jupyter", expected_outputs=["nb/"]),
+                     rundir=tmp_path, src_dir=tmp_path, out_dir=tmp_path, image="i", config=cfg,
+                     limits=cfg.limits_for("jupyter"))
+    assert JupyterRunner()._expected_met(ctx, ["nb/a.executed.ipynb"]) == []
+    assert JupyterRunner()._expected_met(ctx, ["nb/a.executed.ipynb", "nb/fig.png"]) == ["nb/"]
+
+
+def test_the_network_diagnosis_is_only_given_for_an_offline_run():
+    tail = "Error: Could not resolve host: example.org\n"
+    assert om.known_failure_diagnosis(tail, 1, "a.R") is not None
+    assert om.known_failure_diagnosis(tail, 1, "a.R", offline=False) is None

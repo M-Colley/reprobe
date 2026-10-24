@@ -632,3 +632,45 @@ def test_steps_the_pipeline_never_ran_are_nothing_executed_not_structural():
 def test_a_host_only_structural_check_is_still_structural_only():
     steps = [RunResult(runner="unity", target=".", status="pass", executed=False)]
     assert badges.verdict(steps, ran=True)["overall"] == "structural-only"
+
+
+# --- third review: what a report may claim ---------------------------------
+
+def test_a_skipped_primary_step_blocks_the_functional_candidate():
+    """A passing helper used to earn the candidate while the main analysis was
+    skipped (no runner, a refused path, a kernel no image has)."""
+    detect = DetectResult(artifact_types=["python"], steps=[
+        RunStep(runner="python", target="analysis.py", expected_outputs=["out.csv"]),
+        RunStep(runner="python", target="helper.py", expected_outputs=["out.csv"])])
+    steps = [RunResult(runner="python", target="analysis.py", status="skipped", executed=False,
+                       diagnostics={"reason": "`analysis.py` does not exist in the deposit"}),
+             RunResult(runner="python", target="helper.py", status="pass", expected_met=["out.csv"])]
+    acm = _decide(_zenodo(), steps, detect=detect)["acm"]
+    assert acm["functional"] == "not-evaluated"
+    assert any("analysis.py" in n and "did not run" in n for n in acm["notes"])
+
+
+def test_runs_needs_every_declared_output_not_just_one():
+    steps = [RunResult(runner="python", target="a.py", status="pass", expected_met=["t.csv"],
+                       diagnostics={"expected_missing": ["fig.png"]})]
+    v = badges.verdict(steps, ran=True)
+    assert v["overall"] == "runs-with-warnings" and v["human_review_required"] is True
+    assert "fig.png" in v["note"]
+
+
+def test_an_output_any_step_produced_is_not_missing():
+    """Broadcast outputs: each step lists the others' as missing; pipeline-wide
+    they were all produced."""
+    steps = [RunResult(runner="python", target="a.py", status="pass", expected_met=["t.csv"],
+                       diagnostics={"expected_missing": ["fig.png"]}),
+             RunResult(runner="python", target="b.py", status="pass", expected_met=["fig.png"],
+                       diagnostics={"expected_missing": ["t.csv"]})]
+    assert badges.verdict(steps, ran=True)["overall"] == "runs"
+
+
+def test_an_install_failure_only_excuses_steps_that_used_that_environment():
+    env = {"install_results": {"r": {"ok": False, "exit_code": 1, "failures": [
+        {"index": 0, "origin": "harness-detected", "exit_code": 1, "command": "Rscript -e x"}]}}}
+    assert badges.install_error(env, keys={"python"}) is None
+    assert "r:" in badges.install_error(env, keys={"r"})
+    assert badges.install_error(env) is not None            # unscoped: as before

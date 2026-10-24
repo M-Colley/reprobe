@@ -270,6 +270,39 @@ regression test built from the reviewer's input (`tests/unit/test_review_regress
 - The RStudio retry's copy skips FIFOs and device nodes author code may leave,
   and a failed copy is recorded as "not attempted" instead of ending the run.
 
+### Third review: what a report may claim
+
+Each confirmed by a snippet against the real code before it was fixed.
+
+- **A skipped main step blocks the Functional candidate.** Skipped steps (no
+  runner, a refused manifest path, a kernel no image has) dropped out of the
+  primary steps, so a passing helper earned the candidate while the analysis
+  never ran.
+- **`runs` needs every declared output.** One produced output was enough; a
+  declared figure no step ever wrote now makes it `runs-with-warnings`, named.
+- **An install failure excuses only the steps that ran against it.** A failed R
+  install turned an unrelated Python SyntaxError into `infra-error` — "no
+  statement about the artifact".
+- **Exit 126/127 is the harness's only on the launcher's own evidence** (bash
+  naming the interpreter, or the runtime finding no shell). A missing tool the
+  author's code shelled out to is the artifact's failure.
+- **"could not find function" claims only what the error proves.** It said the
+  package "is present — the install phase put it there" without looking, and
+  named an author's own undefined function "an installed package". Unknown
+  names now get no deterministic diagnosis; known ones say the package was not
+  attached, and leave installation to the install section.
+- **Outputs are compared and collected as their last FINISHED writer left them.**
+  A later step that crashed while rewriting `out.csv` had its half-written file
+  compared ("different values") and filed as the earlier step's output. Data
+  merged from a deposit is never compared as a committed output.
+- The RStudio retry keeps `--allow-net`, and a harness failure during it says
+  so instead of "still failed"; the offline-network diagnosis is not given for a
+  run that had network.
+- The harness's own executed notebook never satisfies a declared directory or
+  glob output.
+- R installs never run in the generic Python fallback image, where a missing
+  `Rscript` read as the author's lockfile failing.
+
 ### Known limits
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:
