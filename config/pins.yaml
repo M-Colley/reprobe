@@ -34,6 +34,9 @@ base_images:
 # never pin a new tag to old bytes. build-base-images prints these lines after it
 # publishes. A locally built image is not these bytes — remove its entry to use it.
 base_image_digests:
+  "ghcr.io/m-colley/reprobe-base-py:2026.6": "sha256:676fe8308a289a7509c7537a1cec24dbc97c4c5902e6848e31b850a2b918e64a"
+  "ghcr.io/m-colley/reprobe-base-r:2026.6": "sha256:df1b06de758baf70b6b82aac391a210dc756485b0d75b47c2a27332086a25cc8"
+  "ghcr.io/m-colley/reprobe-controller:2026.6": "sha256:aaab80791a898bc988e1b93b398584e8ceca1b86790d0cc2bc12fbbc2b5b6e22"
 
 llm:
   enabled: true
