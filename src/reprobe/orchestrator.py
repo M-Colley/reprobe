@@ -653,9 +653,12 @@ class Orchestrator:
         origins = list(env_plan.install_origins)
         if len(origins) != len(env_plan.install_commands):
             origins = ["unknown"] * len(env_plan.install_commands)
+        keys = list(env_plan.install_keys)
+        if len(keys) != len(env_plan.install_commands):
+            keys = ["r" if c.strip().startswith("Rscript") else "python" for c in env_plan.install_commands]
         by_key: dict[str, list[tuple[int, str, str]]] = {"python": [], "r": []}
-        for i, (c, o) in enumerate(zip(env_plan.install_commands, origins, strict=True)):
-            by_key["r" if c.strip().startswith("Rscript") else "python"].append((i, c, o))
+        for i, (c, o, k) in enumerate(zip(env_plan.install_commands, origins, keys, strict=True)):
+            by_key[k if k in by_key else "python"].append((i, c, o))
 
         install_results: dict[str, Any] = {}
         for key, items in by_key.items():

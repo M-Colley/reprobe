@@ -305,7 +305,9 @@ def plan(
     # choose default base image: python stack unless purely R
     nb_langs = {s.args.get("language", "python") for s in detect_result.steps if s.kind == "jupyter"}
     py_needed = "python" in kinds or "python" in nb_langs
-    r_needed = _needs(kinds, "r", "rmarkdown") or "r" in nb_langs
+    # a Python notebook driving R through rpy2 needs its %%R cells' packages
+    r_needed = (_needs(kinds, "r", "rmarkdown") or "r" in nb_langs
+                or any(s.args.get("rpy2") for s in detect_result.steps if s.kind == "jupyter"))
     image_key = "python" if py_needed or not r_needed else "r"
     image = config.base_image(image_key) or config.pins.get("fetch", {}).get("fallback_python_image", "")
 
@@ -319,7 +321,8 @@ def plan(
         detected_py_packages=detect_result.py_packages,
         conda_channels=tuple((config.pins.get("install") or {}).get("conda_channels")
                              or DEFAULT_CONDA_CHANNELS),
-        step_dirs=_step_dirs(detect_result))
+        step_dirs=_step_dirs(detect_result),
+        rpy2=any(s.args.get("rpy2") for s in detect_result.steps if s.kind == "jupyter"))
     install, dep_warnings, conda_prefix = ip.commands, ip.warnings, ip.conda_prefix
 
     flags = detect_result.flags
@@ -363,7 +366,7 @@ def plan(
                             "applies — steps will report an infra error, not an artifact failure")
 
     return EnvPlan(strategy=strategy, image=image, env_provenance=provenance,
-                   install_commands=install, install_origins=ip.origins,
+                   install_commands=install, install_origins=ip.origins, install_keys=ip.keys,
                    conda_env_prefix=conda_prefix, warnings=warnings + dep_warnings)
 
 
@@ -622,13 +625,15 @@ class _InstallPlan:
 
     commands: list[str] = field(default_factory=list)
     origins: list[str] = field(default_factory=list)
+    keys: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     conda_prefix: Optional[str] = None
 
-    def add(self, cmd: Optional[str], origin: str) -> None:
+    def add(self, cmd: Optional[str], origin: str, key: Optional[str] = None) -> None:
         if cmd:
             self.commands.append(cmd)
             self.origins.append(origin)
+            self.keys.append(key or ("r" if cmd.strip().startswith("Rscript") else "python"))
 
 
 def _install_commands(env: dict[str, Any], src: Path, r_needed: bool,
@@ -668,7 +673,8 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                   py_needed: bool = False,
                   detected_py_packages: list[str] | tuple[str, ...] = (),
                   conda_channels: tuple[str, ...] = DEFAULT_CONDA_CHANNELS,
-                  step_dirs: tuple[str, ...] = ()) -> _InstallPlan:
+                  step_dirs: tuple[str, ...] = (),
+                  rpy2: bool = False) -> _InstallPlan:
     """Any declared or detected dependency file the pinned-base builder does NOT
     install must surface as a warning — the report says what was not installed
     (never over-claim)."""
@@ -804,6 +810,11 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                 ip.add(_cran_install_command(declared, cran_repo), AUTHOR)
             if detected:
                 ip.add(_cran_install_command(detected, cran_repo), DETECTED)
+            if rpy2:
+                # rpy2 notebooks load R packages through base-py's own R, which ships
+                # far fewer than base-r: resolve them there, so what that R lacks —
+                # dependencies included — lands in the shared library they read.
+                ip.add(_cran_install_command(cran_pkgs, cran_repo), DETECTED, key="python")
             if not cran_repo:
                 ip.warnings.append("no r.cran_snapshot pinned in pins.yaml; detected R packages install "
                                    "from a live CRAN mirror (versions not reproducible across time)")

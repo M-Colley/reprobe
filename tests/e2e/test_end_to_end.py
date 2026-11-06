@@ -147,3 +147,12 @@ def test_an_rstudio_project_in_a_subfolder_runs_from_that_folder(tmp_path):
     assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
     produced = tmp_path / report.submission_id / "run" / "code" / "out" / "sum.txt"
     assert produced.read_text(encoding="utf-8").strip() == "6"
+
+
+def test_a_python_notebook_driving_r_through_rpy2_runs(tmp_path):
+    """It ran in an image without R; its %%R cells' packages were never found."""
+    report, logs = _run(tmp_path, "py-rpy2")
+    step = report.steps[0]
+    assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
+    produced = tmp_path / report.submission_id / "run" / "results" / "version.txt"
+    assert produced.read_text(encoding="utf-8").strip() == "1.0.0"

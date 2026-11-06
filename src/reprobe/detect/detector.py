@@ -60,6 +60,8 @@ def detect(
                     continue
                 if s.kind == "jupyter" and "language" not in s.args:
                     s.args["language"] = signatures.notebook_language(f)
+                    if s.args["language"] == "python" and signatures.notebook_uses_rpy2(f):
+                        s.args["rpy2"] = True
                 elif s.kind == "r" and "cwd" not in s.args and (wd := signatures.r_working_dir(f, root)):
                     s.args["cwd"] = wd
                 if pkg_root is not None and "pythonpath" not in s.args and (

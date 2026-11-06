@@ -357,6 +357,20 @@ All ten claims reproduced against the real detector and planner first.
   The phase keeps one shared wall-clock budget. (This was listed under Known
   limits; it is no longer one.)
 
+### Python notebooks that drive R (rpy2)
+
+- A Python notebook that loads `rpy2.ipython` and runs `%%R` cells ran in base-py,
+  which had no R: it failed for the harness's reason, and the packages its R
+  cells load were found by neither scanner. Detection now flags rpy2 use and
+  scans `%%R` cells; base-py (`2026.6`) carries R 4.4.3 — the same build as
+  base-r's — and rpy2; and the notebook's R packages are resolved against
+  base-py's own R (install commands now name the image they run in), so what
+  that R lacks, dependencies included, lands in the library it reads. New e2e
+  fixture `py-rpy2`.
+- `images/lock-add.py` solves for the image's real platform (glibc 2.39, no
+  CUDA) instead of conda-lock's default profile, which claims CUDA 11.4 and
+  glibc 2.17 and so contradicted base-py's own locked packages.
+
 ### Known limits
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:

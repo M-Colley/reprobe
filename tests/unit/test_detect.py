@@ -973,3 +973,45 @@ def test_the_artifacts_own_package_goes_on_pythonpath(tmp_path):
     assert any("PYTHONPATH" in n for n in res.notes)
     res = _plan(tmp_path / "plain", {"main.py": PY1})
     assert "pythonpath" not in res.steps[0].args
+
+
+# --- rpy2: Python notebooks that drive R ------------------------------------
+
+def _rpy2_nb(cells):
+    import json
+    return [json.dumps({"metadata": {"kernelspec": {"name": "python3", "language": "python"}},
+                        "nbformat": 4, "cells": [{"cell_type": "code", "source": c} for c in cells]})]
+
+
+def test_a_python_notebook_driving_r_is_flagged_and_its_r_cells_scanned(tmp_path):
+    """It ran in an image without R, and the packages its %%R cells load were
+    found by neither scanner."""
+    res = _plan(tmp_path, {"a.ipynb": _rpy2_nb(["%load_ext rpy2.ipython\nimport pandas",
+                                                 ["%%R -i df\n", "library(lme4)\n", "emmeans::emmeans\n"]])})
+    assert res.steps[0].args == {"language": "python", "rpy2": True}
+    assert {"lme4", "emmeans"} <= set(res.r_packages)
+
+
+def test_a_plain_python_notebook_is_not_flagged(tmp_path):
+    res = _plan(tmp_path, {"a.ipynb": _rpy2_nb(["import pandas  # not rpy2", "x = '%%R'"])})
+    assert "rpy2" not in res.steps[0].args and res.r_packages == []
+
+
+def test_an_rpy2_notebooks_r_packages_are_resolved_in_base_py(tmp_path):
+    """base-r already ships lme4, so an install resolved there installs nothing —
+    and base-py's R, which the notebook loads, does not have it."""
+    import reprobe.envbuild.base as eb
+    from reprobe.config import load_config
+    from reprobe.detect import detect
+    for rel, lines in {"a.ipynb": _rpy2_nb(["%load_ext rpy2.ipython", "%%R\nlibrary(lme4)"])}.items():
+        (tmp_path / rel).write_text("".join(lines), encoding="utf-8")
+    res, meta = detect(tmp_path)
+    real = eb.docker_available
+    eb.docker_available = lambda: False
+    try:
+        p = eb.plan(res, meta, load_config(), tmp_path)
+    finally:
+        eb.docker_available = real
+    routed = [(c[:40], k) for c, k in zip(p.install_commands, p.install_keys, strict=True) if c.startswith("Rscript")
+              and "lme4" in c]
+    assert ("python" in {k for _, k in routed})

@@ -73,7 +73,9 @@ class JupyterRunner(BaseRunner):
             "export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache MPLCONFIGDIR=/tmp; "
             f"export PYTHONPATH=/work/.reprobe_deps{own_pythonpath(ctx)}${{PYTHONPATH:+:$PYTHONPATH}} "
             "PYTHONUNBUFFERED=1; "
-            + (_R_ENV if lang == "r" else "")
+            # R notebooks, and Python ones driving R through rpy2 (base-py ships the
+            # same R build as base-r, so packages installed there load here)
+            + (_R_ENV if lang == "r" or (ctx.step.args or {}).get("rpy2") else "")
             + f"{env_path_prefix(ctx)}"
             f"if command -v papermill >/dev/null 2>&1; then "
             f"papermill --no-progress-bar --log-output -k {kernel} --cwd {_q(nbdir)} {_q(t)} {_q(out)}; "

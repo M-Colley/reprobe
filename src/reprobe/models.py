@@ -165,6 +165,11 @@ class EnvPlan(BaseModel):
     #   "harness-detected" — packages reprobe inferred from imports / library() calls
     #   "harness-record"   — pip freeze / installed.packages() / micromamba list
     install_origins: list[str] = Field(default_factory=list)
+    # The base image each install command runs in ("python" | "r"); empty means
+    # infer from the command (Rscript -> r). Explicit where the language of the
+    # command and the image it must run in differ (R installs for rpy2 notebooks
+    # run in base-py, against the R those notebooks actually load).
+    install_keys: list[str] = Field(default_factory=list)
     # Prefix of a conda env the install phase built from the artifact's own
     # environment.yml. When set, author code runs with THAT interpreter, not the
     # base image's.

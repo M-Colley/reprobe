@@ -445,9 +445,31 @@ def _read_head(p: Path, cap: int = _R_SCAN_READ_CAP) -> str:
         return ""
 
 
+_RPY2_RE = re.compile(r"^\s*(?:%load_ext\s+rpy2\.ipython|%%?R\b|(?:import|from)\s+rpy2\b)", re.M)
+
+
+def notebook_uses_rpy2(p: Path) -> bool:
+    """Whether a Python notebook drives R through rpy2 (`%load_ext rpy2.ipython`,
+    `%%R` cells, `import rpy2`): it needs R and rpy2 beside Python."""
+    import json
+    try:
+        data = json.loads(_read_head(p, 5_000_000))
+    except (ValueError, OSError, RecursionError):
+        return False
+    cells = (data.get("cells") or []) if isinstance(data, dict) else []
+    return any(isinstance(c, dict) and c.get("cell_type") == "code"
+               and _RPY2_RE.search(_cell_text(c)) for c in cells)
+
+
+def _cell_text(cell: dict) -> str:
+    src = cell.get("source")
+    return "".join(src) if isinstance(src, list) else str(src or "")
+
+
 def _r_ipynb_source(p: Path) -> str:
-    """Concatenated code cells of an R-kernel notebook, else "" (never scan a
-    Python notebook for R packages)."""
+    """The R code of a notebook: every code cell of an R-kernel notebook, or the
+    bodies of the `%%R` cells of a Python one that drives R through rpy2 (their
+    packages were found by neither scanner). "" when there is none."""
     import json
     try:
         data = json.loads(_read_head(p, 5_000_000))
@@ -462,13 +484,16 @@ def _r_ipynb_source(p: Path) -> str:
     lang = str(ks.get("language", "")).lower()
     name = str(ks.get("name", "")).lower()
     li = str((meta.get("language_info") or {}).get("name", "")).lower()
-    if not (lang == "r" or li == "r" or name.startswith("ir")):
-        return ""
+    r_kernel = lang == "r" or li == "r" or name.startswith("ir")
     out: list[str] = []
     for cell in data.get("cells", []) or []:
-        if isinstance(cell, dict) and cell.get("cell_type") == "code":
-            src = cell.get("source")
-            out.append("".join(src) if isinstance(src, list) else str(src or ""))
+        if not (isinstance(cell, dict) and cell.get("cell_type") == "code"):
+            continue
+        text = _cell_text(cell)
+        if r_kernel:
+            out.append(text)
+        elif text.lstrip().startswith("%%R"):
+            out.append(text.lstrip().split("\n", 1)[1] if "\n" in text.lstrip() else "")
     return "\n".join(out)
 
 
@@ -1198,6 +1223,8 @@ def scan(src_dir: str | Path) -> DetectResult:
         args: dict = {}
         if runner == "jupyter":
             args["language"] = notebook_language(path)
+            if args["language"] == "python" and notebook_uses_rpy2(path):
+                args["rpy2"] = True
         if pkg_root is not None and (runner == "python" or args.get("language") == "python"):
             args["pythonpath"] = pkg_root
         elif runner == "r" and (wd := r_working_dir(path, root)):

@@ -548,3 +548,10 @@ def test_the_artifacts_package_root_is_on_pythonpath_and_nothing_else(tmp_path):
     assert pp({"pythonpath": ""}).startswith("PYTHONPATH=/work/.reprobe_deps:/work$")
     assert pp({"pythonpath": "../etc"}).startswith("PYTHONPATH=/work/.reprobe_deps$")
     assert pp({}).startswith("PYTHONPATH=/work/.reprobe_deps$")
+
+
+def test_an_rpy2_notebook_gets_the_harness_r_library(tmp_path):
+    step = RunStep(target="a.ipynb", kind="jupyter", args={"language": "python", "rpy2": True})
+    cmd = _bash(JupyterRunner().build_command(_ctx(tmp_path, step)))
+    assert "R_LIBS_USER=/work/.reprobe_Rlib" in cmd and "-k python3" in cmd
+    assert JupyterRunner().image_key_for(step) == "python"
