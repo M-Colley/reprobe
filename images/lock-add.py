@@ -62,8 +62,15 @@ def main(image_dir: str) -> None:
                                         "channels": env["channels"],
                                         "dependencies": pins + new}), encoding="utf-8")
         out = Path(tmp) / "conda-lock.yml"
+        # Solve for the machine the image really is — Ubuntu 24.04 (glibc 2.39),
+        # no GPU — not conda-lock's default profile, which claims CUDA 11.4 (the
+        # locked cuda-version 12.9 then "conflicts") and glibc 2.17 (older than
+        # some locked packages need).
+        vps = Path(tmp) / "virtual-packages.yml"
+        vps.write_text(yaml.safe_dump({"subdirs": {"linux-64": {"packages": {
+            "__glibc": "2.39", "__linux": "6.8", "__unix": "0"}}}}), encoding="utf-8")
         subprocess.run(["conda-lock", "lock", "-f", str(spec), "-p", "linux-64",
-                        "--lockfile", str(out)], check=True)
+                        "--virtual-package-spec", str(vps), "--lockfile", str(out)], check=True)
         result = yaml.safe_load(out.read_text(encoding="utf-8"))
         got = {p["name"]: p for p in result["package"]}
         moved = [f"{n}: {p['version']}={_build(p)} -> "
