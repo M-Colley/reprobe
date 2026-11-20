@@ -553,3 +553,43 @@ def test_a_marker_with_a_guessed_nonce_attributes_nothing(tmp_path, monkeypatch)
     assert report.environment["install_results"]["python"]["failures"] == []
     first = (tmp_path / "logs" / "install-python.log").read_text(encoding="utf-8").splitlines()[0]
     assert re.fullmatch(r"\[reprobe-install\] nonce [0-9a-f]{32}", first) and fake_nonce not in first
+
+
+# --- fourth review: blame after the install-phase rewrite -------------------
+
+def test_a_missing_interpreter_in_the_artifacts_own_env_is_not_the_harness(tmp_path, monkeypatch):
+    """The artifact's environment.yml did not build; the next command's
+    /work/.reprobe_env/bin/python is therefore missing. That read as "the install
+    container could not start", which blamed the harness and dropped the
+    artifact's own finding."""
+    report = _install(tmp_path, monkeypatch, NO_DIST,
+                      ("bash: line 1: /work/.reprobe_env/bin/python: No such file or directory\n",
+                       {"exit_code": 127}))
+    env = report.environment
+    row = env["install_results"]["python"]
+    assert "error" not in row
+    assert badges.declared_env_error(env) is not None
+
+
+def test_running_out_of_time_with_only_listings_left_is_not_a_timeout(tmp_path, monkeypatch):
+    import itertools
+    clock = itertools.count(0, 50)                      # each call: 50 s later
+    monkeypatch.setattr("time.monotonic", lambda: next(clock))
+    monkeypatch.setattr(om, "run_container", lambda spec, limits, log_path, **kw: (
+        Path(log_path).write_text("", encoding="utf-8"),
+        RawRunOutput(exit_code=0, duration_s=1.0, image=spec.image, log_path=str(log_path)))[1])
+    out = om._run_install_commands(
+        [(0, "a", "author-declared"), (1, "b", "harness-record"), (2, "c", "harness-record")],
+        "img", "", [], {"timeout_s": 120}, tmp_path / "install-python.log",
+        dry_run=False, work_root=tmp_path, extra_roots=[])
+    assert out.timed_out is False
+
+
+def test_a_late_127_from_the_authors_own_shell_out_is_not_launcher_evidence(tmp_path):
+    from reprobe.runners.base import _launcher_failed
+    log = tmp_path / "s.log"
+    log.write_text("$ docker run ...\n" + "working...\n" * 50 + "bash: Rscript: command not found\n",
+                   encoding="utf-8")
+    assert _launcher_failed(str(log)) is False
+    log.write_text("$ docker run ...\nbash: line 1: micromamba: command not found\n", encoding="utf-8")
+    assert _launcher_failed(str(log)) is True

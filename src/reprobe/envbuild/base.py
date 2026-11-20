@@ -768,9 +768,12 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
             or find("environment.yml", "environment.yaml")
         if conda_file:
             conda(conda_file)
-        if req_file:
+        # the root is the author's top-level declaration: a root pyproject.toml
+        # wins over a requirements.txt found beside one script
+        root_pyproject = "pyproject.toml" if (src / "pyproject.toml").is_file() else None
+        if req_file and ("/" not in req_file or not root_pyproject):
             requirements(req_file, ip.conda_prefix)
-        elif (pyproject := find("pyproject.toml")):
+        elif (pyproject := root_pyproject or find("pyproject.toml")):
             cmd, w = _pyproject_command(src, pyproject, ip.conda_prefix)
             ip.warnings.extend(w)
             if cmd:

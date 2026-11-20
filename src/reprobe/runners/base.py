@@ -369,14 +369,29 @@ class BaseRunner:
 
 #: The launcher's own words: bash naming the interpreter a runner starts (the
 #: `bash -c` command line is line 1), or the runtime finding no executable.
+#: A path under /work is the ARTIFACT's environment (its conda env): an
+#: interpreter missing there follows from that environment not building, which
+#: is a finding about the artifact, not a broken image.
 _LAUNCH_FAILED_RE = re.compile(
-    r"bash: (?:line \d+: )?(?:\S*/)?(?:python3?|Rscript|R|papermill|jupyter|bash)"
+    r"bash: (?:line \d+: )?(?:(?!/work/)\S*/)?(?:python3?|Rscript|R|papermill|jupyter|bash|pip3?|micromamba)"
     r": (?:command not found|Permission denied|No such file or directory)"
     r"|executable file not found in \$PATH|OCI runtime (?:create|exec) failed")
 
 
 def _launcher_failed(log_path: Optional[str]) -> bool:
-    return bool(log_path) and bool(_LAUNCH_FAILED_RE.search(_tail(log_path, 80)))
+    """Read from the START of the output, where bash reports that the command
+    could not start: a 127 the author's own code propagated after running for a
+    while (`bash -c "Rscript ..."` inside their script) must not match."""
+    if not log_path:
+        return False
+    try:
+        with open(log_path, "rb") as f:
+            head = f.read(16_384).decode("utf-8", "replace").splitlines()
+    except OSError:
+        return False
+    # the docker command line the harness logs comes first; then the output
+    body = [ln for ln in head if not ln.startswith("$ docker")][:12]
+    return bool(_LAUNCH_FAILED_RE.search("\n".join(body)))
 
 
 _TAIL_CAP_BYTES = 64 * 1024

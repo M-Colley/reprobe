@@ -802,3 +802,33 @@ def test_an_r_install_never_runs_in_the_generic_python_fallback(tmp_path, monkey
     o.run(str(art), use_llm=False)
     r_installs = [s for s in specs if "reprobe-home" in s.command[-1] and "Rscript" in s.command[-1]]
     assert r_installs and all(s.image != "python:3.13-slim" for s in r_installs)
+
+
+def test_a_stopped_conda_build_excuses_the_r_step_that_runs_in_it(tmp_path, monkeypatch):
+    """The conda env is built in the python install group; an R step that runs
+    with the env's R relies on it. Scoping install failures by the step's image
+    alone ("r") left the stopped build out and blamed the artifact."""
+    from reprobe.models import RawRunOutput
+    art = tmp_path / "artifact"
+    art.mkdir()
+    (art / "environment.yml").write_text(
+        "name: x\nchannels: [conda-forge]\ndependencies:\n  - r-base=4.4\n", encoding="utf-8")
+    (art / "a.R").write_text("x <- 1\n", encoding="utf-8")
+    (art / "autoui-repro.yml").write_text("version: 1\nrun:\n  steps: [a.R]\n", encoding="utf-8")
+
+    def fake(spec, limits, log, **kw):
+        Path(log).parent.mkdir(parents=True, exist_ok=True)
+        Path(log).write_text("", encoding="utf-8")
+        if "micromamba create" in spec.command[-1]:          # the conda build is stopped
+            return RawRunOutput(exit_code=None, duration_s=1.0, image=spec.image, log_path=str(log),
+                                timed_out=True)
+        if "reprobe-home" in spec.command[-1]:                # any other install command
+            return RawRunOutput(exit_code=0, duration_s=1.0, image=spec.image, log_path=str(log))
+        Path(log).write_text("Error: something\n", encoding="utf-8")
+        return RawRunOutput(exit_code=1, duration_s=1.0, image=spec.image, log_path=str(log))
+    monkeypatch.setattr(orch_mod, "run_container", fake)
+    monkeypatch.setattr(orch_mod, "reap_orphans", lambda: [])
+    monkeypatch.setattr(orch_mod, "_image_digest", lambda image: None)
+    report = Orchestrator(workroot=tmp_path / "wk").run(str(art), use_llm=False)
+    assert report.steps[0].status == "fail"
+    assert report.verdict["overall"] == "infra-error", report.verdict

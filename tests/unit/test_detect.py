@@ -1015,3 +1015,57 @@ def test_an_rpy2_notebooks_r_packages_are_resolved_in_base_py(tmp_path):
     routed = [(c[:40], k) for c, k in zip(p.install_commands, p.install_keys, strict=True) if c.startswith("Rscript")
               and "lme4" in c]
     assert ("python" in {k for _, k in routed})
+
+
+# --- fourth review: the planning rewrite's own regressions -------------------
+
+def test_numbered_files_outside_script_folders_are_not_steps(tmp_path):
+    """docs/, tests/, examples/ and data/ ran as pipeline steps, ahead of main.py."""
+    res = _plan(tmp_path, {"main.py": PY1, "docs/01_intro.py": PY1, "data/02_gen.py": PY1,
+                           "tests/1_check.py": PY1, "examples/01_demo.py": PY1,
+                           "scripts/01_clean.py": PY1})
+    assert [s.target for s in res.steps] == ["scripts/01_clean.py", "main.py"]
+
+
+@pytest.mark.parametrize("name, is_step", [
+    ("01_clean.R", True), ("s1_fit.R", True), ("step2_x.R", True), ("3d_plot.R", False),
+    ("2x_speed.R", False), ("2020_data.R", False)])
+def test_a_step_number_ends_at_a_separator_and_is_not_a_year(name, is_step):
+    assert bool(signatures._NUM_RE.search(name)) is is_step
+
+
+def test_a_helper_sourced_only_by_an_unrendered_quarto_file_still_runs(tmp_path):
+    res = _plan(tmp_path, {"report.qmd": ["---", "---", "```{r}", 'source("fit.R")', "```"],
+                           "fit.R": R1, "clean.R": R1})
+    assert {s.target for s in res.steps} == {"fit.R", "clean.R"}
+
+
+def test_a_bookdown_output_format_is_not_a_book(tmp_path):
+    res = _plan(tmp_path, {"index.Rmd": ["---", "output: bookdown::html_document2", "---"],
+                           "analysis.Rmd": ["---", "---"]})
+    assert {s.target for s in res.steps} == {"index.Rmd", "analysis.Rmd"}
+
+
+def test_the_first_stage_word_decides(tmp_path):
+    res = _plan(tmp_path, {"prepare_test_data.R": R1, "fit_lm.R": R1, "clean_results.R": R1,
+                           "plot_all.R": R1})
+    order = [s.target for s in res.steps]
+    assert order.index("fit_lm.R") > max(order.index("prepare_test_data.R"), order.index("clean_results.R"))
+    assert order[-1] == "plot_all.R"
+
+
+def test_a_loop_over_variable_names_names_no_package(tmp_path):
+    res = _plan(tmp_path, {"a.R": ["library(x, character.only = TRUE)", 'vars <- c("age", "gender")',
+                                   "for (v in vars) print(summary(df[[v]]))"]})
+    assert "age" not in res.r_packages and "gender" not in res.r_packages
+
+
+def test_a_child_mentioned_in_an_html_comment_is_not_a_child(tmp_path):
+    res = _plan(tmp_path, {"main.Rmd": ["---", "---", '<!-- ```{r child="appendix.Rmd"}``` -->'],
+                           "appendix.Rmd": ["---", "---"]})
+    assert {s.target for s in res.steps} == {"main.Rmd", "appendix.Rmd"}
+
+
+def test_an_external_folder_is_the_authors_own_code(tmp_path):
+    res = _plan(tmp_path, {"external/analysis.R": R1})
+    assert [s.target for s in res.steps] == ["external/analysis.R"]

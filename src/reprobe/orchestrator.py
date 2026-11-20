@@ -224,7 +224,7 @@ class Orchestrator:
 
         # -- (4) RUN (sandboxed) ---------------------------------------- #
         results: list[RunResult] = []
-        install_key: dict[int, str] = {}      # id(result) -> install group the step ran against
+        install_key: dict[int, set[str]] = {}  # id(result) -> install groups the step relied on
         used_images: set[str] = set()        # every distinct image that ran a container
         unity_section = None
         ran = False
@@ -303,7 +303,15 @@ class Orchestrator:
                             runner, ctx, logdir / f"step{i:02d}-{runner.id}-assisted.log",
                             allow_egress=allow_egress_runtime)
                 results.append(res)
-                install_key[id(res)] = runner.image_key_for(step)
+                # every install group the step relies on: its image's, the conda env
+                # (built in the python group) when it runs in one, and the shared R
+                # library for a Python notebook driving R
+                deps = {runner.image_key_for(step)}
+                if env_plan.conda_env_prefix:
+                    deps.add("python")
+                if (step.args or {}).get("rpy2"):
+                    deps.add("r")
+                install_key[id(res)] = deps
                 self._collect_artifacts([res], rundir, outdir)
                 if _daemon_down(res):
                     # Once the daemon is gone every remaining step fails in
@@ -338,8 +346,8 @@ class Orchestrator:
         # -- (5) BADGES + VERDICT --------------------------------------- #
         # An install phase that never finished makes every downstream step
         # unjudgeable, so both the badge and the verdict have to hear about it.
-        failing_keys = {install_key.get(id(r)) for r in results
-                        if r.executed and r.status != "pass"} - {None}
+        failing_keys = {k for r in results if r.executed and r.status != "pass"
+                        for k in install_key.get(id(r), set())}
         install_err = badge_rules.install_error(report.environment, keys=failing_keys)
         declared_err = badge_rules.declared_env_error(report.environment)
         report.badges = badge_rules.decide(
@@ -1567,10 +1575,12 @@ def _run_install_commands(items: list[tuple[int, str, str]], image: str, prep: s
     nonce = secrets.token_hex(16)
     with open(log_path, "wb") as log:
         log.write(f"{_MARK} nonce {nonce}\n".encode())
-        for i, cmd, origin in items:
+        for n, (i, cmd, origin) in enumerate(items):
             remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
-                agg["timed_out"] = True
+                # out of time: an install that never ran is a timeout; only the
+                # version listings left over is not
+                agg["timed_out"] = any(o != "harness-record" for _, _, o in items[n:])
                 break
             spec = ContainerSpec(image=image, command=["bash", "-c", prep + f"bash -ec {shlex.quote(cmd)}"],
                                  workdir="/work", mounts=mounts, network="egress")

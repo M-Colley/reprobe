@@ -30,7 +30,10 @@ _MAX_SCAN_FILES = 200_000
 # A STEP number is a leading one (`01_prep`, `step2_model`, `part-3`) — not any
 # digits in the name: `plot_study2.R` is not step 2, and reading it so ran it
 # before `03_model.R`.
-_NUM_RE = re.compile(r"^(?:step|part|phase|stage|s)?[ _.-]?(\d+)(?!\d)", re.I)
+# The number must END at a separator: `3d_plot` and `2x_speed` are not steps, and a
+# leading year (`2020_data`) is a date, not a position in a pipeline.
+_NUM_RE = re.compile(r"^(?:step|part|phase|stage|s)?[ _.-]?(?!(?:19|20)\d\d(?:[_\-. ]|$))(\d+)(?=[_\-. ]|$)",
+                     re.I)
 _ENTRY_PY = {"main.py", "run.py", "analysis.py", "analyze.py", "pipeline.py",
              "train.py", "evaluate.py", "reproduce.py", "make_figures.py"}
 # Word-boundary stems only ("run_all.py" yes, "runners.py"/"mainwindow.py" no),
@@ -680,7 +683,7 @@ def _r_loaded_packages(clean: str, masked: str) -> set[str]:
 
 _R_VEC_ASSIGN_RE = re.compile(r"(?<![\w.$@])([A-Za-z.][\w.]*)\s*(?:<-|=)\s*c\s*\(")
 _R_APPLY_RE = re.compile(r"(?<![\w.$@])(?:\w+::)?(?:lapply|sapply|vapply|walk|map)\s*\(")
-_R_FOR_IN_RE = re.compile(r"(?<![\w.])for\s*\(\s*[A-Za-z.][\w.]*\s+in\s+")
+_R_FOR_IN_RE = re.compile(r"(?<![\w.])for\s*\(\s*([A-Za-z.][\w.]*)\s+in\s+")
 _R_LOADERS = {"library", "require", "requireNamespace", "loadNamespace"}
 
 
@@ -741,6 +744,12 @@ def _r_indirect_packages(clean: str, masked: str) -> set[str]:
     if char_only_load:
         for m in _R_FOR_IN_RE.finditer(masked):
             rest = clean[m.end():m.end() + 200]
+            # ...and only if the loop body loads its variable: a loop over column
+            # names in a file that loads packages elsewhere names no package
+            loads_var = re.search(r"(?:library|require|requireNamespace)\s*\(\s*"
+                                  + re.escape(m.group(1)) + r"\b", clean[m.end():m.end() + 400])
+            if not loads_var:
+                continue
             name = re.match(r"([A-Za-z.][\w.]*)\s*\)", rest)
             if name:
                 found.update(vectors.get(name.group(1), []))
@@ -950,15 +959,12 @@ def _stage_rank(name: str) -> int:
     steps that have not re-run yet, so it can pass on stale data and turn a
     broken pipeline green. Ranking by name is a guess, so it ranks BELOW both the
     numeric prefix and README order — it only decides otherwise-arbitrary ties."""
-    if _STAGE_LATE_RE.search(name):
-        return 4
-    if _STAGE_EVAL_RE.search(name):
-        return 3
-    if _STAGE_EARLY_RE.search(name):
-        return 0
-    if _STAGE_MODEL_RE.search(name):
-        return 1
-    return 2
+    # the FIRST stage word decides: `clean_results` cleans, `prepare_test_data`
+    # prepares, `train_test_split` belongs to training
+    hits = [(m.start(), rank) for rank, rx in ((4, _STAGE_LATE_RE), (3, _STAGE_EVAL_RE),
+                                               (0, _STAGE_EARLY_RE), (1, _STAGE_MODEL_RE))
+            if (m := rx.search(name))]
+    return min(hits)[1] if hits else 2
 
 
 def _order_key(path: Path, root: Path, readme: str):
@@ -1006,10 +1012,11 @@ def _sourced_r_files(root: Path, r_scripts: list[Path], docs: tuple[Path, ...] =
     return found
 
 
-_KNIT_CHILD_RE = re.compile(r"""(?:\bchild\s*=\s*(?:c\s*\(\s*)?|knit_child\s*\(\s*)["']([^"']+\.[Rr]md)["']""")
+_KNIT_CHILD_RE = re.compile(r"""(?:^\s*```+\s*\{[^}\n]*?\bchild\s*=\s*(?:c\s*\(\s*)?|"""
+                            r"""\bknit_child\s*\(\s*)["']([^"']+\.[Rr]md)["']""", re.M)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 #: Directories of vendored third-party code: never the artifact's own steps.
-_THIRD_PARTY_DIRS = {"third_party", "thirdparty", "third-party", "vendor", "vendored",
-                     "external", "extern", "externals", "submodules"}
+_THIRD_PARTY_DIRS = {"third_party", "thirdparty", "third-party", "vendor", "vendored", "submodules"}
 
 
 def r_working_dir(script: Path, root: Path) -> str:
@@ -1058,7 +1065,7 @@ def _knit_children(rmds: list[Path]) -> set[Path]:
     by_path = {q.resolve(): q for q in rmds}
     out: set[Path] = set()
     for p in rmds:
-        for m in _KNIT_CHILD_RE.finditer(_read_head(p)):
+        for m in _KNIT_CHILD_RE.finditer(_HTML_COMMENT_RE.sub("", _read_head(p))):
             try:
                 cand = (p.parent / m.group(1)).resolve()
             except (OSError, ValueError):
@@ -1070,11 +1077,13 @@ def _knit_children(rmds: list[Path]) -> set[Path]:
 
 def _bookdown_dirs(rmds: list[Path]) -> set[Path]:
     """Directories holding a bookdown book: a `_bookdown.yml`, or an index.Rmd
-    whose YAML names a bookdown output. Its chapters are rendered together by
-    bookdown::render_book, never one by one."""
+    whose YAML says `site: bookdown::bookdown_site`. (`output:
+    bookdown::html_document2` is a single document, not a book.) Its chapters
+    are rendered together by bookdown::render_book, never one by one."""
     dirs = {p.parent for p in rmds if (p.parent / "_bookdown.yml").is_file()}
     for p in rmds:
-        if p.name.lower() == "index.rmd" and "bookdown::" in _read_head(p)[:4000]:
+        if p.name.lower() == "index.rmd" and re.search(
+                r"^site:\s*[\"']?bookdown::bookdown_site", _read_head(p)[:4000], re.M):
             dirs.add(p.parent)
     return dirs
 
@@ -1143,14 +1152,15 @@ def scan(src_dir: str | Path) -> DetectResult:
     # knitr children and bookdown chapters are rendered as part of their parent
     children = _knit_children(rmds)
     books = _bookdown_dirs(rmds)
-    chapters = [p for p in rmds if p.parent in books]
     rmds = [p for p in rmds if not third_party(p) and p not in children and p.parent not in books]
 
     # R helpers that other scripts (or R Markdown / Quarto chunks) source() are
     # not steps of their own (running them standalone executes them twice, and
     # adds trivial "passes"); nor is the R/ of an R package, whose functions are
     # loaded, not run.
-    sourced = _sourced_r_files(root, r_scripts, tuple(rmds + qmds + chapters + list(children)))
+    # (only documents that are actually rendered: a Quarto file or a bookdown
+    # chapter is not run, so neither is what it sources)
+    sourced = _sourced_r_files(root, r_scripts, tuple(rmds + list(children)))
     is_pkg = (root / "DESCRIPTION").is_file()
     r_candidates = [p for p in r_scripts if p not in sourced and not third_party(p)
                     and not (is_pkg and p.relative_to(root).parts[0] == "R")]
@@ -1177,7 +1187,9 @@ def scan(src_dir: str | Path) -> DetectResult:
     if r_scripts:
         types.append("r")
         entry_r = [p for p in r_candidates if _ENTRY_R_RE.match(p.stem) and _entry_shallow(p, root)]
-        numbered_r = [p for p in r_candidates if numbered(p) and depth(p) <= 2]
+        # only where pipeline scripts live: the root, or one conventional script
+        # folder down — never docs/, tests/, examples/ or data/
+        numbered_r = [p for p in r_candidates if numbered(p) and _entry_shallow(p, root)]
         # numbered scripts are ADDED to what runs; they never stand in for the rest
         driven = notebooks or rmds or entry_r
         chosen = list(dict.fromkeys(entry_r + numbered_r)) if driven else r_candidates
@@ -1193,7 +1205,7 @@ def scan(src_dir: str | Path) -> DetectResult:
     if py_files:
         entry = [p for p in py_candidates
                  if p.name in _ENTRY_PY or (_entry_shallow(p, root) and _ENTRY_PY_RE.match(p.name))]
-        numbered_py = [p for p in py_candidates if numbered(p) and depth(p) <= 2]
+        numbered_py = [p for p in py_candidates if numbered(p) and _entry_shallow(p, root)]
         top = [p for p in py_candidates if depth(p) == 1]
         driven = notebooks or entry
         chosen = list(dict.fromkeys((entry if driven else top) + numbered_py))
