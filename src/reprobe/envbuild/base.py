@@ -53,6 +53,7 @@ from .sanitize import (
     filter_requirement_lines,
     filter_requirements,
     inside_tree,
+    read_dep_file,
     sanitize_conda_env,
 )
 
@@ -108,8 +109,12 @@ def _needs(kinds: set[str], *want: str) -> bool:
 # Same invocation for manifest-declared and auto-detected lockfiles: guarded so
 # an image without renv fails loudly (non-zero -> install noted failed/skipped)
 # instead of a cryptic traceback or a silent "ok".
+#: A lockfile path that may be written into R source inside single quotes.
+_SAFE_REL_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
+
+
 def _renv_restore_command(cran_repo: str, excluded: list[str],
-                          activation: Optional[str] = None) -> str:
+                          activation: Optional[str] = None, lockfile: str = "renv.lock") -> str:
     """Restore an renv.lock from the pinned CRAN snapshot, minus every package the
     lockfile sources from somewhere else (GitHub, a URL, a local path).
 
@@ -135,7 +140,7 @@ def _renv_restore_command(cran_repo: str, excluded: list[str],
     lib = ("renv::paths$library(project=getwd())" if activation is not None
            else 'Sys.getenv(\"R_LIBS_USER\")')
     body = ("{ p <- file.path(tempdir(), \"reprobe-renv\"); dir.create(p, showWarnings=FALSE); "
-            "stopifnot(file.copy(\"renv.lock\", file.path(p, \"renv.lock\"), overwrite=TRUE)); "
+            f"stopifnot(file.copy(\"{lockfile}\", file.path(p, \"renv.lock\"), overwrite=TRUE)); "
             f"lib <- {lib}; dir.create(lib, recursive=TRUE, showWarnings=FALSE); "
             f"renv::restore(project=p, library=lib, prompt=FALSE, repos={repos}, exclude={excl})")
     if activation is not None:
@@ -415,7 +420,7 @@ def _conda_env_commands(src: Path, env_file: str, notebooks: bool,
         return None, [f"'{env_file}' is outside the artifact (or a symbolic link); the declared "
                       "conda environment was NOT built"]
     try:
-        spec = yaml.safe_load((src / env_file).read_text(encoding="utf-8", errors="replace"))
+        spec = yaml.safe_load(read_dep_file(src / env_file))
     except (OSError, yaml.YAMLError) as e:
         return None, [f"'{env_file}' could not be read as YAML ({type(e).__name__}); the declared "
                       "conda environment was NOT built"]
@@ -478,7 +483,7 @@ def lint_requirements(path: Path) -> list[str]:
     a common and invisible mistake — invisible because an author with a working
     environment never installs from the file they shipped."""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = read_dep_file(path)
     except OSError:
         return []
     stdlib = getattr(sys, "stdlib_module_names", frozenset())
@@ -543,7 +548,7 @@ def _pyproject_command(src: Path, rel: str,
     if not inside_tree(src, path):
         return None, [f"'{rel}' is outside the artifact (or a symbolic link); it was NOT read"]
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
+        data = tomllib.loads(read_dep_file(path))
     except (tomllib.TOMLDecodeError, OSError, RecursionError):
         return None, [f"'{rel}' could not be parsed as TOML; its dependencies were NOT installed"]
     proj = data.get("project") if isinstance(data.get("project"), dict) else {}
@@ -711,15 +716,22 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                                "dependencies were NOT restored from it")
             return
         try:
-            text = lock.read_text(encoding="utf-8", errors="replace")
+            text = read_dep_file(lock)
         except OSError:
             ip.warnings.append(f"'{rel}' could not be read; R dependencies were NOT restored from it")
+            return
+        # The restore must read THE file that was just classified: it used to copy
+        # ./renv.lock whatever path was checked, so a clean `sub/renv.lock` in the
+        # manifest let an unchecked root renv.lock fetch GitHub packages with network.
+        if not _SAFE_REL_RE.fullmatch(rel) or ".." in rel.split("/"):
+            ip.warnings.append(f"'{rel[:80]}' is not a plain relative path; R dependencies were NOT "
+                               "restored from it")
             return
         excluded, notes = classify_renv_lock(text)
         ip.warnings.extend(_dropped_warnings(rel, notes))
         if excluded is None:                    # refused: nothing is restored from it
             return
-        ip.add(_renv_restore_command(cran_repo, excluded, _renv_activation(src)), AUTHOR)
+        ip.add(_renv_restore_command(cran_repo, excluded, _renv_activation(src), lockfile=rel), AUTHOR)
 
     # explicit manifest dependency file
     if dep and not (src / dep).exists():

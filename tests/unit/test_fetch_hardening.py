@@ -395,3 +395,66 @@ def test_downloads_from_platform_api_urls_guard_every_hop(module, call):
     assert calls
     body = src[src.index(calls[0].strip()):]
     assert "restrict_public=True" in body[:400], (module, calls[0])
+
+
+# --- fourth review: the trust boundary of the new code ----------------------
+
+def test_renv_restores_the_very_lockfile_it_classified(tmp_path):
+    """A clean `sub/renv.lock` in the manifest was classified while the restore
+    copied ./renv.lock — unchecked, with a GitHub package — in the networked phase."""
+    import json
+
+    from reprobe.envbuild.base import _install_plan
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "renv.lock").write_text(json.dumps({"Packages": {}}), encoding="utf-8")
+    (tmp_path / "renv.lock").write_text(json.dumps({"Packages": {"evil": {"Package": "evil",
+                                                                          "Source": "GitHub"}}}),
+                                        encoding="utf-8")
+    ip = _install_plan({"dependencies": "sub/renv.lock"}, tmp_path, True)
+    cmd = next(c for c in ip.commands if "renv::restore" in c)
+    assert 'file.copy("sub/renv.lock"' in cmd and 'file.copy("renv.lock"' not in cmd
+
+
+def test_a_repository_record_with_remote_fields_is_excluded():
+    import json
+
+    from reprobe.envbuild.sanitize import classify_renv_lock
+    excluded, _ = classify_renv_lock(json.dumps({"Packages": {"x": {
+        "Package": "x", "Source": "Repository", "Repository": "CRAN",
+        "RemoteType": "github", "RemoteRepo": "evil/x"}}}))
+    assert excluded == ["x"]
+
+
+def test_a_zip_whose_end_record_lies_about_its_count_is_refused(tmp_path, monkeypatch):
+    """ZipFile() parses the central directory by its byte size: a record saying
+    "1 entry" over a huge directory passed the count check."""
+    import zipfile
+    z = tmp_path / "a.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for i in range(50):
+            zf.writestr(f"f{i}.txt", "x")
+    monkeypatch.setattr(base, "_MAX_CENTRAL_DIR_BYTES", 1000)       # the directory is ~2.4 KB
+    assert base.zip_entry_count(z) > base._MAX_ARCHIVE_MEMBERS
+
+
+def test_a_tar_long_name_header_is_refused_before_it_is_read(tmp_path, monkeypatch):
+    import io
+    import tarfile
+    t = tmp_path / "a.tar.gz"
+    with tarfile.open(t, "w:gz", format=tarfile.GNU_FORMAT) as tf:
+        info = tarfile.TarInfo("d/" + "n" * 5000)                       # needs a GNU long-name header
+        tf.addfile(info, io.BytesIO(b""))
+    monkeypatch.setattr(base, "_MAX_TAR_READ", 1024)
+    warnings: list[str] = []
+    base.maybe_unzip(tmp_path, warnings)
+    assert warnings and "too large" in warnings[0]
+
+
+def test_an_oversized_dependency_file_is_not_parsed(tmp_path, monkeypatch):
+    import reprobe.envbuild.sanitize as san
+    from reprobe.envbuild.base import _pyproject_command
+    monkeypatch.setattr(san, "MAX_DEP_FILE_BYTES", 100)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\ndependencies=[" + "'a',\n" * 100 + "]\n",
+                                             encoding="utf-8")
+    cmd, warnings = _pyproject_command(tmp_path, "pyproject.toml", None)
+    assert cmd is None and any("could not be parsed" in w for w in warnings)

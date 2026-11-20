@@ -373,6 +373,29 @@ def guard_zip(z: zipfile.ZipFile) -> None:
         raise FetchError(f"archive uncompressed size {total} exceeds {_MAX_EXTRACT_BYTES}-byte cap (decompression bomb?)")
 
 
+#: Central-directory bytes ZipFile() may parse: ~260 bytes per entry at the cap.
+_MAX_CENTRAL_DIR_BYTES = 128 * 1024 * 1024
+#: Largest single read tar extraction may make. Member data is copied in small
+#: chunks; only a GNU long-name or PAX header is read in one go — and tarfile
+#: reads it whole into memory, so a 200 MB one in a 199 KB .tar.gz took 400 MB.
+_MAX_TAR_READ = 16 * 1024 * 1024
+
+
+class _BoundedReads:
+    """File wrapper that refuses any single read() over ``limit`` bytes."""
+
+    def __init__(self, f, limit: int):
+        self._f, self._limit = f, limit
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0 or n > self._limit:
+            raise ValueError(f"archive header too large to read (> {self._limit} bytes)")
+        return self._f.read(n)
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+
 def zip_entry_count(path: Path) -> int | None:
     """Entries a zip declares in its end-of-central-directory record (zip64
     included), read WITHOUT parsing the central directory — which ZipFile() does
@@ -387,7 +410,14 @@ def zip_entry_count(path: Path) -> int | None:
             rec = end(fp)
     except (OSError, struct.error, ValueError):
         return None
-    return int(rec[zipfile._ECD_ENTRIES_TOTAL]) if rec else None
+    if not rec:
+        return None
+    # ZipFile() parses the central directory by its BYTE size, whatever count the
+    # record claims (one forged to say "1" over 300,000 entries passed): a
+    # directory too large to hold the member cap counts as over it.
+    if int(rec[zipfile._ECD_SIZE]) > _MAX_CENTRAL_DIR_BYTES:
+        return _MAX_ARCHIVE_MEMBERS + 1
+    return int(rec[zipfile._ECD_ENTRIES_TOTAL])
 
 
 def _tar_members(t: tarfile.TarFile) -> list[tarfile.TarInfo]:
@@ -474,7 +504,9 @@ def maybe_unzip(dest: Path, warnings: list[str]) -> None:
                 guard_zip(z)                # reject a decompression bomb first
                 z.extractall(dest)          # zipfile sanitizes member paths itself
         elif len(tars) == 1 and not zips:
-            with tarfile.open(tars[0]) as t:
+            import gzip
+            with gzip.open(tars[0], "rb") as gz, \
+                    tarfile.open(fileobj=_BoundedReads(gz, _MAX_TAR_READ), mode="r:") as t:
                 _extract_tar(t, dest, warnings)
     except Exception as e:
         warnings.append(f"could not extract archive: {e}")

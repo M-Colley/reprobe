@@ -53,6 +53,19 @@ def _looks_like_archive(token: str) -> bool:
 _HASH_OPT = re.compile(r"\s--hash[= ](?:md5|sha1|sha224|sha256|sha384|sha512):[0-9A-Fa-f]+")
 
 
+#: A dependency file larger than this is not read: a 33 MB pyproject.toml took
+#: 92 s of host CPU to parse, and no real declaration comes near it.
+MAX_DEP_FILE_BYTES = 2 * 1024 * 1024
+
+
+def read_dep_file(path: Path) -> str:
+    """A dependency file's text, refused (OSError) past MAX_DEP_FILE_BYTES — checked
+    before reading, since the parse is what costs host time and memory."""
+    if path.stat().st_size > MAX_DEP_FILE_BYTES:
+        raise OSError(f"{path.name} is larger than {MAX_DEP_FILE_BYTES // (1024 * 1024)} MB")
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def embed_file_command(content: str, dest: str) -> str:
     """A shell command that writes ``content`` to ``dest`` inside the container.
 
@@ -131,7 +144,7 @@ def _filter_file(path: Path, root: Path, depth: int,
         if real in seen:
             return [], []
         seen.add(real)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = read_dep_file(path)
     except OSError:
         return [], []
     return _filter_lines(_logical_lines(text), path.parent, root, depth, seen)
@@ -343,6 +356,12 @@ def classify_renv_lock(text: str) -> tuple[list[str] | None, list[tuple[str, str
         repo = info.get("Repository")
         if source == "repository" and isinstance(repo, str) and repo.strip().lower() not in _RENV_OK_REPOSITORIES:
             source = f"repository {repo.strip()[:30]!r}"
+        # A record can say Source: Repository and still carry Remote* fields
+        # naming GitHub or a URL; never let them decide where it comes from.
+        remote = str(info.get("RemoteType") or "").lower()
+        if remote not in ("", "standard", "repository", "cran", "bioconductor") or \
+                any(k in info for k in ("RemoteUrl", "RemoteRepo", "RemoteHost")):
+            source = f"remote {remote or 'url'!r}"
         if source not in _RENV_OK_SOURCES:
             excluded.append(str(name))
             notes.append((str(name), f"source {source or 'unknown'!r} is fetched from where the "

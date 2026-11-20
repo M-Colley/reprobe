@@ -371,6 +371,38 @@ All ten claims reproduced against the real detector and planner first.
   CUDA) instead of conda-lock's default profile, which claims CUDA 11.4 and
   glibc 2.17 and so contradicted base-py's own locked packages.
 
+### Fourth review: the new code, reviewed
+
+Three independent reviews of everything changed since the third; each finding
+reproduced against the real code before it was fixed.
+
+- **Planning regressions of the third round.** Numbered files in `docs/`,
+  `tests/`, `examples/` or `data/` ran as pipeline steps (ahead of `main.py`,
+  and pulling in `examples/requirements.txt`): a step number now counts only at
+  the root or in a script folder, must end at a separator (`3d_plot` is not
+  step 3) and is never a year. A helper sourced only by an unrendered Quarto
+  file or bookdown chapter was dropped as "run by it". `output:
+  bookdown::html_document2` was taken for a book and dropped every document
+  beside it. The first stage word now decides (`clean_results` cleans). A loop
+  over variable names in a file that loads packages elsewhere "installed"
+  `age` and `gender` from CRAN. `child=` inside an HTML comment, and an
+  `external/` folder, dropped the author's own files. A root `pyproject.toml`
+  lost to a `requirements.txt` beside one script.
+- **Blame after the install rewrite.** A missing interpreter in the artifact's
+  own conda env (it failed to build) read as "the harness could not start the
+  command", dropping the artifact's finding; a stopped conda build no longer
+  excused the R step that ran in it, nor a failed R install the rpy2 notebook
+  that reads it; only version listings left at the deadline read as a
+  timeout. Launcher evidence is read from the start of a command's output.
+- **renv restored a different lockfile than it checked** (a clean
+  `sub/renv.lock` in the manifest; the restore copied the root one, unchecked,
+  with network). It now restores the path it classified, and a record whose
+  Remote* fields point elsewhere is excluded whatever its Source says.
+- **Host memory and CPU:** a zip whose end record understates its entries is
+  refused by the central directory's byte size; a tar long-name or PAX header
+  is refused before tarfile reads it whole (a 199 KB .tar.gz took 400 MB);
+  dependency files over 2 MB are not parsed (a 33 MB pyproject.toml took 92 s).
+
 ### Known limits
 
 - **The sandbox envelope is verified on a real daemon** (CI `sandbox` job, 29 tests:
