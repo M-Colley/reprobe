@@ -47,7 +47,7 @@ from .report import badges as badge_rules
 from .report import html as html_report
 from .report import markdown as md_report
 from .runners import RunContext, load_runners, runner_for
-from .runners.base import _launcher_failed, snapshot
+from .runners.base import SITE_DIR, SITECUSTOMIZE, _launcher_failed, snapshot
 
 
 def _slug(ref: str) -> str:
@@ -968,6 +968,9 @@ class Orchestrator:
             # not be recreated are named, everything else was copied.
             for src, _dst, why in (e.args[0] if e.args and isinstance(e.args[0], list) else []):
                 dropped.append(f"{Path(src).name} (not copied: {why})")
+        site = rundir / SITE_DIR
+        site.mkdir(exist_ok=True)
+        (site / "sitecustomize.py").write_text(SITECUSTOMIZE, encoding="utf-8")
         if dropped:
             report.environment.setdefault("warnings", []).append(
                 f"{len(dropped)} path(s) in the artifact were not copied into the run: "

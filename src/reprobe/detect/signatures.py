@@ -22,7 +22,7 @@ _SKIP_DIRS = {".git", ".hg", "node_modules", "__pycache__", ".ipynb_checkpoints"
               # carries the env the install phase built) otherwise contributes
               # thousands of files and every dependency of every dependency.
               "site-packages", "dist-packages",
-              ".reprobe_env", ".reprobe_deps", ".reprobe_cache", ".reprobe_Rlib", ".reprobe_req"}
+              ".reprobe_env", ".reprobe_deps", ".reprobe_cache", ".reprobe_Rlib", ".reprobe_req", ".reprobe_site"}
 # The fetched tree is untrusted. Walk it without following symlinks (no loops,
 # no escaping the fetch dir) and stop after a sane cap so a deposit with millions
 # of files can't hang detection before any container is even used.

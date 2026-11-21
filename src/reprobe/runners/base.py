@@ -88,16 +88,34 @@ def env_path_prefix(ctx: "RunContext") -> str:
     return f"export PATH={prefix}/bin:$PATH; " if prefix else ""
 
 
+#: Harness directory holding SITECUSTOMIZE, written into every run tree.
+SITE_DIR = ".reprobe_site"
+#: Appends $REPROBE_OWN_ROOT to sys.path at interpreter start — AFTER the
+#: standard library and site-packages, where `pip install -e .` puts a project.
+#: On PYTHONPATH it came first, so a root-level `numbers.py` or `code.py` beside
+#: the package shadowed the standard library for every script and kernel.
+SITECUSTOMIZE = """\
+# reprobe: the artifact's own package root, searched last (as an editable install is)
+import os, sys
+_d = os.environ.get('REPROBE_OWN_ROOT')
+if _d and _d not in sys.path:
+    sys.path.append(_d)
+"""
+
+
 def own_pythonpath(ctx: "RunContext") -> str:
-    """``:/work/<dir>`` for the artifact's own package root (see
-    signatures.own_package_root), or "". Only a plain relative directory."""
+    """The PYTHONPATH assignment of a Python step: the harness's installs, and —
+    when the artifact ships its own package (signatures.own_package_root) —
+    REPROBE_OWN_ROOT for SITECUSTOMIZE. Only a plain relative directory."""
+    base = "PYTHONPATH=/work/.reprobe_deps${PYTHONPATH:+:$PYTHONPATH}"
     d = (ctx.step.args or {}).get("pythonpath")
     if d is None:
-        return ""
+        return base
     d = str(d).strip("/")
     if d and (".." in d.split("/") or not re.fullmatch(r"[\w./-]+", d)):
-        return ""
-    return ":/work" + (f"/{d}" if d else "")
+        return base
+    return (f"PYTHONPATH=/work/{SITE_DIR}:/work/.reprobe_deps${{PYTHONPATH:+:$PYTHONPATH}} "
+            "REPROBE_OWN_ROOT=/work" + (f"/{d}" if d else ""))
 
 
 def env_r_prefix(ctx: "RunContext") -> str:

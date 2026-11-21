@@ -327,7 +327,7 @@ def plan(
         conda_channels=tuple((config.pins.get("install") or {}).get("conda_channels")
                              or DEFAULT_CONDA_CHANNELS),
         step_dirs=_step_dirs(detect_result),
-        rpy2=any(s.args.get("rpy2") for s in detect_result.steps if s.kind == "jupyter"))
+        r_install_keys=_r_install_keys(detect_result))
     install, dep_warnings, conda_prefix = ip.commands, ip.warnings, ip.conda_prefix
 
     flags = detect_result.flags
@@ -624,6 +624,20 @@ def describe_install_command(cmd: str) -> str:
     return cmd[:60]
 
 
+def _r_install_keys(detect_result: DetectResult) -> tuple[str, ...]:
+    """The images whose R loads the artifact's R packages: base-py for a Python
+    notebook driving R through rpy2, base-r for R scripts, R Markdown and R
+    notebooks. base-r alone when no step says (nothing executes)."""
+    steps = detect_result.steps
+    keys = []
+    if any(s.kind == "jupyter" and s.args.get("rpy2") for s in steps):
+        keys.append("python")
+    if any(s.kind in ("r", "rmarkdown") or (s.kind == "jupyter" and s.args.get("language") == "r")
+           for s in steps):
+        keys.append("r")
+    return tuple(keys) or ("r",)
+
+
 @dataclass
 class _InstallPlan:
     """The install commands, who asked for each, and what was not applied."""
@@ -679,7 +693,7 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                   detected_py_packages: list[str] | tuple[str, ...] = (),
                   conda_channels: tuple[str, ...] = DEFAULT_CONDA_CHANNELS,
                   step_dirs: tuple[str, ...] = (),
-                  rpy2: bool = False) -> _InstallPlan:
+                  r_install_keys: tuple[str, ...] = ("r",)) -> _InstallPlan:
     """Any declared or detected dependency file the pinned-base builder does NOT
     install must surface as a warning — the report says what was not installed
     (never over-claim)."""
@@ -821,15 +835,14 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
         if r_needed:
             declared = _cran_packages(env, [])
             detected = [n for n in cran_pkgs if n not in declared]
-            if declared:
-                ip.add(_cran_install_command(declared, cran_repo), AUTHOR)
-            if detected:
-                ip.add(_cran_install_command(detected, cran_repo), DETECTED)
-            if rpy2:
-                # rpy2 notebooks load R packages through base-py's own R, which ships
-                # far fewer than base-r: resolve them there, so what that R lacks —
-                # dependencies included — lands in the shared library they read.
-                ip.add(_cran_install_command(cran_pkgs, cran_repo), DETECTED, key="python")
+            # Resolved in each image whose R loads them (base-py's own R, for an
+            # rpy2 notebook, ships far fewer packages than base-r), and only there:
+            # an rpy2-only artifact pulled base-r to install the same tree again.
+            for key in r_install_keys:
+                if declared:
+                    ip.add(_cran_install_command(declared, cran_repo), AUTHOR, key=key)
+                if detected:
+                    ip.add(_cran_install_command(detected, cran_repo), DETECTED, key=key)
             if not cran_repo:
                 ip.warnings.append("no r.cran_snapshot pinned in pins.yaml; detected R packages install "
                                    "from a live CRAN mirror (versions not reproducible across time)")

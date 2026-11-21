@@ -1017,6 +1017,42 @@ def test_an_rpy2_notebooks_r_packages_are_resolved_in_base_py(tmp_path):
     assert ("python" in {k for _, k in routed})
 
 
+def _r_installs(tmp_path, files):
+    import reprobe.envbuild.base as eb
+    from reprobe.config import load_config
+    from reprobe.detect import detect
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text if isinstance(text, str) else "".join(text), encoding="utf-8")
+    res, meta = detect(tmp_path)
+    real = eb.docker_available
+    eb.docker_available = lambda: False
+    try:
+        p = eb.plan(res, meta, load_config(), tmp_path)
+    finally:
+        eb.docker_available = real
+    return sorted(k for c, k in zip(p.install_commands, p.install_keys, strict=True)
+                  if c.startswith("Rscript") and "lme4" in c)
+
+
+_RPY2_LME4 = ["%load_ext rpy2.ipython", "%%R\nlibrary(lme4)"]
+
+
+def test_an_rpy2_only_artifact_installs_its_r_packages_once(tmp_path):
+    """base-r was pulled to install the same tree a second time, for no step
+    (an R script beside the notebook is not a step either)."""
+    assert _r_installs(tmp_path, {"a.ipynb": _rpy2_nb(_RPY2_LME4), "b.R": "library(lme4)\n"}) == ["python"]
+
+
+def test_r_steps_beside_an_rpy2_notebook_still_get_base_r_installs(tmp_path):
+    import json
+    r_nb = json.dumps({"cells": [{"cell_type": "code", "source": ["library(lme4)"], "metadata": {},
+                                  "outputs": [], "execution_count": None}],
+                       "metadata": {"kernelspec": {"language": "R", "name": "ir"}},
+                       "nbformat": 4, "nbformat_minor": 5})
+    assert _r_installs(tmp_path, {"a.ipynb": _rpy2_nb(_RPY2_LME4), "b.ipynb": r_nb}) == ["python", "r"]
+
+
 # --- fourth review: the planning rewrite's own regressions -------------------
 
 def test_numbered_files_outside_script_folders_are_not_steps(tmp_path):

@@ -539,15 +539,46 @@ def test_an_environment_with_its_own_r_runs_r_steps_without_the_base_library(tmp
     assert "/work/.reprobe_env/bin" in rmd
 
 
-def test_the_artifacts_package_root_is_on_pythonpath_and_nothing_else(tmp_path):
+def test_the_artifacts_package_root_is_searched_last_and_nothing_else(tmp_path):
     def pp(args):
         c = _bash(PythonScriptRunner().build_command(_ctx(tmp_path, RunStep(target="s/a.py", kind="python",
                                                                                 args=args))))
-        return c[c.index("PYTHONPATH="):].split(" ")[0]
-    assert pp({"pythonpath": "src"}).startswith("PYTHONPATH=/work/.reprobe_deps:/work/src$")
-    assert pp({"pythonpath": ""}).startswith("PYTHONPATH=/work/.reprobe_deps:/work$")
-    assert pp({"pythonpath": "../etc"}).startswith("PYTHONPATH=/work/.reprobe_deps$")
-    assert pp({}).startswith("PYTHONPATH=/work/.reprobe_deps$")
+        return c[c.index("PYTHONPATH="):c.index(" PYTHONUNBUFFERED")]
+    assert pp({"pythonpath": "src"}).endswith(" REPROBE_OWN_ROOT=/work/src")
+    assert pp({"pythonpath": ""}).endswith(" REPROBE_OWN_ROOT=/work")
+    assert pp({"pythonpath": "src"}).startswith("PYTHONPATH=/work/.reprobe_site:/work/.reprobe_deps$")
+    assert pp({"pythonpath": "../etc"}) == pp({}) == "PYTHONPATH=/work/.reprobe_deps${PYTHONPATH:+:$PYTHONPATH}"
+
+
+def test_a_root_module_named_like_the_stdlib_does_not_shadow_it(tmp_path):
+    """On PYTHONPATH the package root came before the standard library: a root
+    `numbers.py` beside the package broke every script in a subfolder (numpy
+    imports numbers). The real interpreter, the harness's own sitecustomize."""
+    import subprocess
+    import sys
+
+    from reprobe.runners.base import SITECUSTOMIZE
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "sitecustomize.py").write_text(SITECUSTOMIZE, encoding="utf-8")
+    (tmp_path / "root" / "mypkg").mkdir(parents=True)
+    (tmp_path / "root" / "mypkg" / "__init__.py").write_text("X = 1\n", encoding="utf-8")
+    (tmp_path / "root" / "numbers.py").write_text("raise SystemExit('shadowed')\n", encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(tmp_path / "site"), "REPROBE_OWN_ROOT": str(tmp_path / "root")}
+    out = subprocess.run([sys.executable, "-c", "import numbers, mypkg, fractions; print(mypkg.X)"],
+                         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0 and out.stdout.strip() == "1", out.stderr
+
+
+def test_every_run_tree_carries_the_harness_sitecustomize(tmp_path):
+    from types import SimpleNamespace
+
+    from reprobe.config import load_config
+    from reprobe.orchestrator import Orchestrator
+    from reprobe.runners.base import SITE_DIR, SITECUSTOMIZE
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("", encoding="utf-8")
+    Orchestrator(load_config())._copy_run_tree(tmp_path / "src", tmp_path / "run", SimpleNamespace(environment={}))
+    assert (tmp_path / "run" / SITE_DIR / "sitecustomize.py").read_text(encoding="utf-8") == SITECUSTOMIZE
 
 
 def test_an_rpy2_notebook_gets_the_harness_r_library(tmp_path):

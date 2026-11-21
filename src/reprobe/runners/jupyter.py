@@ -71,7 +71,7 @@ class JupyterRunner(BaseRunner):
         # artifact failing. The LANGUAGE is the notebook's own.
         cmd = (
             "export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache MPLCONFIGDIR=/tmp; "
-            f"export PYTHONPATH=/work/.reprobe_deps{own_pythonpath(ctx)}${{PYTHONPATH:+:$PYTHONPATH}} "
+            f"export {own_pythonpath(ctx)} "
             "PYTHONUNBUFFERED=1; "
             # R notebooks, and Python ones driving R through rpy2 (base-py ships the
             # same R build as base-r, so packages installed there load here)

@@ -257,17 +257,23 @@ def test_the_reserved_path_filter_is_case_insensitive(tmp_path):
     """On a case-folding host (Windows, macOS) `.REPROBE_DEPS` IS `.reprobe_deps`."""
     from reprobe.models import Report
     from reprobe.orchestrator import Orchestrator
+    from reprobe.runners.base import SITE_DIR, SITECUSTOMIZE
 
     src = tmp_path / "src"
     (src / ".REPROBE_DEPS").mkdir(parents=True)
     (src / ".REPROBE_DEPS" / "sitecustomize.py").write_text("print('x')\n", encoding="utf-8")
     (src / ".Reprobe_env").mkdir()
+    (src / ".REPROBE_SITE").mkdir()
+    (src / ".REPROBE_SITE" / "sitecustomize.py").write_text("print('x')\n", encoding="utf-8")
     (src / "run.py").write_text("print(1)\n", encoding="utf-8")
     run = tmp_path / "run"
     Orchestrator(workroot=tmp_path)._copy_run_tree(
         src, run, Report(submission_id="x", harness_version="t", timestamp=""))
     assert (run / "run.py").is_file()
-    assert not any(c.name.casefold().startswith(".reprobe_") for c in run.iterdir())
+    # only the harness's own sitecustomize, never the author's
+    assert [c.name for c in run.iterdir() if c.name.casefold().startswith(".reprobe_")] == [SITE_DIR]
+    assert [c.name for c in (run / SITE_DIR).iterdir()] == ["sitecustomize.py"]
+    assert (run / SITE_DIR / "sitecustomize.py").read_text(encoding="utf-8") == SITECUSTOMIZE
 
 
 # --------------------------------------------------------------------------- #

@@ -402,6 +402,15 @@ reproduced against the real code before it was fixed.
   refused by the central directory's byte size; a tar long-name or PAX header
   is refused before tarfile reads it whole (a 199 KB .tar.gz took 400 MB);
   dependency files over 2 MB are not parsed (a 33 MB pyproject.toml took 92 s).
+- **The artifact's own package is searched last.** Its root went on
+  PYTHONPATH, ahead of the standard library: a root `numbers.py` beside the
+  package killed every script in a subfolder at `import numpy`. A harness
+  `sitecustomize.py` now appends it after the standard library and
+  site-packages, where `pip install -e .` puts it.
+- **R packages install only where an R loads them.** An rpy2-only artifact
+  also pulled base-r to install the same tree again, for no step; base-r now
+  gets the CRAN installs only when an R script, R Markdown file or R notebook
+  runs.
 
 ### Known limits
 
