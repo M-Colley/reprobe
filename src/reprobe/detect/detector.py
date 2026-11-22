@@ -64,9 +64,11 @@ def detect(
                         s.args["rpy2"] = True
                 elif s.kind == "r" and "cwd" not in s.args and (wd := signatures.r_working_dir(f, root)):
                     s.args["cwd"] = wd
-                if pkg_root is not None and "pythonpath" not in s.args and (
+                if "pythonpath" not in s.args and (
                         s.kind == "python" or s.args.get("language") == "python"):
-                    s.args["pythonpath"] = pkg_root
+                    pp = pkg_root if pkg_root is not None else signatures.import_root(f, root)
+                    if pp is not None:
+                        s.args["pythonpath"] = pp
             return m_result, meta
         # codecheck or partial manifest: use heuristic steps + lifted expected outputs
         exp = meta.get("expected_outputs", [])

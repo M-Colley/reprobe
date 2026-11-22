@@ -22,6 +22,9 @@ _SKIP_DIRS = {".git", ".hg", "node_modules", "__pycache__", ".ipynb_checkpoints"
               # carries the env the install phase built) otherwise contributes
               # thousands of files and every dependency of every dependency.
               "site-packages", "dist-packages",
+              # macOS Finder's zip metadata: `__MACOSX/x/._f.py` is a resource fork, not
+              # code — 26 of them ran as steps of an ACM-badged deposit (zenodo.23205571)
+              "__MACOSX",
               ".reprobe_env", ".reprobe_deps", ".reprobe_cache", ".reprobe_Rlib", ".reprobe_req", ".reprobe_site"}
 # The fetched tree is untrusted. Walk it without following symlinks (no loops,
 # no escaping the fetch dir) and stop after a sane cap so a deposit with millions
@@ -913,7 +916,7 @@ def _iter_files(root: Path):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]   # prune, never descend
         for f in files:
             p = Path(dirpath) / f
-            if p.is_symlink():                               # don't inventory/run symlinked files
+            if p.is_symlink() or f.startswith("._"):         # links; AppleDouble forks
                 continue
             seen += 1
             if seen > _MAX_SCAN_FILES:
@@ -1058,6 +1061,41 @@ def own_package_root(root: Path) -> str | None:
     return "" if has_pkg(root) else None
 
 
+def import_root(script: Path, root: Path) -> "str | None":
+    """The folder a Python script's (or notebook's) own imports are rooted in,
+    when that is an ancestor of its own folder: ``dcp-main/dcp/core/pipeline.py``
+    doing ``from dcp.utils import x`` runs as its authors ran it — from
+    ``dcp-main`` — only with that folder importable. Run as a file, Python puts
+    only ``dcp/core`` on the path, and the step failed on the artifact's own
+    package (two ACM-badged artifacts). The nearest such folder, relative to
+    ``root`` ("" for the root itself), or None."""
+    text = _py_ipynb_source(script) if script.suffix == ".ipynb" else _read_head(script)
+    stdlib = getattr(sys, "stdlib_module_names", frozenset())
+    tops = {t for t in (p.split(".", 1)[0] for p in _py_import_paths(text))
+            if t and t not in stdlib and re.fullmatch(_PY_MOD, t)}
+
+    def provides(d: Path, t: str) -> bool:
+        if (d / f"{t}.py").is_file():
+            return True
+        pkg = d / t
+        try:
+            return pkg.is_dir() and not pkg.is_symlink() and any(
+                c.suffix == ".py" for c in pkg.iterdir() if c.is_file())
+        except OSError:
+            return False
+
+    tops = {t for t in tops if not provides(script.parent, t)}      # sys.path[0] has those
+    if not tops:
+        return None
+    d = script.parent
+    while d != root and d.is_relative_to(root):
+        d = d.parent
+        if any(provides(d, t) for t in sorted(tops)):
+            rel = d.relative_to(root).as_posix()
+            return "" if rel == "." else rel
+    return None
+
+
 def _knit_children(rmds: list[Path]) -> set[Path]:
     """R Markdown files another document includes as a knitr child (a chunk
     option ``child=`` or ``knit_child()``). Rendered on their own they lack the
@@ -1149,6 +1187,16 @@ def scan(src_dir: str | Path) -> DetectResult:
     qmds = [p for p in files if p.suffix.lower() == ".qmd"]
     vendored = [p for p in notebooks + rmds + r_scripts + py_files if third_party(p)]
     notebooks = [p for p in notebooks if not third_party(p)]
+    # Notebooks under docs/ are documentation (nbsphinx pages of a bundled
+    # framework: 11 of them ran as the steps of zenodo.23205571) — unless they
+    # are all there is.
+    in_docs = [p for p in notebooks if any(part.lower() in ("docs", "doc")
+                                           for part in p.relative_to(root).parts[:-1])]
+    if in_docs and (len(in_docs) < len(notebooks) or py_files or r_scripts or rmds):
+        notebooks = [p for p in notebooks if p not in in_docs]
+        notes.append(f"{len(in_docs)} notebook(s) under docs/ were taken to be documentation and NOT "
+                     "run: " + ", ".join(sorted(rel(p) for p in in_docs)[:8])
+                     + (" …" if len(in_docs) > 8 else ""))
     # knitr children and bookdown chapters are rendered as part of their parent
     children = _knit_children(rmds)
     books = _bookdown_dirs(rmds)
@@ -1237,8 +1285,13 @@ def scan(src_dir: str | Path) -> DetectResult:
             args["language"] = notebook_language(path)
             if args["language"] == "python" and notebook_uses_rpy2(path):
                 args["rpy2"] = True
-        if pkg_root is not None and (runner == "python" or args.get("language") == "python"):
-            args["pythonpath"] = pkg_root
+        if runner == "python" or args.get("language") == "python":
+            pp = pkg_root if pkg_root is not None else import_root(path, root)
+            if pp is not None:
+                args["pythonpath"] = pp
+                if pkg_root is None:
+                    notes.append(f"{rel(path)} imports its own modules from {pp or 'the repository root'}"
+                                 "; that folder was made importable, as running from it would")
         elif runner == "r" and (wd := r_working_dir(path, root)):
             args["cwd"] = wd
         steps.append(RunStep(runner=runner, target=rel(path), kind=runner, args=args))
@@ -1262,7 +1315,9 @@ def scan(src_dir: str | Path) -> DetectResult:
         if names:
             why = ("notebooks/R Markdown assumed to drive the analysis" if (notebooks or rmds)
                    else "neither entry-named nor numbered, and other scripts were found to run the "
-                        "analysis")
+                        "analysis" if planned
+                   else "neither entry-named nor numbered, so no entry point could be identified "
+                        "and nothing was run")
             notes.append(f"{len(names)} {lang} script(s) present but NOT run ({why}): "
                          + ", ".join(names[:8]) + (" …" if len(names) > 8 else "")
                          + ". If they are part of the analysis, declare `run: steps:` in "

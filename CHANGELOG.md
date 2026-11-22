@@ -416,6 +416,20 @@ reproduced against the real code before it was fixed.
   while base-r was there. R steps now run in base-r; an rpy2 notebook, which
   no image present can run, is skipped with the reason, and its R installs
   are not sent to the R-less fallback.
+- **Found by the ACM-badged benchmark** (36 artifacts, baseline at 44555a0:
+  4 ran cleanly, 14 ran nothing; `benchmarks/results/`):
+  - a deposit that is one archive one folder down (Zenodo's GitHub
+    integration names it `Owner/repo-tag.zip`) was never extracted, and a
+    release offered as both `.zip` and `.tar.gz` neither — "no runnable
+    analyses" for three artifacts;
+  - `__MACOSX/` and `._*` AppleDouble files ran as 26 notebook steps;
+  - notebooks under `docs/` (a bundled framework's documentation) ran as the
+    analysis; they are documentation when anything else is there;
+  - a script inside its project (`dcp-main/dcp/core/pipeline.py`, `from dcp…`)
+    failed on its own package: the nearest ancestor folder that provides it is
+    made importable, as running from there would;
+  - with nothing run, scripts were said to be skipped because "other scripts
+    were found to run the analysis", and the verdict carried no note.
 - **Old pins get the Python, and the dependencies, of their day.** base-py has
   one Python (3.13), and a 2022 artifact pinning `scikit-learn==1.1.2` and
   `pandas==1.4.3` failed to install — no wheels past CPython 3.10, and the

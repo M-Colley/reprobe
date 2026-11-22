@@ -491,10 +491,47 @@ def _extract_tar(t: tarfile.TarFile, dest: Path, warnings: list[str]) -> None:
     t.extractall(dest, members=members, filter="data")
 
 
+def _lone_file(dest: Path) -> Optional[Path]:
+    """The only regular file under ``dest`` (links not followed), or None —
+    stopping at the second file, so a large deposit costs nothing."""
+    found: Optional[Path] = None
+    for root, dirs, files in os.walk(dest, followlinks=False):
+        dirs[:] = [d for d in dirs if not (Path(root) / d).is_symlink()]
+        for f in files:
+            p = Path(root) / f
+            if p.is_symlink() or not p.is_file():
+                continue
+            if found is not None:
+                return None
+            found = p
+    return found
+
+
+def _archive_stem(p: Path) -> str:
+    n = p.name.lower()
+    for suf in (".tar.gz", ".tgz", ".zip"):
+        if n.endswith(suf):
+            return n[: -len(suf)]
+    return n
+
+
 def maybe_unzip(dest: Path, warnings: list[str]) -> None:
     """If the deposit is a single .zip/.tar.gz archive, extract it in place."""
     zips = list(dest.glob("*.zip"))
     tars = list(dest.glob("*.tar.gz")) + list(dest.glob("*.tgz"))
+    if not zips and not tars and (lone := _lone_file(dest)) is not None:
+        # Zenodo's GitHub integration names the file `Owner/repo-tag.zip`: the
+        # deposit IS one archive, one folder down, and it went unextracted —
+        # "no runnable analyses" for three ACM-badged artifacts (EuroSys, SC, SOSP).
+        if lone.name.lower().endswith(".zip"):
+            zips = [lone]
+        elif lone.name.lower().endswith((".tar.gz", ".tgz")):
+            tars = [lone]
+    if len(zips) == 1 and len(tars) == 1 and _archive_stem(zips[0]) == _archive_stem(tars[0]):
+        # one release offered in both formats (TuxBot-0.1.zip + TuxBot-0.1.tar.gz)
+        warnings.append(f"the deposit offers {zips[0].name} and {tars[0].name}, the same name in two "
+                        f"formats; {zips[0].name} was extracted and taken to be the artifact")
+        tars = []
     try:
         if len(zips) == 1 and not tars:
             n = zip_entry_count(zips[0])

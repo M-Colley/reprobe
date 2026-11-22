@@ -365,6 +365,12 @@ class Orchestrator:
             badges_cfg=self.config.badges, functional_requested=functional_requested,
             ran=ran and not dry_run, install_error=install_err, declared_env_error=declared_err)
         report.verdict = badge_rules.verdict(results, ran, install_err, declared_err, dry_run=dry_run)
+        if do_run and not detect_res.steps and not report.verdict.get("note"):
+            # 14 of 36 ACM-badged artifacts ended here with an empty note
+            report.verdict["note"] = (
+                "nothing was run: no entry point was identified (the detection notes list what was "
+                "found). Declare `run: steps:` in autoui-repro.yml to have it run — "
+                "no statement about whether the code works")
         report.fix_list = _fix_list(report, results)
         report.not_verified = sorted(
             {x for r in results for x in r.not_verified} | set(report.not_verified))

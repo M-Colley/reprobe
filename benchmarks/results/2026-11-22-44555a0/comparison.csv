@@ -1,0 +1,37 @@
+row,url,venue,year,badges,strongest,language,verdict,available,functional,steps,steps_passed,step_statuses
+1,https://github.com/MAIAN-tool/MAIAN,ACSAC,2018,functional,functional,Python,not-run,candidate,not-evaluated,0,0,
+2,https://github.com/shach33/shredder,ACSAC,2018,functional,functional,Python,runs-with-failures,candidate,not-met,4,0,fail
+3,https://github.com/Aurore54F/JStap,ACSAC,2019,reusable,reusable,Python,not-run,candidate,not-evaluated,0,0,
+4,https://github.com/garrisongys/STRIP,ACSAC,2019,reusable,reusable,Jupyter Notebook,runs-with-failures,candidate,not-met,1,0,fail
+5,https://github.com/soeai/MAppGraph,ACSAC,2021,reusable,reusable,Python,runs-with-failures,candidate,not-met,4,0,fail
+6,https://github.com/James-Mattei/RE-Tool-Usability-Artifacts,ACSAC,2022,functional,functional,R,runs,candidate,candidate,1,1,pass
+7,https://github.com/moesabry/ACSAC22-Artifacts,ACSAC,2022,functional,functional,Python,not-run,candidate,not-evaluated,0,0,
+8,https://github.com/scy-phy/ICS_Generic_Concealment_Attacks,ACSAC,2022,reusable,reusable,Jupyter Notebook,runs-with-failures,candidate,not-met,6,2,fail;pass
+9,https://github.com/X1anWang/ENIDrift-Artifact,ACSAC,2022,functional,functional,Python,runs-with-failures,candidate,not-met,2,0,fail
+10,https://github.com/MohamadMansouri/fault-tolerant-secure-agg,ACSAC,2022,functional,functional,Python,runs,candidate,candidate,6,6,pass
+11,https://github.com/ucsb-seclab/popkorn-artifact/,ACSAC,2022,reusable,reusable,Python,not-run,candidate,not-evaluated,0,0,
+12,https://github.com/GUSecLab/smartdns-study,ACSAC,2022,functional,functional,Python,not-run,candidate,not-evaluated,0,0,
+13,https://github.com/dpra-dp/dpra,ACSAC,2023,reusable;reproduced,reproduced,Jupyter Notebook,runs-with-failures,candidate,not-met,6,0,fail;resource-limit
+14,https://github.com/innotommy/OAuthpaper-code,ACSAC,2023,reusable;reproduced,reproduced,Python,runs-with-failures,candidate,not-met,1,0,fail
+15,https://github.com/EQuiw/2023-detection-scalingattacks.git,ACSAC,2023,functional,functional,Jupyter Notebook,runs-with-failures,candidate,not-met,1,0,fail
+16,https://github.com/projectcejorp/project,ACSAC,2023,functional,functional,Python,runs-with-failures,candidate,not-met,1,0,fail
+17,https://github.com/tum-itsec/randcompile,ACSAC,2023,reusable;reproduced,reproduced,Python,runs,candidate,candidate,1,1,pass
+18,https://doi.org/10.5281/zenodo.23205571,USENIX ATC,2026,available;functional;reproduced,reproduced,Python,runs-with-failures,granted,not-met,26,0,fail
+19,https://github.com/isbogdanov/agent-design-study,CAIS,2026,available;functional;reproduced,reproduced,Python,runs-with-failures,candidate,not-met,1,0,fail
+20,https://github.com/googleinterns/cluster-resource-forecast,EuroSys,2021,available;functional;reproduced,reproduced,Python,runs-with-failures,candidate,not-met,1,0,fail
+21,https://github.com/smsajal/TraceSplitter,EuroSys,2021,available,available,Python,not-run,candidate,not-evaluated,0,0,
+22,https://doi.org/10.5281/zenodo.7143413,EuroSys,2023,available;functional,functional,Jupyter Notebook,runs-with-failures,granted,not-met,8,0,fail
+23,https://doi.org/10.5281/zenodo.13712326,EuroSys,2025,available;functional,functional,Python,not-run,granted,not-evaluated,0,0,
+24,https://github.com/CentML/LoRAFusion,EuroSys,2026,available;functional;reproduced,reproduced,Python,not-run,candidate,not-evaluated,0,0,
+25,https://github.com/ddxxdd-code/PASS/tree/main,EuroSys,2026,available;functional;reproduced,reproduced,Python,not-run,candidate,not-evaluated,0,0,
+26,https://doi.org/10.5281/zenodo.5262865,SC,2021,available;functional;reproduced,reproduced,Python,not-run,granted,not-evaluated,0,0,
+27,https://github.com/fsuri/SOSP21_artifact_eval,SOSP,2021,available;functional;reproduced,reproduced,Python,not-run,candidate,not-evaluated,0,0,
+28,https://github.com/VeriGu/sosp-paper211-ae,SOSP,2021,available;functional;reproduced,reproduced,Python,not-run,candidate,not-evaluated,0,0,
+29,https://gitlab.com/hipress/hipress,SOSP,2021,available;functional;reproduced,reproduced,Python,runs,candidate,candidate,1,1,pass
+30,https://github.com/stanford-futuredata/POP,SOSP,2021,available;functional;reproduced,reproduced,Python,runs-with-failures,candidate,not-met,2,1,fail;pass
+31,https://github.com/xlab-uiuc/acto/tree/sosp-ae,SOSP,2023,available;functional;reproduced,reproduced,Python,runs-with-failures,candidate,not-met,1,0,fail
+32,https://github.com/ubc-cirrus-lab/caribou,SOSP,2024,available;functional,functional,Python,not-run,candidate,not-evaluated,0,0,
+33,https://doi.org/10.5281/zenodo.16921000,SOSP,2025,available;functional;reproduced,reproduced,Python,runs-with-failures,candidate,not-met,1,0,fail
+34,https://github.com/OrderLab/phoenix,SOSP,2025,available;functional;reproduced,reproduced,Python,not-run,candidate,not-evaluated,0,0,
+35,https://doi.org/10.5281/zenodo.22025609,SOSP,2026,available;functional;reproduced,reproduced,Python,not-run,granted,not-evaluated,0,0,
+36,https://doi.org/10.5281/zenodo.21285693,SOSP,2026,available;functional;reproduced,reproduced,Python,not-run,granted,not-evaluated,0,0,
