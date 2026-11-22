@@ -287,6 +287,8 @@ class GitHostFetcher:
                 raise FetchError(f"git checkout {want_ref} failed: {co.stderr.strip()[:200]}")
 
         sha = run_git(["rev-parse", "HEAD"], cwd=dest).stdout.strip()
+        # the fetched revision's commit date: what the install phase calls the artifact's date
+        when = run_git(["log", "-1", "--format=%cI", "HEAD"], cwd=dest).stdout.strip()[:10]
         warnings = []
         # Ask whether THIS REPO tracks files in LFS. The old gate was
         # `git lfs version`, which only proves the CLI exists on the host, so
@@ -308,5 +310,6 @@ class GitHostFetcher:
             input=ref, resolved_type="git", src_dir=str(dest),
             pin=Pin(kind="git_sha", value=sha),
             fetch_layer="git-clone", checksum_verified=False,
-            warnings=warnings, metadata={"url": url, "ref": want_ref},
+            warnings=warnings, metadata={"url": url, "ref": want_ref, "artifact_date": when or None,
+                                         "artifact_date_source": "commit date of the fetched revision"},
         )

@@ -86,6 +86,10 @@ install:
   # pinned releases ship no wheels for a newer one (envbuild/pyversion.py).
   # Empty turns the choice off.
   python_versions: ["3.13", "3.12", "3.11", "3.10", "3.9", "3.8", "3.7"]
+  # An artifact at least this many days old (by its fetch date: git commit, Zenodo
+  # record) gets its open Python dependencies as they were on that date, in a fresh
+  # environment, instead of the base image's current ones. Absent turns it off.
+  as_of_min_age_days: 365
 
 tools:
   repo2docker: "jupyter-repo2docker==2024.07.0"   # opt-in fallback builder only

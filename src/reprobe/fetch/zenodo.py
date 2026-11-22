@@ -69,6 +69,10 @@ class ZenodoFetcher:
             warnings=warnings,
             metadata={"record_id": rec_id, "title": meta.get("metadata", {}).get("title"),
                       "license": (meta.get("metadata", {}).get("license") or {}),
-                      "checksums": stats},
+                      "checksums": stats,
+                      # when the record was deposited (`publication_date` is free text the
+                      # uploader sets); the install phase's artifact date
+                      "artifact_date": str(meta.get("created") or "")[:10] or None,
+                      "artifact_date_source": "Zenodo record creation date"},
         )
 

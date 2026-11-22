@@ -177,6 +177,8 @@ class EnvPlan(BaseModel):
     # The Python of that env when the harness chose it for the artifact's pins
     # (envbuild.pyversion), None when the base image's Python was used.
     python_version: Optional[str] = None
+    # Set when open dependencies were installed as of the artifact's date (the day after it).
+    dependencies_as_of: Optional[str] = None
     base_image_digest: Optional[str] = None
     resolved_deps_digest: Optional[str] = None
     repo2docker_version: Optional[str] = None

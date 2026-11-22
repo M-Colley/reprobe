@@ -82,6 +82,86 @@ def exact_pins(lines: Iterable[str]) -> list[tuple[str, str]]:
     return out
 
 
+def open_names(lines: Iterable[str]) -> list[tuple[str, SpecifierSet]]:
+    """``(name, specifier)`` of each requirement NOT pinned to one release."""
+    pinned = {n for n, _ in exact_pins(lines)}
+    out = []
+    for line in lines:
+        try:
+            req = Requirement(line.split(" #", 1)[0].strip())
+        except InvalidRequirement:
+            continue
+        if canonicalize_name(req.name) not in pinned:
+            out.append((canonicalize_name(req.name), req.specifier))
+    return out
+
+
+@lru_cache(maxsize=1024)
+def release_dates(name: str) -> Optional[tuple[tuple[str, str], ...]]:
+    """``(version, first upload time)`` of each release of a PyPI project that has a
+    file not yanked, or None when PyPI cannot say. Tests replace this."""
+    import requests
+    try:
+        r = requests.get(f"https://pypi.org/pypi/{name}/json", timeout=_TIMEOUT_S,
+                         headers={"Accept": "application/json"})
+        if r.status_code != 200:
+            return None
+        data = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    out = []
+    for ver, files in (data.get("releases") or {}).items():
+        times = [str(f.get("upload_time_iso_8601") or "") for f in files or [] if not f.get("yanked")]
+        times = [t for t in times if t]
+        if times:
+            out.append((ver, min(times)))
+    return tuple(out)
+
+
+def as_of_version(name: str, cutoff: str, spec: Optional[SpecifierSet] = None) -> Optional[str]:
+    """The newest final release of ``name`` first uploaded before ``cutoff`` (ISO
+    8601) that ``spec`` allows: what ``pip install name`` gave on that day."""
+    from packaging.version import InvalidVersion, Version
+    best = None
+    for ver, first in release_dates(name) or ():
+        if first.replace("Z", "+00:00") >= cutoff.replace("Z", "+00:00"):
+            continue
+        try:
+            v = Version(ver)
+        except InvalidVersion:
+            continue
+        if v.is_prerelease or v.is_devrelease or (spec is not None and v not in spec):
+            continue
+        if best is None or v > best:
+            best = v
+    return str(best) if best is not None else None
+
+
+def as_of_pins(names: Iterable[tuple[str, Optional[SpecifierSet]]], cutoff: str) -> list[tuple[str, str]]:
+    """``(name, version)`` as of ``cutoff`` for each name PyPI knows; the rest are left out."""
+    todo = list(dict.fromkeys((canonicalize_name(n), s) for n, s in names))
+    with ThreadPoolExecutor(8) as ex:
+        found = list(ex.map(lambda p: as_of_version(p[0], cutoff, p[1]), todo))
+    return [(n, v) for (n, _), v in zip(todo, found, strict=True) if v]
+
+
+def artifact_cutoff(date: Optional[str], min_age_days: int, today: Optional[str] = None) -> Optional[str]:
+    """The as-of cutoff (UTC midnight after ``date``, YYYY-MM-DD) when the artifact is at
+    least ``min_age_days`` old, else None."""
+    from datetime import date as _date
+    from datetime import timedelta
+    if not date or not re.fullmatch(r"\d{4}-\d\d-\d\d", date[:10]):
+        return None
+    try:
+        d = _date.fromisoformat(date[:10])
+        now = _date.fromisoformat(today) if today else _date.today()
+    except ValueError:
+        return None
+    if (now - d).days < min_age_days:
+        return None
+    return (d + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+
+
 def _supports(files: tuple[str, ...], requires_python: Optional[str], minor: str) -> bool:
     """Whether a release installs on CPython ``minor`` (e.g. "3.10") on Linux x86-64.
     A release with compiled wheels but none for that Python is NOT supported: its
@@ -131,10 +211,11 @@ def declared_python(src: Path, requires_python: Optional[str] = None) -> Optiona
 
 
 def choose_python(pins: list[tuple[str, str]], declared: Optional[SpecifierSet] = None,
-                  candidates: tuple[str, ...] = DEFAULT_CANDIDATES) -> Optional[Choice]:
+                  candidates: tuple[str, ...] = DEFAULT_CANDIDATES, force: bool = False) -> Optional[Choice]:
     """The newest candidate every exact pin installs on, or None when the base
     image's Python (``candidates[0]``) will do. When no candidate fits all pins,
-    the one fitting most of them (newest on a tie), with the rest named."""
+    the one fitting most of them (newest on a tie), with the rest named. ``force``
+    returns the base image's Python too (an as-of environment is always built)."""
     allowed = [c for c in candidates if declared is None or declared.contains(c + ".0", prereleases=True)]
     if not allowed:
         return None
@@ -143,7 +224,7 @@ def choose_python(pins: list[tuple[str, str]], declared: Optional[SpecifierSet] 
     known = {p: m for p, m in meta.items() if m is not None}
     fits = {c: [p for p, m in known.items() if _supports(m[0], m[1], c)] for c in allowed}
     best = max(allowed, key=lambda c: (len(fits[c]), -allowed.index(c)))
-    if best == candidates[0]:
+    if best == candidates[0] and not force:
         return None
     misfit = [f"{n}=={v}" for (n, v) in known if (n, v) not in fits[best]]
     newer = allowed[:allowed.index(best)]

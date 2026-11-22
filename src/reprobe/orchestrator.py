@@ -211,7 +211,8 @@ class Orchestrator:
 
         # -- (3) PLAN ENV ----------------------------------------------- #
         env_plan = plan_env(detect_res, manifest_meta, self.config, srcdir,
-                            allow_repo2docker=allow_repo2docker)
+                            allow_repo2docker=allow_repo2docker,
+                            artifact_date=(fetch_res.metadata or {}).get("artifact_date"))
         report.environment = _env_section(env_plan)
         if timeout_s:
             # A non-default budget makes this run non-comparable to a default one;
@@ -1531,6 +1532,7 @@ def _env_section(p: EnvPlan) -> dict[str, Any]:
         "strategy": p.strategy, "image": p.image, "env_provenance": p.env_provenance,
         "install_commands": p.install_commands, "conda_env_prefix": p.conda_env_prefix,
         "python_version": p.python_version,
+        "dependencies_as_of": p.dependencies_as_of,
         "repo2docker_version": p.repo2docker_version,
         "base_image_digest": p.base_image_digest, "resolved_deps_digest": p.resolved_deps_digest,
         "warnings": p.warnings,

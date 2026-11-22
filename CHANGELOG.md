@@ -444,6 +444,19 @@ reproduced against the real code before it was fixed.
   - Python 3.7 is a candidate (TensorFlow 1.13 ships wheels up to cp37); the
     scanned-import install no longer needs `importlib.metadata` (e2e
     `py37-notebook`).
+- **An old artifact's open dependencies are installed as of its date.** Unpinned
+  requirements and undeclared imports got today's releases into the base image:
+  pandas 3 without `DataFrame.first`, Keras 3 without `np_utils`, matplotlib without
+  `font_manager._rebuild` (benchmark: cluster-resource-forecast, STRIP, POP). The
+  fetch now records the artifact's date (the fetched commit's date; a Zenodo
+  record's creation date; other hosts: none yet). An artifact at least
+  `install.as_of_min_age_days` (365) old gets a fresh micromamba environment; each
+  open name is held to the newest final release PyPI had before that date (pip
+  constraints for requirement files, `name==version` for detected imports, exact
+  pins untouched); the Python is the newest those releases ship wheels for; their
+  own dependencies resolve as of the same date where pip has
+  `--uploaded-prior-to` (Python 3.9+). The report lists the versions and the date
+  (`environment.dependencies_as_of`).
 - **Guessed `torch`, `torchvision` and `torchaudio` imports get the CPU builds.** No
   container gets a GPU, and PyPI's Linux torch brings ~3 GB of CUDA wheels: two
   benchmark artifacts (SV2TTS, CacheSched) filled the runner's disk with them. The

@@ -41,11 +41,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+from packaging.utils import canonicalize_name
 
 from ..config import Config
 from ..docker_exec import docker_available, image_present
 from ..models import DetectResult, EnvPlan
-from .pyversion import choose_python, declared_python, exact_pins
+from .pyversion import artifact_cutoff, as_of_pins, choose_python, declared_python, exact_pins, open_names
 from .sanitize import (
     DEFAULT_CONDA_CHANNELS,
     MAX_EMBED_BYTES,
@@ -228,7 +229,9 @@ def _py(conda_prefix: Optional[str]) -> str:
 TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 
 
-def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) -> str:
+def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str],
+                                 versions: Optional[dict[str, str]] = None,
+                                 cutoff: Optional[str] = None) -> str:
     """Install statically-detected imports the environment does not already ship.
 
     The Python twin of ``_cran_install_command``, and it follows the same rules:
@@ -255,7 +258,11 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) 
     Distribution names are pre-validated to ``[A-Za-z0-9][A-Za-z0-9._-]*`` and
     module names to an identifier, so embedding them in the double-quoted Python
     literals inside this single-quoted ``-c`` argument cannot inject shell or
-    Python code. (The code therefore uses no single quotes.)"""
+    Python code. (The code therefore uses no single quotes.)
+
+    ``versions`` pins a name to one release (the as-of-date install: what pip gave
+    on the artifact's date), and ``cutoff`` resolves their dependencies as of then,
+    with a pip that has --uploaded-prior-to. Versions are validated like names."""
     from ..detect.signatures import py_module_for_dist
 
     # An extra gets an empty module name, which the generated code treats as
@@ -267,6 +274,9 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) 
     pairs = [("" if "[" in d else py_module_for_dist(d), d) for d in dists]
     spec = ", ".join(f'("{m}", "{d}")' for m, d in pairs)
     target = '"--target=/work/.reprobe_deps"' if not conda_prefix else ""
+    pinned = ", ".join(f'"{d}": "{v}"' for d, v in (versions or {}).items()
+                       if d in dists and re.fullmatch(r"[0-9A-Za-z.+!_-]+", v))
+    cut = cutoff if cutoff and re.fullmatch(r"\d{4}-\d\d-\d\dT00:00:00Z", cutoff) else ""
     code = (
         # -I drops PYTHONPATH, so earlier installs into /work/.reprobe_deps are
         # added back explicitly (after the stdlib, never before it). The working
@@ -287,6 +297,12 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) 
         'print("reprobe: imports the environment does not provide:", need or "none", flush=True); '
         'W = "/var/tmp/reprobe-wheels"; '
         'run = lambda *a: subprocess.call([sys.executable, "-I", "-m", "pip", *a]); '
+        f"P = {{{pinned}}}; " 'S = lambda d: d + "==" + P[d] if d in P else d; '
+        # pip < 26 (the Python 3.8 and older envs) has no --uploaded-prior-to: there
+        # only the pinned names themselves are as of the date.
+        f'UP = ["--uploaded-prior-to={cut}"] if "{cut}" and "--uploaded-prior-to" in '
+        'subprocess.run([sys.executable, "-I", "-m", "pip", "download", "--help"], '
+        "capture_output=True, text=True).stdout else []; "
         # No container gets a GPU, and PyPI's Linux torch pulls ~3 GB of CUDA
         # wheels (benchmark rows 16, 18 filled the runner's disk). The CPU builds
         # come from PyTorch's own index: only these three names, without their
@@ -295,15 +311,15 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) 
         # --find-links, where `X+cpu` sorts above PyPI's `X`.
         f'cpu = [d for d in need if d in ("torch", "torchvision", "torchaudio") and run("download", '
         f'"--no-input", "--only-binary=:all:", "--no-deps", "--index-url", "{TORCH_CPU_INDEX}", '
-        '"-d", W, d) == 0]; '
+        '"-d", W, S(d)) == 0]; '
         'cpu and print("reprobe: CPU builds (no GPU in the sandbox):", cpu, flush=True); '
         'got = [d for d in need if run("download", "--no-input", "--only-binary=:all:", '
-        '"--find-links", W, "-d", W, d) == 0]; '
+        '"--find-links", W, *UP, "-d", W, S(d)) == 0]; '
         f"T = [{target}]; "
         'L = T and "/work/.reprobe_deps" or __import__("sysconfig").get_paths()["purelib"]; '
         "ls = lambda: sorted(os.listdir(L)) if os.path.isdir(L) else []; before = ls(); "
         'inst = lambda *ds: run("install", "--no-input", "--no-index", "--only-binary=:all:", '
-        '"--find-links", W, *T, *ds); '
+        '"--find-links", W, *T, *map(S, ds)); '
         "bad = bool(got) and inst(*got) != 0; "
         # Import names guessed from a whole tree can pin one another out (row 18 of
         # benchmarks/acm-badged.csv: guidance vs. vllm left 60 imports uninstalled).
@@ -328,6 +344,7 @@ def plan(
     src_dir: str | Path,
     *,
     allow_repo2docker: bool = False,
+    artifact_date: Optional[str] = None,
 ) -> EnvPlan:
     src = Path(src_dir)
     env = (manifest_meta or {}).get("environment", {}) or {}
@@ -360,7 +377,9 @@ def plan(
                              or DEFAULT_CONDA_CHANNELS),
         step_dirs=_step_dirs(detect_result),
         r_install_keys=_r_install_keys(detect_result),
-        python_versions=tuple(str(v) for v in (config.pins.get("install") or {}).get("python_versions") or ()))
+        python_versions=tuple(str(v) for v in (config.pins.get("install") or {}).get("python_versions") or ()),
+        artifact_date=artifact_date,
+        as_of_min_age_days=(config.pins.get("install") or {}).get("as_of_min_age_days"))
     install, dep_warnings, conda_prefix = ip.commands, ip.warnings, ip.conda_prefix
 
     flags = detect_result.flags
@@ -406,6 +425,7 @@ def plan(
     return EnvPlan(strategy=strategy, image=image, env_provenance=provenance,
                    install_commands=install, install_origins=ip.origins, install_keys=ip.keys,
                    conda_env_prefix=conda_prefix, python_version=ip.python_version,
+                   dependencies_as_of=ip.cutoff[:10] if ip.as_of_pins else None,
                    warnings=warnings + dep_warnings)
 
 
@@ -539,7 +559,8 @@ def lint_requirements(path: Path) -> list[str]:
 
 
 def _requirements_command(src: Path, req_file: str, conda_prefix: Optional[str],
-                          cutoff: Optional[str] = None) -> tuple[Optional[str], list[str]]:
+                          cutoff: Optional[str] = None,
+                          constraints: Optional[dict[str, str]] = None) -> tuple[Optional[str], list[str]]:
     """`pip install -r <sanitised copy>`, into a built conda env when there is one.
 
     The author's requirements file is filtered (sanitize.filter_requirements): an
@@ -559,28 +580,39 @@ def _requirements_command(src: Path, req_file: str, conda_prefix: Optional[str],
     if len(content.encode("utf-8")) > MAX_EMBED_BYTES:
         return None, warnings + [f"'{req_file}' is too large to embed in the install command; it was "
                                  "NOT installed"]
-    return _pip_install_embedded(content, "requirements.txt", conda_prefix, cutoff), warnings
+    return _pip_install_embedded(content, "requirements.txt", conda_prefix, cutoff, constraints), warnings
 
 
 def _pip_install_embedded(content: str, name: str, conda_prefix: Optional[str],
-                          cutoff: Optional[str] = None) -> str:
+                          cutoff: Optional[str] = None,
+                          constraints: Optional[dict[str, str]] = None) -> str:
     """`pip install -r` of requirement lines embedded in the command (never read
     from the artifact's tree), into the conda env when there is one. ``cutoff``
     (see pyversion.Choice) resolves what the lines leave open as of that date —
-    with a pip that has --uploaded-prior-to (26.0+; Python 3.8's pip does not)."""
+    with a pip that has --uploaded-prior-to (26.0+; Python 3.8's pip does not).
+    ``constraints`` (the as-of-date install) holds each open requirement to the
+    release pip gave on the artifact's date, with every pip."""
     dest = f"{_REQ_DIR}/{name}"
     target = "" if conda_prefix else " --target=/work/.reprobe_deps"
+    cons = "".join(f"{n}=={v}\n" for n, v in sorted((constraints or {}).items())
+                   if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", n)
+                   and re.fullmatch(r"[0-9A-Za-z.+!_-]+", v))
+    prefix = ""
+    if cons:
+        prefix = embed_file_command(cons, f"{dest}.constraints") + " && "
+        target += f" -c {dest}.constraints"
     if cutoff and re.fullmatch(r"\d{4}-\d\d-\d\dT00:00:00Z", cutoff):
         target += (f" $({_py(conda_prefix)} -m pip install --help 2>/dev/null | "
                    f"grep -q -- --uploaded-prior-to && echo --uploaded-prior-to={cutoff})")
     # cd first: pip reads a requirement ending in an archive suffix as a file in ITS
     # working directory, which must not be the artifact's tree
-    return (f"{embed_file_command(content, dest)} && cd {_REQ_DIR} && "
+    return (f"{prefix}{embed_file_command(content, dest)} && cd {_REQ_DIR} && "
             f"{_py(conda_prefix)} -m pip install --no-input{target} -r {dest}")
 
 
 def _pyproject_command(src: Path, rel: str, conda_prefix: Optional[str],
-                       cutoff: Optional[str] = None) -> tuple[Optional[str], list[str]]:
+                       cutoff: Optional[str] = None,
+                       constraints: Optional[dict[str, str]] = None) -> tuple[Optional[str], list[str]]:
     """The PEP 621 ``[project].dependencies`` of a pyproject.toml, through the same
     filter as a requirements file. The project itself is never built or installed:
     its build backend is the artifact's code, and this phase has network."""
@@ -611,7 +643,8 @@ def _pyproject_command(src: Path, rel: str, conda_prefix: Optional[str],
     content = "\n".join(kept) + "\n"
     if len(content.encode("utf-8")) > MAX_EMBED_BYTES:
         return None, warnings + [f"'{rel}' dependencies are too large to embed; NOT installed"]
-    return _pip_install_embedded(content, "pyproject-requirements.txt", conda_prefix, cutoff), warnings
+    return (_pip_install_embedded(content, "pyproject-requirements.txt", conda_prefix, cutoff, constraints),
+            warnings)
 
 
 def _pyproject_meta(src: Path, rel: str) -> tuple[list[str], Optional[str]]:
@@ -715,6 +748,7 @@ class _InstallPlan:
     conda_prefix: Optional[str] = None
     python_version: Optional[str] = None     # set when the base image's Python was replaced
     cutoff: Optional[str] = None             # ...and the date unpinned deps resolve as of
+    as_of_pins: dict[str, str] = field(default_factory=dict)   # open names -> release on that date
 
     def add(self, cmd: Optional[str], origin: str, key: Optional[str] = None) -> None:
         if cmd:
@@ -762,7 +796,9 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                   conda_channels: tuple[str, ...] = DEFAULT_CONDA_CHANNELS,
                   step_dirs: tuple[str, ...] = (),
                   r_install_keys: tuple[str, ...] = ("r",),
-                  python_versions: tuple[str, ...] = ()) -> _InstallPlan:
+                  python_versions: tuple[str, ...] = (),
+                  artifact_date: Optional[str] = None,
+                  as_of_min_age_days: Optional[int] = None) -> _InstallPlan:
     """Any declared or detected dependency file the pinned-base builder does NOT
     install must surface as a warning — the report says what was not installed
     (never over-claim)."""
@@ -777,17 +813,45 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                            "ignored and the artifact's own files were auto-detected instead")
         dep = ""
 
+    # An old artifact whose dependencies are open gets them as they were on its date:
+    # today's pandas 3 has no DataFrame.first, today's Keras no np_utils (benchmark
+    # rows 20, 4). Off for an artifact younger than the threshold, or with no date.
+    as_of = (artifact_cutoff(artifact_date, as_of_min_age_days)
+             if as_of_min_age_days is not None and py_needed and executes_code else None)
+
     def python_env(lines: list[str], requires_python: Optional[str] = None) -> Optional[str]:
         """The conda prefix to install into: a Python-X env when the base image's
-        Python cannot take the pinned versions (see pyversion), else None."""
+        Python cannot take the pinned versions (see pyversion), or when the
+        artifact is old enough for the as-of-date install; else None."""
         if ip.conda_prefix or not python_versions:
             return ip.conda_prefix
-        choice = choose_python(exact_pins(lines), declared_python(src, requires_python),
-                               python_versions)
+        pins = exact_pins(lines)
+        if as_of:
+            fixed = {n for n, _ in pins}
+            names = [(n, sp) for n, sp in open_names(lines) if n not in fixed] + [
+                (canonicalize_name(d.split("[", 1)[0]), None) for d in detected_py_packages
+                if canonicalize_name(d.split("[", 1)[0]) not in fixed]
+            ip.as_of_pins = dict(as_of_pins(names, as_of))
+        choice = choose_python(pins + sorted(ip.as_of_pins.items()), declared_python(src, requires_python),
+                               python_versions, force=bool(as_of))
         if choice is None:
             return None
         ip.add(_python_env_command(choice.version, notebooks), DETECTED)
         ip.conda_prefix, ip.python_version, ip.cutoff = CONDA_ENV_PREFIX, choice.version, choice.cutoff
+        if as_of:
+            ip.cutoff = as_of
+            ip.warnings.append(
+                f"the artifact dates from {artifact_date[:10]} (over {as_of_min_age_days} days ago), so "
+                "its open dependencies were installed as they were then, not as of today, into a fresh "
+                f"Python {choice.version} environment ({CONDA_ENV_PREFIX}, micromamba) instead of the "
+                "base image's packages: "
+                + ", ".join(f"{n}=={v}" for n, v in sorted(ip.as_of_pins.items())[:12])
+                + (" …" if len(ip.as_of_pins) > 12 else "")
+                + " (the newest release on PyPI before that date; pip constraints and exact pins). "
+                  "Their own dependencies were resolved as of the same date where the environment's "
+                  "pip has --uploaded-prior-to (Python 3.9 and newer)"
+                + (f"; {choice.reason}" if choice.reason else ""))
+            return ip.conda_prefix
         ip.warnings.append(
             f"Python {choice.version} was used instead of the base image's {python_versions[0]}: "
             f"{choice.reason}. It was installed with micromamba into {CONDA_ENV_PREFIX}"
@@ -807,7 +871,7 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                                           if (src / "pyproject.toml").is_file() else None)
             except OSError:
                 pass
-        cmd, w = _requirements_command(src, rel, conda_prefix, ip.cutoff)
+        cmd, w = _requirements_command(src, rel, conda_prefix, ip.cutoff, ip.as_of_pins or None)
         ip.warnings.extend(w)
         ip.add(cmd, AUTHOR)
         uses_pip_target = uses_pip_target or (cmd is not None and not conda_prefix)
@@ -900,7 +964,7 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
             if not ip.conda_prefix:
                 deps, rp = _pyproject_meta(src, pyproject)
                 python_env(filter_requirement_lines(deps)[0], rp)
-            cmd, w = _pyproject_command(src, pyproject, ip.conda_prefix, ip.cutoff)
+            cmd, w = _pyproject_command(src, pyproject, ip.conda_prefix, ip.cutoff, ip.as_of_pins or None)
             ip.warnings.extend(w)
             if cmd:
                 ip.add(cmd, AUTHOR)
@@ -958,7 +1022,12 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
     py_pkgs = [str(d) for d in (detected_py_packages or [])]
     if py_pkgs:
         if py_needed:
-            ip.add(_py_detected_install_command(py_pkgs, ip.conda_prefix), DETECTED)
+            if as_of and not ip.conda_prefix:
+                python_env([])
+            versions = {d: ip.as_of_pins[n] for d in py_pkgs
+                        if (n := canonicalize_name(d.split("[", 1)[0])) in ip.as_of_pins}
+            ip.add(_py_detected_install_command(py_pkgs, ip.conda_prefix, versions,
+                                                ip.cutoff if as_of else None), DETECTED)
             uses_pip_target = uses_pip_target or not ip.conda_prefix
             # State what the install phase was ASKED to do, not what it achieved.
             # This warning is composed while the plan is built, before any
