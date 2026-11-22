@@ -68,8 +68,12 @@ def detect(
     if use_llm and llm_client is not None and signatures.is_ambiguous(heuristic):
         try:
             from ..llm import roles
-            suggestion = roles.detect_run_order(llm_client, src_dir, heuristic)
-            if suggestion is not None:
+            reasons: list[str] = []
+            suggestion = roles.detect_run_order(llm_client, src_dir, heuristic, reasons)
+            if suggestion is None:
+                heuristic.notes.append("LLM run-order proposal discarded: "
+                                       + ("; ".join(reasons) or "no reason recorded"))
+            else:
                 heuristic.llm_confidence = suggestion.get("confidence")
                 # Run only under --assisted, after the verdict, never counted in it.
                 heuristic.llm_steps = _complete([
@@ -81,8 +85,8 @@ def detect(
                     "LLM proposed an alternative run order (advisory; never counted in the verdict): "
                     + ", ".join(shlex.join([s.target, *s.argv]) for s in heuristic.llm_steps)
                 )
-        except Exception:
-            pass
+        except Exception as e:  # advisory: never fail detection, but say so
+            heuristic.notes.append(f"LLM run-order proposal failed: {type(e).__name__}: {str(e)[:200]}")
 
     return heuristic, meta
 

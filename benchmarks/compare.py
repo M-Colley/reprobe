@@ -76,7 +76,8 @@ def _llm(rep: dict | None) -> str:
     if llm.get("status"):
         return f"{llm['status']}: {llm.get('detail', '')}"
     notes = ((rep or {}).get("detect") or {}).get("notes") or []
-    return next((n for n in notes if n.startswith("LLM proposed")), "no proposal")
+    return next((n for n in notes if n.startswith(("LLM proposed", "LLM run-order proposal"))),
+                "no proposal")
 
 
 def _assisted(rep: dict | None) -> str:

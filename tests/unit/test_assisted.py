@@ -118,3 +118,18 @@ def test_the_benchmark_comparison_lists_the_assisted_commands():
     assert mod._assisted(rep) == "1/2: a.py -n 1 = pass; b.py = fail"
     assert mod._assisted({"llm": {"assisted_run": {"status": "no-proposal"}}}) == "no-proposal"
     assert mod._assisted({}) == ""
+
+
+def test_a_discarded_proposal_says_why(tmp_path):
+    """Assisted benchmark: 10 of 20 artifacts had no proposal and no trace of why."""
+    (tmp_path / "run.py").write_text("pass")
+    h = types.SimpleNamespace(steps=[])
+    cases = [(None, "no JSON response"),
+             ({"steps": [{"path": "run.py", "args": ["`id`"]}]}, "guard rejected"),
+             ({"steps": "run.py"}, "did not match the schema"),
+             ({"steps": [{"path": "README.md"}]}, "it named: README.md")]
+    for resp, expect in cases:
+        why: list[str] = []
+        client = types.SimpleNamespace(confidence_threshold=0.6, generate_json=lambda *a, r=resp, **k: r)
+        assert roles.detect_run_order(client, tmp_path, h, why) is None
+        assert expect in why[0], why

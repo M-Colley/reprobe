@@ -70,7 +70,11 @@ RUNNABLE_SUFFIXES = (".py", ".ipynb", ".r", ".rmd")
 MAX_ARGS, MAX_ARG_LEN = 20, 200
 
 
-def detect_run_order(client: OllamaClient, src_dir: str | Path, heuristic) -> Optional[dict[str, Any]]:
+def detect_run_order(client: OllamaClient, src_dir: str | Path, heuristic,
+                     reasons: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
+    """The proposal, or None. Why it is None is appended to ``reasons``: in the
+    assisted benchmark 10 of 20 artifacts had no proposal and no trace of why."""
+    why = reasons if reasons is not None else []
     root = Path(src_dir)
     rel_paths = [
         str(p.relative_to(root)).replace("\\", "/")
@@ -88,17 +92,26 @@ def detect_run_order(client: OllamaClient, src_dir: str | Path, heuristic) -> Op
     heur = ", ".join(s.target for s in heuristic.steps) or "(none)"
     prompt = prompts.DETECT_RUN_ORDER.format(
         tree=prompts.fence(tree), readme=prompts.fence(readme), heuristic=heur)
-    obj = client.generate_json(prompt, system=prompts.SYSTEM, schema=schemas.RUN_ORDER)
-    obj = _check(obj, schemas.RUN_ORDER)
+    raw = client.generate_json(prompt, system=prompts.SYSTEM, schema=schemas.RUN_ORDER)
+    obj = _check(raw, schemas.RUN_ORDER)
     if obj is None:
+        if raw is None:
+            why.append("no JSON response (timeout, error or unparseable output)")
+        elif sanitize(raw) is None:
+            why.append("the guard rejected a string in it (shell-like content outside free-text fields)")
+        else:
+            why.append("it did not match the schema")
         return None
     # "Only use paths from the list above" is enforced, not requested: drop any
     # step whose path is not a real file in the (untruncated) tree, or is not a
     # kind of file reprobe runs (the benchmark's proposals named README.md,
     # LICENSE, requirements.txt, a Dockerfile and a .json results file).
     allowed = {p for p in rel_paths if Path(p).suffix.lower() in RUNNABLE_SUFFIXES}
+    named = [s.get("path") for s in obj["steps"] if isinstance(s, dict)]
     obj["steps"] = [s for s in obj["steps"] if isinstance(s, dict) and s.get("path") in allowed]
     if not obj["steps"]:
+        why.append("no proposed step is a runnable file in the tree"
+                   + (f" (it named: {', '.join(map(str, named[:5]))})" if named else " (it named none)"))
         return None
     for s in obj["steps"]:
         s["args"] = [a[:MAX_ARG_LEN] for a in s.get("args") or []][:MAX_ARGS]
