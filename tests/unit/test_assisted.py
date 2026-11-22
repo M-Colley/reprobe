@@ -133,3 +133,14 @@ def test_a_discarded_proposal_says_why(tmp_path):
         client = types.SimpleNamespace(confidence_threshold=0.6, generate_json=lambda *a, r=resp, **k: r)
         assert roles.detect_run_order(client, tmp_path, h, why) is None
         assert expect in why[0], why
+
+
+def test_a_path_without_its_folder_is_the_one_file_it_ends(tmp_path):
+    """Benchmark row 1: the model named `maian.py` for `tool/maian.py`."""
+    for f in ("tool/maian.py", "a/util.py", "b/util.py"):
+        (tmp_path / f).parent.mkdir(exist_ok=True)
+        (tmp_path / f).write_text("pass")
+    client = types.SimpleNamespace(confidence_threshold=0.6, generate_json=lambda *a, **k: {
+        "steps": [{"path": "maian.py"}, {"path": "util.py"}, {"path": "ol/maian.py"}]})
+    out = roles.detect_run_order(client, tmp_path, types.SimpleNamespace(steps=[]))
+    assert [s["path"] for s in out["steps"]] == ["tool/maian.py"]   # util.py is ambiguous

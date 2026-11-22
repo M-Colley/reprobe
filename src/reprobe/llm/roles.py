@@ -108,6 +108,14 @@ def detect_run_order(client: OllamaClient, src_dir: str | Path, heuristic,
     # LICENSE, requirements.txt, a Dockerfile and a .json results file).
     allowed = {p for p in rel_paths if Path(p).suffix.lower() in RUNNABLE_SUFFIXES}
     named = [s.get("path") for s in obj["steps"] if isinstance(s, dict)]
+    for s in obj["steps"]:
+        # The model drops folders (benchmark row 1 named `maian.py` for `tool/maian.py`):
+        # a path that ends exactly one runnable file's path is that file.
+        p = s.get("path") if isinstance(s, dict) else None
+        if isinstance(p, str) and p not in allowed and p.strip("/"):
+            hits = [a for a in allowed if a.endswith("/" + p.strip("/"))]
+            if len(hits) == 1:
+                s["path"] = hits[0]
     obj["steps"] = [s for s in obj["steps"] if isinstance(s, dict) and s.get("path") in allowed]
     if not obj["steps"]:
         why.append("no proposed step is a runnable file in the tree"
