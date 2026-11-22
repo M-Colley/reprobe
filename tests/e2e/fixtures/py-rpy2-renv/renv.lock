@@ -1,0 +1,14 @@
+{
+  "R": {
+    "Version": "4.4.3",
+    "Repositories": [{"Name": "CRAN", "URL": "https://cloud.r-project.org"}]
+  },
+  "Packages": {
+    "fastmatch": {
+      "Package": "fastmatch",
+      "Version": "1.1-6",
+      "Source": "Repository",
+      "Repository": "CRAN"
+    }
+  }
+}

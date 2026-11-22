@@ -411,6 +411,14 @@ reproduced against the real code before it was fixed.
   also pulled base-r to install the same tree again, for no step; base-r now
   gets the CRAN installs only when an R script, R Markdown file or R notebook
   runs.
+- **The generic fallback replaces base-py only.** With base-py missing, every
+  step ran in `python:3.13-slim` — R steps too, failing on a missing Rscript
+  while base-r was there. R steps now run in base-r; an rpy2 notebook, which
+  no image present can run, is skipped with the reason, and its R installs
+  are not sent to the R-less fallback.
+- **An rpy2 notebook with an renv.lock** (e2e `py-rpy2-renv`): base-py has no
+  renv, so the lockfile is restored in base-r into the shared library; the
+  test pins an older compiled package and checks base-py's R loads that one.
 
 ### Known limits
 

@@ -156,3 +156,14 @@ def test_a_python_notebook_driving_r_through_rpy2_runs(tmp_path):
     assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
     produced = tmp_path / report.submission_id / "run" / "results" / "version.txt"
     assert produced.read_text(encoding="utf-8").strip() == "1.0.0"
+
+
+def test_an_rpy2_notebook_loads_the_versions_its_renv_lock_pins(tmp_path):
+    """base-py has no renv: the lockfile is restored in base-r, into the library
+    base-py's R reads. The pinned 1.1-6 must win over CRAN's current release,
+    and its compiled code must load in the other image's R."""
+    report, logs = _run(tmp_path, "py-rpy2-renv")
+    step = report.steps[0]
+    assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
+    produced = tmp_path / report.submission_id / "run" / "results" / "version.txt"
+    assert produced.read_text(encoding="utf-8").strip() == "1.1.6"

@@ -260,14 +260,24 @@ class Orchestrator:
                     continue
                 refused = None if getattr(runner, "host_only", False) else (
                     _step_target_problem(step.target, rundir) or runner.unsupported(step))
+                fallback = env_plan.env_provenance == "fallback-generic"
+                if not refused and fallback and (step.args or {}).get("rpy2"):
+                    # The generic fallback stands in for base-py only, and it has no R:
+                    # the notebook would fail on rpy2, read as the artifact's failure.
+                    refused = ("this notebook drives R through rpy2, and the pinned base image is not "
+                               "present: the generic fallback image has no R — not run, so no "
+                               "statement about it")
                 if refused:
                     results.append(RunResult(runner=runner.id, target=step.target,
                                              status="skipped", executed=False,
                                              diagnostics={"reason": refused}))
                     continue
+                # The fallback replaces base-py only: an R step ran in it too and
+                # failed on a missing Rscript, while base-r was there to run it.
                 image = None if getattr(runner, "host_only", False) else (
                     env_plan.image
-                    if env_plan.env_provenance in ("author-specified", "fallback-generic")
+                    if env_plan.env_provenance == "author-specified"
+                    or (fallback and runner.image_key_for(step) == "python")
                     else self.config.base_image(runner.image_key_for(step)) or env_plan.image)
                 step_limits = self.config.limits_for(runner.id)
                 if timeout_s:
@@ -666,6 +676,9 @@ class Orchestrator:
             keys = ["r" if c.strip().startswith("Rscript") else "python" for c in env_plan.install_commands]
         by_key: dict[str, list[tuple[int, str, str]]] = {"python": [], "r": []}
         for i, (c, o, k) in enumerate(zip(env_plan.install_commands, origins, keys, strict=True)):
+            if (env_plan.env_provenance == "fallback-generic" and k == "python"
+                    and c.strip().startswith("Rscript")):
+                continue        # for rpy2 notebooks, which the R-less fallback does not run
             by_key[k if k in by_key else "python"].append((i, c, o))
 
         install_results: dict[str, Any] = {}

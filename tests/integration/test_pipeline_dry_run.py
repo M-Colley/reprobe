@@ -802,6 +802,38 @@ def test_an_r_install_never_runs_in_the_generic_python_fallback(tmp_path, monkey
     o.run(str(art), use_llm=False)
     r_installs = [s for s in specs if "reprobe-home" in s.command[-1] and "Rscript" in s.command[-1]]
     assert r_installs and all(s.image != "python:3.13-slim" for s in r_installs)
+    # ...and the R step itself runs in base-r, not in the R-less fallback
+    r_steps = [s for s in specs if "reprobe-home" not in s.command[-1] and "a.R" in s.command[-1]]
+    assert r_steps and all(s.image == o.config.base_image("r") for s in r_steps)
+
+
+def test_an_rpy2_notebook_is_not_run_in_the_r_less_fallback(tmp_path, monkeypatch):
+    """The fallback stands in for base-py and has no R: the notebook failed on
+    rpy2 and read as the artifact's, and its R installs failed there too."""
+    import json
+
+    from reprobe.models import RawRunOutput
+    art = tmp_path / "artifact"
+    art.mkdir()
+    nb = {"nbformat": 4, "nbformat_minor": 5,
+          "metadata": {"kernelspec": {"name": "python3", "language": "python"}},
+          "cells": [{"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [],
+                     "source": ["%load_ext rpy2.ipython"]},
+                    {"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [],
+                     "source": ["%%R\n", "library(praise)"]}]}
+    (art / "a.ipynb").write_text(json.dumps(nb), encoding="utf-8")
+    specs = _fake_containers(monkeypatch, lambda spec, log: RawRunOutput(
+        exit_code=0, duration_s=0.1, image=spec.image, log_path=str(log)))
+    o = Orchestrator(workroot=tmp_path / "wk")
+    real_plan = orch_mod.plan_env
+
+    def fallback(*a, **k):
+        p = real_plan(*a, **k)
+        return p.model_copy(update={"env_provenance": "fallback-generic", "image": "python:3.13-slim"})
+    monkeypatch.setattr(orch_mod, "plan_env", fallback)
+    report = o.run(str(art), use_llm=False)
+    assert report.steps[0].status == "skipped" and "rpy2" in report.steps[0].diagnostics["reason"]
+    assert not [s for s in specs if s.image == "python:3.13-slim" and "Rscript" in s.command[-1]]
 
 
 def test_a_stopped_conda_build_excuses_the_r_step_that_runs_in_it(tmp_path, monkeypatch):
