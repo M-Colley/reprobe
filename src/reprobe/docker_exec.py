@@ -413,6 +413,20 @@ def _oom_killed(name: str) -> Optional[bool]:
         return None
 
 
+def _oom_event(name: str, since: float) -> bool:
+    """Whether the daemon logged an ``oom`` event for the container. Moby sets
+    OOMKilled from that event, but the exit it processes afterwards can reset the
+    flag to false (seen in CI with the kill at the cap); the event stays."""
+    try:
+        r = subprocess.run(["docker", "events", "--since", str(int(since) - 1), "--until",
+                            str(int(time.time()) + 1), "--filter", f"container={name}",
+                            "--filter", "event=oom", "--format", "{{.Action}}"],
+                           capture_output=True, text=True, timeout=20)
+        return r.returncode == 0 and "oom" in (getattr(r, "stdout", "") or "")
+    except Exception:
+        return False
+
+
 def _docker_quiet(args: list[str], timeout: int = 60) -> None:
     """A cleanup call that can neither raise nor hang: a wedged daemon must not
     turn into a wedged orchestrator in the middle of a season."""
@@ -533,7 +547,7 @@ def run_container(
     disk_cap = _parse_bytes(limits.get("work_max", "60g"))
     disk_root = Path(work_root) if work_root else None
 
-    start = time.monotonic()
+    start, wall_start = time.monotonic(), time.time()
     timed_out = False
     limit_exceeded: Optional[str] = None
     exit_code: Optional[int] = None
@@ -578,8 +592,12 @@ def run_container(
                 # The daemon records an OOM kill from an asynchronous cgroup event:
                 # inspected straight after a fast exit, a kill at the cap still read
                 # OOMKilled=false (CI, 2026-11-22). A SIGKILL exit is asked again.
+                # The daemon's event log is the second source (see _oom_event).
                 for _ in range(_OOM_RECHECKS):
                     if oom is not False or exit_code != 137:
+                        break
+                    if _oom_event(name, wall_start):
+                        oom = True
                         break
                     time.sleep(_OOM_RECHECK_S)
                     oom = _oom_killed(name)

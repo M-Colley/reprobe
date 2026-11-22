@@ -247,9 +247,28 @@ def test_a_late_oom_flag_on_a_sigkill_exit_is_still_read(monkeypatch, tmp_path):
     _patch_docker(monkeypatch, [], lambda timeout: 137, inspect_out="false")
     answers = iter([False, False, True])
     monkeypatch.setattr(docker_exec, "_oom_killed", lambda name: next(answers))
+    monkeypatch.setattr(docker_exec, "_oom_event", lambda name, since: False)
     monkeypatch.setattr(docker_exec, "_OOM_RECHECK_S", 0.0)
     raw = run_container(_spec(), _limits(), tmp_path / "run.log")
     assert raw.exit_code == 137 and raw.oom_killed is True
+
+
+def test_an_oom_event_counts_when_the_flag_was_reset(monkeypatch, tmp_path):
+    """Moby's exit handling can reset OOMKilled to false after the OOM event set
+    it (CI sandbox job, 2.4 s run, false through every re-inspection)."""
+    _patch_docker(monkeypatch, [], lambda timeout: 137, inspect_out="false")
+    monkeypatch.setattr(docker_exec, "_oom_killed", lambda name: False)
+    monkeypatch.setattr(docker_exec, "_oom_event", lambda name, since: True)
+    raw = run_container(_spec(), _limits(), tmp_path / "run.log")
+    assert raw.oom_killed is True
+
+
+def test_a_plain_sigkill_is_not_an_oom(monkeypatch, tmp_path):
+    _patch_docker(monkeypatch, [], lambda timeout: 137, inspect_out="false")
+    monkeypatch.setattr(docker_exec, "_oom_event", lambda name, since: False)
+    monkeypatch.setattr(docker_exec, "_OOM_RECHECK_S", 0.0)
+    raw = run_container(_spec(), _limits(), tmp_path / "run.log")
+    assert raw.exit_code == 137 and raw.oom_killed is False
 
 
 def test_runaway_console_output_is_stopped(monkeypatch, tmp_path):

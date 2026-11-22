@@ -444,6 +444,11 @@ reproduced against the real code before it was fixed.
   - Python 3.7 is a candidate (TensorFlow 1.13 ships wheels up to cp37); the
     scanned-import install no longer needs `importlib.metadata` (e2e
     `py37-notebook`).
+- **An OOM kill is also read from the daemon's event log.** Moby can reset
+  `State.OOMKilled` to false when it processes the exit after the OOM event;
+  the CI sandbox job saw a kill at the 128 MiB cap read false through every
+  re-inspection. A SIGKILL exit now also asks `docker events` for an `oom`
+  event of that container.
 - **Old pins get the Python, and the dependencies, of their day.** base-py has
   one Python (3.13), and a 2022 artifact pinning `scikit-learn==1.1.2` and
   `pandas==1.4.3` failed to install — no wheels past CPython 3.10, and the
