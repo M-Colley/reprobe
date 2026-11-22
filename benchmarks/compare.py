@@ -67,6 +67,17 @@ def _report(reports: Path, row: int) -> dict | None:
         return None
 
 
+def _llm(rep: dict | None) -> str:
+    """The LLM's run-order proposal for a --no-run plan-only benchmark, or why there is none."""
+    llm = (rep or {}).get("llm") or {}
+    if not llm:
+        return ""
+    if llm.get("status"):
+        return f"{llm['status']}: {llm.get('detail', '')}"
+    notes = ((rep or {}).get("detect") or {}).get("notes") or []
+    return next((n for n in notes if n.startswith("LLM proposed")), "no proposal")
+
+
 def cmd_compare(path: str, reports: Path, out: Path) -> None:
     _, rows = read_rows(path)
     table = []
@@ -85,6 +96,7 @@ def cmd_compare(path: str, reports: Path, out: Path) -> None:
             "steps": len(steps),
             "steps_passed": sum(1 for s in steps if s.get("status") == "pass"),
             "step_statuses": ";".join(sorted({str(s.get("status")) for s in steps})),
+            "llm": _llm(rep),
         })
     out.mkdir(parents=True, exist_ok=True)
     with (out / "comparison.csv").open("w", encoding="utf-8", newline="") as fh:
@@ -107,6 +119,12 @@ def cmd_compare(path: str, reports: Path, out: Path) -> None:
     print("|---|---|---|---|---|")
     for t in table:
         print(f"| {t['row']} | {t['badges']} | {t['verdict']} | {t['steps_passed']}/{t['steps']} | {t['url']} |")
+    if any(t["llm"] for t in table):
+        print("\n## LLM run-order proposals (advisory, never applied)\n")
+        print("| row | heuristic steps | proposal |")
+        print("|---|---|---|")
+        for t in table:
+            print(f"| {t['row']} | {t['steps']} | {t['llm'].replace('|', '/')} |")
 
 
 def main(argv: list[str] | None = None) -> None:

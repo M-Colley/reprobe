@@ -16,6 +16,11 @@ on:
       timeout:
         description: "per-step budget in seconds"
         default: "2700"
+      llm:
+        description: "off: --no-llm. plan-only: detection with the pinned Ollama model, nothing run"
+        type: choice
+        options: ["off", "plan-only"]
+        default: "off"
 
 permissions:
   contents: read
@@ -54,15 +59,30 @@ jobs:
       - name: Install
         run: pip install -e .
       - name: Pull the pinned base images
+        if: inputs.llm == 'off'
         run: reprobe pull
+      - name: Start the pinned Ollama model
+        if: inputs.llm == 'plan-only'
+        run: |
+          read -r IMAGE MODEL < <(python -c "import yaml; l = yaml.safe_load(open('config/pins.yaml'))['llm']; print(l['ollama_image'], l['model'])")
+          docker run -d --name ollama -p 127.0.0.1:11434:11434 "$IMAGE"
+          for _ in $(seq 30); do curl -sf http://127.0.0.1:11434/api/version && break; sleep 2; done
+          docker exec ollama ollama pull "$MODEL"
+          # CPU runner: the 60 s per-call budget is for a GPU host
+          cp -r config cfg && sed -i 's/^  timeout_s: .*/  timeout_s: 900/' cfg/pins.yaml
       - name: Run one artifact
         env:
           CSV: ${{ inputs.csv }}
           ROW: ${{ matrix.row }}
           TIMEOUT: ${{ inputs.timeout }}
+          LLM: ${{ inputs.llm }}
         run: |
           python benchmarks/compare.py one "$CSV" "$ROW" > one.csv
-          reprobe batch one.csv --no-llm --timeout "$TIMEOUT" --workroot work --out out || true
+          if [ "$LLM" = plan-only ]; then
+            reprobe batch one.csv --no-run --config-dir cfg --workroot work --out out || true
+          else
+            reprobe batch one.csv --no-llm --timeout "$TIMEOUT" --workroot work --out out || true
+          fi
       - uses: actions/upload-artifact@v7
         if: always()
         with:
