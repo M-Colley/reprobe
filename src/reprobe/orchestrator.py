@@ -307,12 +307,22 @@ class Orchestrator:
         # After the verdict, the badges and the summary are fixed, so nothing it
         # does can reach them.
         if assisted and do_run and llm_client is not None:
-            if not ran:
+            if not ran and detect_res.llm_steps:
+                # The plan above was made for no code: no as-of install, no
+                # requirements file beside a step (benchmark row 1: a 2018 artifact
+                # got today's web3). Plan again from the proposed steps.
+                env_plan = plan_env(detect_res.model_copy(update={"steps": detect_res.llm_steps}),
+                                    manifest_meta, self.config, srcdir,
+                                    allow_repo2docker=allow_repo2docker,
+                                    artifact_date=(fetch_res.metadata or {}).get("artifact_date"))
+                report.environment = {**_env_section(env_plan), "notes": [
+                    *report.environment.get("notes", []),
+                    "nothing ran for the verdict: this environment was planned from the LLM's "
+                    "proposed steps and installed for the assisted run only, after the verdict "
+                    "was decided"]}
                 rundir = self._prepare_run(work, rundir, srcdir, logdir, env_plan, manifest_meta,
                                            report, install=install, dry_run=dry_run,
                                            reuse_downloads=reuse_downloads)
-                report.environment.setdefault("notes", []).append(
-                    "the install phase ran for the assisted run only, after the verdict was decided")
             report.llm["assisted_run"] = self._assisted_run(
                 detect_res.llm_steps, report, env_plan=env_plan, rundir=rundir, srcdir=srcdir,
                 outdir=outdir, logdir=logdir, timeout_s=timeout_s,

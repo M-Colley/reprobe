@@ -3,6 +3,7 @@ in the same sandbox, and are never counted in the verdict or a badge."""
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import types
 from pathlib import Path
@@ -37,6 +38,7 @@ def _artifact(tmp_path: Path) -> Path:
     (art / "examples").mkdir(exist_ok=True)
     (art / "tool" / "maian.py").write_text("import sys\nprint(sys.argv)\n", encoding="utf-8")
     (art / "tool" / "helpers.py").write_text("X = 1\n", encoding="utf-8")
+    (art / "tool" / "requirements.txt").write_text("web3==3.16.5\n", encoding="utf-8")
     (art / "examples" / "a b.sol").write_text("contract A {}\n", encoding="utf-8")
     (art / "README.md").write_text("cd tool && python maian.py -c <contract>\n", encoding="utf-8")
     return art
@@ -77,6 +79,10 @@ def test_the_proposal_runs_with_its_arguments_and_changes_no_verdict(tmp_path, m
     assert rep.verdict == plain.verdict
     assert rep.badges == plain.badges
     assert "assisted run only" in " ".join(rep.environment.get("notes", []))
+    # planned from the proposed step: the requirements file beside it is installed
+    req = base64.b64encode(b"web3==3.16.5\n").decode()
+    assert any(req in c for c in rep.environment["install_commands"])
+    assert not any(req in c for c in plain.environment["install_commands"])
     md = (tmp_path / "wTrue" / rep.submission_id / "report" / "report.md").read_text(encoding="utf-8")
     assert "## Assisted run (LLM-proposed; not counted)" in md
     assert "tool/maian.py -c 'examples/a b.sol': **pass**" in md
