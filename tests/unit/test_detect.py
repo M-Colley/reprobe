@@ -604,7 +604,7 @@ def test_py_imports_detected_stdlib_and_local_excluded(tmp_path):
     pkgs = signatures.scan(tmp_path).py_packages
 
     assert "shap" in pkgs
-    assert "scikit-learn" in pkgs and "opencv-python" in pkgs   # import name != dist name
+    assert "scikit-learn" in pkgs and "opencv-python-headless" in pkgs   # import name != dist name
     assert "os" not in pkgs and "sys" not in pkgs               # stdlib
     assert "helper" not in pkgs                                 # the deposit's own module
     assert "sibling" not in pkgs                                # relative import
@@ -657,9 +657,9 @@ def test_detected_python_install_only_touches_what_is_missing(tmp_path):
     and a name PyPI lacks is reported rather than fatal."""
     from reprobe.envbuild.base import _py_detected_install_command
 
-    cmd = _py_detected_install_command(["shap", "opencv-python"], None)
+    cmd = _py_detected_install_command(["shap", "opencv-python-headless"], None)
     assert "find_spec" in cmd and "md.distributions()" in cmd     # both presence checks
-    assert '("cv2", "opencv-python")' in cmd                      # dist -> import name
+    assert '("cv2", "opencv-python-headless")' in cmd                      # dist -> import name
     assert "--target=/work/.reprobe_deps" in cmd
     assert "could NOT install" in cmd
     # into the artifact's own env when one was built, never onto PYTHONPATH
@@ -699,7 +699,7 @@ def test_manifest_repo_still_carries_detected_packages(tmp_path):
     res, _meta = detect(tmp_path, use_llm=False)
 
     assert res.run_plan_source == "manifest"
-    assert "shap" in res.py_packages and "opencv-python" in res.py_packages
+    assert "shap" in res.py_packages and "opencv-python-headless" in res.py_packages
     assert "ggplot2" in res.r_packages
 
 

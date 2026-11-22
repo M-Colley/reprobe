@@ -262,29 +262,45 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) 
     # an already-satisfied extra costs a no-op.
     pairs = [("" if "[" in d else py_module_for_dist(d), d) for d in dists]
     spec = ", ".join(f'("{m}", "{d}")' for m, d in pairs)
-    target = ', "--target=/work/.reprobe_deps"' if not conda_prefix else ""
+    target = '"--target=/work/.reprobe_deps"' if not conda_prefix else ""
     code = (
         # -I drops PYTHONPATH, so earlier installs into /work/.reprobe_deps are
         # added back explicitly (after the stdlib, never before it). The working
         # directory is moved off the artifact's tree before any pip process starts.
         'import sys, os; sys.path.append("/work/.reprobe_deps"); '
         'os.makedirs("/var/tmp/reprobe-pip", exist_ok=True); os.chdir("/var/tmp/reprobe-pip"); '
-        "import importlib.util as u, importlib.metadata as md, subprocess; "
+        # importlib.metadata is 3.8+; a Python 3.7 env falls back to find_spec alone.
+        "import importlib.util as u, subprocess; "
+        'md = __import__("importlib.metadata", fromlist=["x"]) if u.find_spec("importlib.metadata") else None; '
         f"pairs = [{spec}]; "
         'norm = lambda s: s.lower().replace("_", "-"); '
         # Two independent presence checks: the module may be importable without
         # dist metadata (conda packages sometimes are), and the dist may be
         # installed under a name whose import differs from what we guessed.
-        'have = {norm(getattr(x, "name", "") or "") for x in md.distributions()}; '
+        'have = {norm(getattr(x, "name", "") or "") for x in md.distributions()} if md else set(); '
         "need = sorted({d for m, d in pairs "
         "if not m or (u.find_spec(m) is None and norm(d) not in have)}); "
         'print("reprobe: imports the environment does not provide:", need or "none", flush=True); '
         'W = "/var/tmp/reprobe-wheels"; '
         'run = lambda *a: subprocess.call([sys.executable, "-I", "-m", "pip", *a]); '
         'got = [d for d in need if run("download", "--no-input", "--only-binary=:all:", "-d", W, d) == 0]; '
-        f'bad = bool(got) and run("install", "--no-input", "--no-index", "--only-binary=:all:", '
-        f'"--find-links", W{target}, *got) != 0; '
-        'fail = [d for d in need if d not in got] + (got if bad else []); '
+        f"T = [{target}]; "
+        'L = T and "/work/.reprobe_deps" or __import__("sysconfig").get_paths()["purelib"]; '
+        "ls = lambda: sorted(os.listdir(L)) if os.path.isdir(L) else []; before = ls(); "
+        'inst = lambda *ds: run("install", "--no-input", "--no-index", "--only-binary=:all:", '
+        '"--find-links", W, *T, *ds); '
+        "bad = bool(got) and inst(*got) != 0; "
+        # Import names guessed from a whole tree can pin one another out (row 18 of
+        # benchmarks/acm-badged.csv: guidance vs. vllm left 60 imports uninstalled).
+        # When the joint install changed nothing, keep each name that still resolves
+        # with those kept before it (dry runs install nothing), then install once.
+        "retry = bad and ls() == before; ok = []; "
+        '[ok.append(d) for d in (got if retry else []) if inst("--dry-run", "--quiet", *ok, d) == 0]; '
+        "out = [d for d in got if d not in ok] if retry else []; "
+        'out and print("reprobe: left out, they conflict with the imports kept:", out, flush=True); '
+        "bad = bad and not (retry and ok and inst(*ok) == 0); "
+        "done = got if not bad else []; done = ok if retry and not bad else done; "
+        "fail = [d for d in need if d not in done]; "
         'print("reprobe: pip could NOT install (reported, not faked):", fail or "none")'
     )
     return f"{_py(conda_prefix)} -c '{code}'"

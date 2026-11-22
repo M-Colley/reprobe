@@ -83,7 +83,7 @@ def test_the_deposits_own_modules_are_never_pip_installed(tmp_path, files):
 def test_import_names_map_to_the_real_distribution(tmp_path):
     src = "import cv2, sklearn, skimage, yaml, PIL, Bio, umap, tables, bs4, dateutil\n"
     assert _py(tmp_path, {"a.py": src}) == sorted([
-        "opencv-python", "scikit-learn", "scikit-image", "pyyaml", "pillow",
+        "opencv-python-headless", "scikit-learn", "scikit-image", "pyyaml", "pillow",
         "biopython", "umap-learn", "tables", "beautifulsoup4", "python-dateutil"])
 
 

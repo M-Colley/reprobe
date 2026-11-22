@@ -162,6 +162,19 @@ def test_old_pins_get_the_python_and_the_numpy_of_their_day(tmp_path):
     assert (py, pandas) == ("3.10", "1.4.3") and numpy.startswith("1."), numpy
 
 
+def test_tensorflow_1_era_pins_get_python_3_7_and_its_notebook_runs(tmp_path):
+    """numpy==1.16.6, like tensorflow==1.13.1 (benchmark row 15), ships wheels up
+    to CPython 3.7 only. The notebook runs under papermill in that env, and an
+    undeclared import is still installed there (no importlib.metadata on 3.7)."""
+    report, logs = _run(tmp_path, "py37-notebook")
+    assert report.environment.get("python_version") == "3.7", logs
+    step = report.steps[0]
+    assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
+    py, numpy, _ = (tmp_path / report.submission_id / "run" / "results" / "versions.txt"
+                    ).read_text(encoding="utf-8").split()
+    assert (py, numpy) == ("3.7", "1.16.6")
+
+
 def test_an_r_plot_in_a_font_pdf_does_not_know_draws(tmp_path):
     """`family = "Arial"` with no device opened: Rscript's default pdf() stopped
     with "invalid font type" (RE-Tool-Usability-Artifacts, ACSAC 2022)."""

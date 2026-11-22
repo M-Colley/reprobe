@@ -116,3 +116,52 @@ def test_keras_alone_brings_its_tensorflow_backend(tmp_path):
     assert "tensorflow" in scan_py_packages(tmp_path, [tmp_path / "a.py"])
     (tmp_path / "b.py").write_text("import keras\nimport torch\n", encoding="utf-8")
     assert "tensorflow" not in scan_py_packages(tmp_path, [tmp_path / "b.py"])
+
+
+FAKE_PIP = """\
+import os, sys
+a = sys.argv[1:]
+if a[0] == "download":
+    sys.exit(0)
+pkgs = [x for x in a[1:] if not x.startswith("-") and x != os.environ["W"]]
+if "alpha" in pkgs and "beta" in pkgs:
+    sys.exit(1)  # ResolutionImpossible
+if "--dry-run" not in a:
+    t = next(x.split("=", 1)[1] for x in a if x.startswith("--target="))
+    os.makedirs(t, exist_ok=True)
+    for p in pkgs:
+        open(os.path.join(t, p), "w").close()
+sys.exit(0)
+"""
+
+
+def _run_scanned(tmp_path, dists):
+    import subprocess
+    import sys
+
+    from reprobe.envbuild.base import _py_detected_install_command
+    cmd = _py_detected_install_command(dists, None)
+    code = cmd.split(" -c '", 1)[1][:-1]
+    fake = tmp_path / "fakepip.py"
+    fake.write_text(FAKE_PIP, encoding="utf-8")
+    w, deps = (tmp_path / "wheels").as_posix(), (tmp_path / "deps").as_posix()
+    code = (code.replace('[sys.executable, "-I", "-m", "pip", *a]', f'[sys.executable, "{fake.as_posix()}", *a]')
+            .replace("/work/.reprobe_deps", deps).replace("/var/tmp/reprobe-wheels", w)
+            .replace("/var/tmp/reprobe-pip", (tmp_path / "cwd").as_posix()))
+    out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True,
+                         env={**__import__("os").environ, "W": w}, check=True).stdout
+    return out, sorted(__import__("os").listdir(deps)) if (tmp_path / "deps").exists() else []
+
+
+def test_one_conflicting_import_no_longer_blocks_all_the_others(tmp_path):
+    """Row 18 (CacheSched): guidance vs. vllm left all 60 scanned imports uninstalled."""
+    out, installed = _run_scanned(tmp_path, ["alpha", "beta", "gamma"])
+    assert installed == ["alpha", "gamma"]
+    assert "left out, they conflict with the imports kept: ['beta']" in out
+    assert "could NOT install (reported, not faked): ['beta']" in out
+
+
+def test_imports_without_conflict_install_in_one_step(tmp_path):
+    out, installed = _run_scanned(tmp_path, ["alpha", "gamma"])
+    assert installed == ["alpha", "gamma"] and "left out" not in out
+    assert "could NOT install (reported, not faked): none" in out

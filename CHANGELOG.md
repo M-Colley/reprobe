@@ -433,7 +433,17 @@ reproduced against the real code before it was fixed.
   - `import keras` alone installed Keras 3 without the TensorFlow backend
     the code was written for;
   - with nothing run, scripts were said to be skipped because "other scripts
-    were found to run the analysis", and the verdict carried no note.
+    were found to run the analysis", and the verdict carried no note;
+  - one conflict among scanned imports (CacheSched: `guidance` vs. `vllm`)
+    left all 60 uninstalled. When the joint install changed nothing, each
+    import that still resolves with those kept before it is kept (pip
+    `--dry-run`, which installs nothing), the rest are named, and one install
+    follows;
+  - `import cv2` installed `opencv-python`, whose GUI build needs libxcb and
+    libGL; it is `opencv-python-headless` now;
+  - Python 3.7 is a candidate (TensorFlow 1.13 ships wheels up to cp37); the
+    scanned-import install no longer needs `importlib.metadata` (e2e
+    `py37-notebook`).
 - **Old pins get the Python, and the dependencies, of their day.** base-py has
   one Python (3.13), and a 2022 artifact pinning `scikit-learn==1.1.2` and
   `pandas==1.4.3` failed to install — no wheels past CPython 3.10, and the

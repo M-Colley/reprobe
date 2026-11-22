@@ -152,7 +152,8 @@ _PY_SUBMODULE_TO_DIST = {
 #: distribution. A name that is not a real distribution is worse than a failed
 #: install: anyone can register it, and the install phase has network.
 _PY_IMPORT_TO_DIST = {
-    "cv2": "opencv-python", "sklearn": "scikit-learn", "skimage": "scikit-image",
+    # headless: the GUI wheel needs libxcb/libGL, which no container here has (benchmark row 15)
+    "cv2": "opencv-python-headless", "sklearn": "scikit-learn", "skimage": "scikit-image",
     "PIL": "pillow", "yaml": "pyyaml", "bs4": "beautifulsoup4",
     "dateutil": "python-dateutil", "dotenv": "python-dotenv", "serial": "pyserial",
     "OpenGL": "PyOpenGL", "Crypto": "pycryptodome", "fitz": "pymupdf",

@@ -18,6 +18,8 @@ FAKE = {
     ("pydoe", "0.3.8"): (("pyDOE-0.3.8.zip",), None),
     ("cryptography", "42.0.0"): ((f"cryptography-42.0.0-cp39-abi3-{_ML}.whl",), ">=3.7"),
     ("numpy", "2.1.0"): ((f"numpy-2.1.0-cp313-cp313-{_ML}.whl",), ">=3.10"),
+    ("tensorflow", "1.13.1"): (("tensorflow-1.13.1-cp36-cp36m-manylinux1_x86_64.whl",
+                                "tensorflow-1.13.1-cp37-cp37m-manylinux1_x86_64.whl"), None),
 }
 
 
@@ -103,3 +105,9 @@ def test_pyproject_pins_and_requires_python_are_read(tmp_path, pypi):
     ip = _plan(tmp_path, {"pyproject.toml": '[project]\nname = "x"\nrequires-python = ">=3.8,<3.10"\n'
                                             'dependencies = ["seaborn==0.11.2"]\n', "a.py": ""})
     assert ip.python_version == "3.9"
+
+
+def test_tensorflow_1_pins_get_python_3_7(pypi):
+    """Benchmark row 15: tensorflow==1.13.1 ships wheels up to cp37m only."""
+    c = choose_python([("tensorflow", "1.13.1"), ("seaborn", "0.11.2")])
+    assert c.version == "3.7" and not c.unsupported

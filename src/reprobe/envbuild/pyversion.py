@@ -27,7 +27,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import InvalidWheelFilename, canonicalize_name, parse_wheel_filename
 
 #: Newest first; the first is the base image's own Python.
-DEFAULT_CANDIDATES = ("3.13", "3.12", "3.11", "3.10", "3.9", "3.8")
+DEFAULT_CANDIDATES = ("3.13", "3.12", "3.11", "3.10", "3.9", "3.8", "3.7")
 _PYPI = "https://pypi.org/pypi/{name}/{version}/json"
 _TIMEOUT_S = 15
 
