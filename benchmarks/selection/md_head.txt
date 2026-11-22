@@ -1,0 +1,61 @@
+# ACM-badged artifact evaluation set for reprobe
+
+Companion to `acm-badged.csv` (36 artifacts).
+
+## Listings used
+
+Accessed 2026-11-22 by shallow `git clone` of the GitHub sources of both sites (the YAML front matter of each `results.md` is the data behind the rendered results page).
+
+| listing | source repository | commit | rendered page pattern |
+|---|---|---|---|
+| sysartifacts | https://github.com/sysartifacts/sysartifacts.github.io | 673135d5f59cd74ba7c6b7a8f94e1ab630b25d71 (2026-11-11) | https://sysartifacts.github.io/{conf}/results.html |
+| secartifacts | https://github.com/secartifacts/secartifacts.github.io | 8283e3f372884cf0f2eab84f1a7c7119d1e54fca (2026-11-12) | https://secartifacts.github.io/{conf}/results.html |
+
+All `_conferences/*/results.md` files of both repositories were parsed (57 result sections, 2793 rows). Only sections that declare ACM badge images were in scope:
+
+- sysartifacts (`acm_available_1.1.png`, `acm_functional_1.1.png`, `acm_reproduced_1.1.png`): EuroSys 2021-2026, SOSP 2019/2021/2023/2024/2025/2026, SC 2021, USENIX ATC 2026, CAIS 2026. Not in scope: sections with USENIX badge images (ATC 2022-2025, FAST, OSDI, ...) and sections without badge data.
+- secartifacts (`acmartifactbadge_*.png`): ACSAC 2017-2023. Not in scope: ACSAC 2024-2025 (IEEE Xplore code badges), NDSS/USENIX Security/PETS/CHES/WOOT/S&P/SysTEX (not ACM badges).
+
+Rows in scope: sysartifacts 559, secartifacts 181, total 740.
+
+## Inclusion rule (verbatim)
+
+An artifact is included in the population if it is a row of a results section listed above (sysartifacts: EuroSys 2021-2026, SOSP 2019-2026, SC 2021, ATC 2026, CAIS 2026; secartifacts: ACSAC 2017-2023), it holds at least one ACM badge in that listing, and, in this order: (1) the row has an artifact link (`artifact_url`, else `github_url`, else `repository_url`; bare `github.com/...` and bare DOIs are prefixed with https://, the literal MISSING counts as no link); (2) the link host is GitHub, GitLab.com, or a Zenodo record or Zenodo DOI (10.5281); (3) the link resolves (GitHub/GitLab/Zenodo API return 200 for the repository or record); (4) the primary language can be determined, from the GitHub/GitLab language statistics for repositories, or, for Zenodo records, from the uncompressed size of source files by extension inside the record's .zip files (read remotely via HTTP range requests) or from plain record files; records whose only files are tar/tgz/tar.gz/tar.xz/7z/rar archives, or that contain no source files, fail this step; (5) Python (incl. Jupyter Notebook) plus R (incl. R Markdown/Quarto) account for at least 50 % of the bytes of source code, where bytes of Shell, Makefile, Dockerfile, CMake, TeX, HTML, CSS, Batchfile, PowerShell, Roff, Nix, Starlark and M4 are not counted; (6) no docker-compose/compose YAML file in the repository (or archive) root; (7) none of the root-level README*, requirements*.txt, environment.y(a)ml, pyproject.toml, setup.py matches the case-insensitive regex `cuda|nvidia|cudnn|\bgpus?\b` (proxy for "needs a GPU"; it also excludes artifacts that merely mention GPUs).
+
+Rows failing a criterion are excluded and recorded with the first failing criterion. All rows that pass are eligible.
+
+## Subsetting rule
+
+The eligible rows are sorted by paper title (case-folded, ties by conference id) and every 3rd row is taken, starting with the first (indices 0, 3, 6, ...). 106 eligible rows give 36 included rows. No manual choice was made. The sample was not stratified; the badge mix is whatever the systematic sample produced.
+
+## Counts
+
+Rows seen in scope: 740. Eligible: 106. Included: 36 (sysartifacts 19, secartifacts 17). Eligible but not sampled: 70.
+
+Per listing rows in scope:
+{PERLIST}
+
+Outcome per row (first failing criterion; `eligible` = passes all):
+
+| outcome | rows |
+|---|---|
+{COUNTS}
+
+Included rows by badge set (as listed): available;functional;reproduced 15, functional 9, reusable 5, available;functional 3, reusable;reproduced 3, available 1.
+
+## Method notes and limitations
+
+- Tools: GitHub REST API (languages, contents), GitLab REST API (languages), Zenodo REST API, `remotezip` (https://pypi.org/project/remotezip/) for zip listings. Scripts are in the session scratchpad and are not part of this deliverable; the rule above is complete enough to re-implement.
+- All 36 included `url` values were requested again (final check): the GitHub/GitLab pages returned HTTP 200; the 7 Zenodo DOIs returned 200 with curl (a Python client without browser User-Agent got 403 from doi.org/Zenodo) and their Zenodo API records returned 200.
+- Language in the CSV is the top language by the byte rule above; the notes column gives the Python/R share.
+- GitHub links are not pinned to a commit; the repository HEAD may differ from the evaluated state. Links given as `tree/<branch>` are included as repository links (the CSV keeps the listing's URL).
+- Criteria 4 and 7 introduce selection effects: tar-only Zenodo records (102 rows, many in ATC 2026) are systematically excluded, and the GPU keyword rule removes ML artifacts regardless of whether a GPU is actually required. GitLab repositories get no GPU/compose check (1 included repository: hipress).
+- Criterion 2 excludes 65 rows: Bitbucket, Google Drive/Docs, project web pages, anonymous.4open.science, other GitLab instances, and Figshare/OSF/other-DOI links (reprobe supports Figshare and OSF, but language assessment was not implemented for them; their count is in the excluded table).
+
+## Badge data quality
+
+- secartifacts ACSAC lists no "Available" badge (functional, reusable, reproduced only), and `reusable` rows do not also list `functional` although ACM's Reusable implies Functional. Badges are copied as listed.
+- Badge criteria are committee-specific and changed between years; the listings do not record which ACM badge version applied except through the image name.
+- A listing records only badges awarded; artifacts submitted but rejected are not listed, so no negative class exists in this set.
+- Reusable-only rows and the Reproduced badge in ACSAC 2023 (`reusable;reproduced`) are rare; per-level comparisons have small n.
+- Some rows have badges in free-text variants (`Available, Functional`), normalised to lowercase, and ordered available;functional;reusable;reproduced.

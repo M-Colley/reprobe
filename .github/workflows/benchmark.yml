@@ -1,0 +1,93 @@
+name: benchmark
+
+# Runs a benchmark CSV (one job per artifact, real images, real deposits) and
+# compares reprobe's verdicts with the badges recorded in the CSV. Manual only:
+# a full set takes hours of runner time.
+
+on:
+  workflow_dispatch:
+    inputs:
+      csv:
+        description: "benchmark CSV (url,data,... and optionally badges)"
+        default: benchmarks/acm-badged.csv
+      rows:
+        description: "1-based data rows, comma-separated, or 'all'"
+        default: all
+      timeout:
+        description: "per-step budget in seconds"
+        default: "2700"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      rows: ${{ steps.rows.outputs.rows }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: rows
+        env:
+          CSV: ${{ inputs.csv }}
+          ROWS: ${{ inputs.rows }}
+        run: python benchmarks/compare.py rows "$CSV" "$ROWS" >> "$GITHUB_OUTPUT"
+
+  run:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        row: ${{ fromJSON(needs.plan.outputs.rows) }}
+    env:
+      REPROBE_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Free disk for the base images
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: Install
+        run: pip install -e .
+      - name: Pull the pinned base images
+        run: reprobe pull
+      - name: Run one artifact
+        env:
+          CSV: ${{ inputs.csv }}
+          ROW: ${{ matrix.row }}
+          TIMEOUT: ${{ inputs.timeout }}
+        run: |
+          python benchmarks/compare.py one "$CSV" "$ROW" > one.csv
+          reprobe batch one.csv --no-llm --timeout "$TIMEOUT" --workroot work --out out || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: report-${{ matrix.row }}
+          path: |
+            work/*/report/
+            work/*/logs/
+          retention-days: 30
+          if-no-files-found: warn
+
+  compare:
+    needs: run
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: report-*
+          path: reports
+      - name: Compare verdicts with badges
+        env:
+          CSV: ${{ inputs.csv }}
+        run: python benchmarks/compare.py compare "$CSV" reports --out comparison >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: comparison
+          path: comparison/
