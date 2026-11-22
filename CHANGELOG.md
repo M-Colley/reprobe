@@ -416,6 +416,11 @@ reproduced against the real code before it was fixed.
   while base-r was there. R steps now run in base-r; an rpy2 notebook, which
   no image present can run, is skipped with the reason, and its R installs
   are not sent to the R-less fallback.
+- **R plots no device was opened for are drawn with cairo_pdf.** Rscript's
+  default pdf() device knows only its built-in font families, so
+  `family = "Arial"` stopped the script ("invalid font type") where RStudio,
+  which substitutes a font, draws it. Found by the ACM-badged benchmark
+  (RE-Tool-Usability-Artifacts, ACSAC 2022); e2e `r-font`.
 - **An rpy2 notebook with an renv.lock** (e2e `py-rpy2-renv`): base-py has no
   renv, so the lockfile is restored in base-r into the shared library; the
   test pins an older compiled package and checks base-py's R loads that one.

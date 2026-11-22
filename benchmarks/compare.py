@@ -71,6 +71,8 @@ def cmd_compare(path: str, reports: Path, out: Path) -> None:
     _, rows = read_rows(path)
     table = []
     for i, r in enumerate(rows, start=1):
+        if not (reports / f"report-{i}").is_dir():
+            continue            # not selected for this run; "no-report" means its job made none
         rep = _report(reports, i)
         acm = ((rep or {}).get("badges") or {}).get("acm") or {}
         steps = (rep or {}).get("steps") or []

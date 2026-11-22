@@ -75,7 +75,12 @@ def _q(s: object) -> str:
 #: HOME and XDG_CACHE_HOME must be writable under the read-only rootfs (as for
 #: Python): R writes there for tools::R_user_dir, knitr and renv, and with no
 #: usable HOME those fail with errors that read like the artifact's own.
-_R_ENV = ("export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache R_LIBS_USER=/work/.reprobe_Rlib; ")
+#: R_DEFAULT_DEVICE: a plot no device was opened for goes to Rscript's default,
+#: pdf(), which knows only its built-in font families — `family = "Arial"` stops
+#: the script ("invalid font type"). In RStudio, where authors run it, the device
+#: substitutes a font through fontconfig; cairo_pdf does the same.
+_R_ENV = ("export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache R_LIBS_USER=/work/.reprobe_Rlib "
+          "R_DEFAULT_DEVICE=cairo_pdf; ")
 
 
 def env_path_prefix(ctx: "RunContext") -> str:

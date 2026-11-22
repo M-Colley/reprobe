@@ -149,6 +149,15 @@ def test_an_rstudio_project_in_a_subfolder_runs_from_that_folder(tmp_path):
     assert produced.read_text(encoding="utf-8").strip() == "6"
 
 
+def test_an_r_plot_in_a_font_pdf_does_not_know_draws(tmp_path):
+    """`family = "Arial"` with no device opened: Rscript's default pdf() stopped
+    with "invalid font type" (RE-Tool-Usability-Artifacts, ACSAC 2022)."""
+    report, logs = _run(tmp_path, "r-font")
+    step = report.steps[0]
+    assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
+    assert (tmp_path / report.submission_id / "run" / "results" / "done.txt").is_file()
+
+
 def test_a_python_notebook_driving_r_through_rpy2_runs(tmp_path):
     """It ran in an image without R; its %%R cells' packages were never found."""
     report, logs = _run(tmp_path, "py-rpy2")

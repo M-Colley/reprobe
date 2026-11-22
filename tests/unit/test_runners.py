@@ -438,7 +438,8 @@ def test_r_runs_get_a_writable_home_and_cache(tmp_path, runner):
     rootfs with errors that read like the artifact's own."""
     target = "a.R" if runner.id == "r" else "a.Rmd"
     cmd = _bash(runner.build_command(_ctx(tmp_path, RunStep(target=target, kind=runner.id))))
-    assert "export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache R_LIBS_USER=/work/.reprobe_Rlib;" in cmd
+    assert ("export HOME=/work XDG_CACHE_HOME=/work/.reprobe_cache R_LIBS_USER=/work/.reprobe_Rlib "
+            "R_DEFAULT_DEVICE=cairo_pdf;") in cmd
 
 
 def test_python_runs_unbuffered_and_without_an_empty_pythonpath_entry(tmp_path):
