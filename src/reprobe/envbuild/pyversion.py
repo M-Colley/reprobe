@@ -211,19 +211,25 @@ def declared_python(src: Path, requires_python: Optional[str] = None) -> Optiona
 
 
 def choose_python(pins: list[tuple[str, str]], declared: Optional[SpecifierSet] = None,
-                  candidates: tuple[str, ...] = DEFAULT_CANDIDATES, force: bool = False) -> Optional[Choice]:
+                  candidates: tuple[str, ...] = DEFAULT_CANDIDATES, force: bool = False,
+                  soft: Iterable[tuple[str, str]] = ()) -> Optional[Choice]:
     """The newest candidate every exact pin installs on, or None when the base
     image's Python (``candidates[0]``) will do. When no candidate fits all pins,
     the one fitting most of them (newest on a tie), with the rest named. ``force``
-    returns the base image's Python too (an as-of environment is always built)."""
+    returns the base image's Python too (an as-of environment is always built).
+    ``soft`` releases only break ties among the Pythons fitting most exact pins."""
     allowed = [c for c in candidates if declared is None or declared.contains(c + ".0", prereleases=True)]
     if not allowed:
         return None
     with ThreadPoolExecutor(8) as ex:
-        meta = dict(zip(pins, ex.map(lambda p: release_files(*p), pins), strict=True))
-    known = {p: m for p, m in meta.items() if m is not None}
+        soft = [p for p in dict.fromkeys(soft) if p not in pins]
+        both = [*pins, *soft]
+        meta = dict(zip(both, ex.map(lambda p: release_files(*p), both), strict=True))
+    known = {p: meta[p] for p in pins if meta[p] is not None}
+    weak = [meta[p] for p in soft if meta[p] is not None]
     fits = {c: [p for p, m in known.items() if _supports(m[0], m[1], c)] for c in allowed}
-    best = max(allowed, key=lambda c: (len(fits[c]), -allowed.index(c)))
+    sfit = {c: sum(_supports(m[0], m[1], c) for m in weak) for c in allowed}
+    best = max(allowed, key=lambda c: (len(fits[c]), sfit[c], -allowed.index(c)))
     if best == candidates[0] and not force:
         return None
     misfit = [f"{n}=={v}" for (n, v) in known if (n, v) not in fits[best]]

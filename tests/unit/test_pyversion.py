@@ -127,6 +127,8 @@ FAKE.update({
                           ">=3.8", "2023-01-19T10:00:00Z"),
     ("keras", "2.11.0"): (("keras-2.11.0-py2.py3-none-any.whl",), ">=3.7"),
     ("tensorflow", "2.11.0"): ((f"tensorflow-2.11.0-cp310-cp310-{_ML}.whl",), ">=3.7"),
+    ("scikit-learn", "0.23.2"): ((f"scikit_learn-0.23.2-cp38-cp38-{_ML}.whl",), ">=3.6"),
+    ("ipython", "8.14.0"): (("ipython-8.14.0-py3-none-any.whl",), ">=3.9"),
 })
 
 
@@ -161,9 +163,9 @@ def test_an_old_artifact_gets_its_open_dependencies_as_of_its_date(tmp_path, his
     assert "micromamba create" in create and "python=3.10" in create
     assert " -c /work/.reprobe_req/requirements.txt.constraints" in reqs
     assert "--uploaded-prior-to=2023-02-02T00:00:00Z" in reqs
-    assert '"keras": "2.11.0"' in scanned and '"tensorflow": "2.11.0"' in scanned
+    assert '"keras": "<=2.11.0"' in scanned and '"tensorflow": "<=2.11.0"' in scanned
     assert "--uploaded-prior-to=2023-02-02T00:00:00Z" in scanned
-    assert any("dates from 2023-02-01" in w and "pandas==1.5.3" in w for w in ip.warnings)
+    assert any("dates from 2023-02-01" in w and "pandas<=1.5.3" in w for w in ip.warnings)
 
 
 def test_a_recent_artifact_keeps_the_base_image(tmp_path, history):
@@ -177,6 +179,17 @@ def test_exact_pins_are_never_overridden_by_the_date(tmp_path, history):
                detected_py_packages=["pandas", "keras"], artifact_date="2023-02-01",
                as_of_min_age_days=365)
     assert "pandas" not in ip.as_of_pins and ip.as_of_pins["keras"] == "2.11.0"
+    scanned = next(c for c in ip.commands if "reprobe: imports the environment" in c)
+    assert '"pandas": "==2.0.0"' in scanned and '"keras": "<=2.11.0"' in scanned
+
+
+def test_exact_pins_choose_the_python_and_as_of_releases_only_break_ties(pypi):
+    """ACSAC 2022 row 8: as-of ipython 8.14 needs Python 3.9; the pinned scikit-learn
+    0.23.2 has no 3.9 wheel. The pin wins; pip steps ipython back to what 3.8 takes."""
+    c = choose_python([("scikit-learn", "0.23.2")], force=True, soft=[("ipython", "8.14.0")])
+    assert c.version == "3.8"
+    c = choose_python([("pandas", "1.4.3")], force=True, soft=[("tensorflow", "2.11.0")])
+    assert c.version == "3.10"            # pandas fits 3.8-3.10; tensorflow 2.11 breaks the tie
 
 
 def test_the_constraints_file_holds_open_names_to_their_release():
@@ -186,5 +199,5 @@ def test_the_constraints_file_holds_open_names_to_their_release():
     import base64
     import re
     files = [base64.b64decode(b).decode() for b in re.findall(r"printf %s '([A-Za-z0-9+/=]+)'", cmd)]
-    assert files[0] == "pandas==1.5.3\n"          # invalid names and versions never reach the file
+    assert files[0] == "pandas<=1.5.3\n"          # invalid names and versions never reach the file
     assert "-c /work/.reprobe_req/requirements.txt.constraints" in cmd

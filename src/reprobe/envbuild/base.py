@@ -260,9 +260,12 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str],
     literals inside this single-quoted ``-c`` argument cannot inject shell or
     Python code. (The code therefore uses no single quotes.)
 
-    ``versions`` pins a name to one release (the as-of-date install: what pip gave
-    on the artifact's date), and ``cutoff`` resolves their dependencies as of then,
-    with a pip that has --uploaded-prior-to. Versions are validated like names."""
+    ``versions`` maps a name to ``==X`` (the author's exact pin) or ``<=X`` (the
+    as-of-date install: the newest release on the artifact's date, an upper bound
+    so the resolver can still step back to what fits the others), and ``cutoff``
+    resolves their dependencies as of then, with a pip that has --uploaded-prior-to.
+    A name with no wheel under those limits falls back to its current wheel, and
+    the output says so. Versions are validated like names."""
     from ..detect.signatures import py_module_for_dist
 
     # An extra gets an empty module name, which the generated code treats as
@@ -275,7 +278,7 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str],
     spec = ", ".join(f'("{m}", "{d}")' for m, d in pairs)
     target = '"--target=/work/.reprobe_deps"' if not conda_prefix else ""
     pinned = ", ".join(f'"{d}": "{v}"' for d, v in (versions or {}).items()
-                       if d in dists and re.fullmatch(r"[0-9A-Za-z.+!_-]+", v))
+                       if d in dists and re.fullmatch(r"(==|<=)[0-9A-Za-z.+!_-]+", v))
     cut = cutoff if cutoff and re.fullmatch(r"\d{4}-\d\d-\d\dT00:00:00Z", cutoff) else ""
     code = (
         # -I drops PYTHONPATH, so earlier installs into /work/.reprobe_deps are
@@ -297,7 +300,7 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str],
         'print("reprobe: imports the environment does not provide:", need or "none", flush=True); '
         'W = "/var/tmp/reprobe-wheels"; '
         'run = lambda *a: subprocess.call([sys.executable, "-I", "-m", "pip", *a]); '
-        f"P = {{{pinned}}}; " 'S = lambda d: d + "==" + P[d] if d in P else d; '
+        f"P = {{{pinned}}}; " 'S = lambda d: d + P[d] if d in P else d; '
         # pip < 26 (the Python 3.8 and older envs) has no --uploaded-prior-to: there
         # only the pinned names themselves are as of the date.
         f'UP = ["--uploaded-prior-to={cut}"] if "{cut}" and "--uploaded-prior-to" in '
@@ -313,8 +316,17 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str],
         f'"--no-input", "--only-binary=:all:", "--no-deps", "--index-url", "{TORCH_CPU_INDEX}", '
         '"-d", W, S(d)) == 0]; '
         'cpu and print("reprobe: CPU builds (no GPU in the sandbox):", cpu, flush=True); '
-        'got = [d for d in need if run("download", "--no-input", "--only-binary=:all:", '
-        '"--find-links", W, *UP, "-d", W, S(d)) == 0]; '
+        'dl = lambda *a: run("download", "--no-input", "--only-binary=:all:", "--find-links", W, "-d", W, *a); '
+        # Old releases, and old releases of their dependencies, are often source
+        # only (benchmark rows 16, 20, 30: lws 1.2.7, avro-python3, future 0.18.2),
+        # and nothing is built while the network is open. Such a name keeps its
+        # version limit with current dependencies, else falls back to its current
+        # wheel; the output names it. Better than leaving it out.
+        "late = []; fb = lambda d: ((UP and dl(S(d)) == 0) or (d in P and dl(d) == 0 "
+        "and P.pop(d) is not None)) and not late.append(d); "
+        "got = [d for d in need if dl(*UP, S(d)) == 0 or ((UP or d in P) and fb(d))]; "
+        'late and print("reprobe: no wheel within the version limits as of the date; installed with '
+        'current dependencies, or as the current release:", late, flush=True); '
         f"T = [{target}]; "
         'L = T and "/work/.reprobe_deps" or __import__("sysconfig").get_paths()["purelib"]; '
         "ls = lambda: sorted(os.listdir(L)) if os.path.isdir(L) else []; before = ls(); "
@@ -594,7 +606,7 @@ def _pip_install_embedded(content: str, name: str, conda_prefix: Optional[str],
     release pip gave on the artifact's date, with every pip."""
     dest = f"{_REQ_DIR}/{name}"
     target = "" if conda_prefix else " --target=/work/.reprobe_deps"
-    cons = "".join(f"{n}=={v}\n" for n, v in sorted((constraints or {}).items())
+    cons = "".join(f"{n}<={v}\n" for n, v in sorted((constraints or {}).items())
                    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", n)
                    and re.fullmatch(r"[0-9A-Za-z.+!_-]+", v))
     prefix = ""
@@ -667,7 +679,11 @@ def _python_env_command(version: str, notebooks: bool) -> str:
     extra = " papermill ipykernel nbconvert" if notebooks else ""
     return (f"mkdir -p {INSTALL_HOME} && cd {INSTALL_HOME} && export MAMBA_ROOT_PREFIX={_MAMBA_CACHE} && "
             f"HOME={INSTALL_HOME} micromamba create -y -q -p {CONDA_ENV_PREFIX} -c conda-forge "
-            f"python={version} pip{extra}")
+            f"python={version} pip{extra}"
+            # conda-forge may solve an older pip; 26.0 is the first with --uploaded-prior-to
+            # (benchmark row 30 resolved numpy 2 for a 2021 artifact). 3.8 has no pip 26.
+            + (f" && {CONDA_ENV_PREFIX}/bin/python -I -m pip install -q --no-input \"pip>=26\""
+               if int(version.split(".")[1]) >= 9 else ""))
 
 
 def _conda_disclosures(path: Path, notebooks: bool) -> list[str]:
@@ -749,6 +765,7 @@ class _InstallPlan:
     python_version: Optional[str] = None     # set when the base image's Python was replaced
     cutoff: Optional[str] = None             # ...and the date unpinned deps resolve as of
     as_of_pins: dict[str, str] = field(default_factory=dict)   # open names -> release on that date
+    exact_pins: dict[str, str] = field(default_factory=dict)   # the author's ==X requirements
 
     def add(self, cmd: Optional[str], origin: str, key: Optional[str] = None) -> None:
         if cmd:
@@ -826,14 +843,18 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
         if ip.conda_prefix or not python_versions:
             return ip.conda_prefix
         pins = exact_pins(lines)
+        ip.exact_pins.update(pins)
         if as_of:
             fixed = {n for n, _ in pins}
             names = [(n, sp) for n, sp in open_names(lines) if n not in fixed] + [
                 (canonicalize_name(d.split("[", 1)[0]), None) for d in detected_py_packages
                 if canonicalize_name(d.split("[", 1)[0]) not in fixed]
             ip.as_of_pins = dict(as_of_pins(names, as_of))
-        choice = choose_python(pins + sorted(ip.as_of_pins.items()), declared_python(src, requires_python),
-                               python_versions, force=bool(as_of))
+        # The author's exact pins decide the Python; the as-of releases only break
+        # ties (ipython 8.14 needs 3.9, the pinned scikit-learn 0.23.2 has no 3.9
+        # wheel: benchmark row 8). They are upper bounds, so pip steps back.
+        choice = choose_python(pins, declared_python(src, requires_python), python_versions,
+                               force=bool(as_of), soft=sorted(ip.as_of_pins.items()))
         if choice is None:
             return None
         ip.add(_python_env_command(choice.version, notebooks), DETECTED)
@@ -845,9 +866,11 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                 "its open dependencies were installed as they were then, not as of today, into a fresh "
                 f"Python {choice.version} environment ({CONDA_ENV_PREFIX}, micromamba) instead of the "
                 "base image's packages: "
-                + ", ".join(f"{n}=={v}" for n, v in sorted(ip.as_of_pins.items())[:12])
+                + ", ".join(f"{n}<={v}" for n, v in sorted(ip.as_of_pins.items())[:12])
                 + (" …" if len(ip.as_of_pins) > 12 else "")
-                + " (the newest release on PyPI before that date; pip constraints and exact pins). "
+                + " (at most the newest release on PyPI before that date, as pip constraints; the "
+                  "author's exact pins are kept; a name with no wheel that old gets its current one, "
+                  "and the install log names it). "
                   "Their own dependencies were resolved as of the same date where the environment's "
                   "pip has --uploaded-prior-to (Python 3.9 and newer)"
                 + (f"; {choice.reason}" if choice.reason else ""))
@@ -1024,8 +1047,15 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
         if py_needed:
             if as_of and not ip.conda_prefix:
                 python_env([])
-            versions = {d: ip.as_of_pins[n] for d in py_pkgs
-                        if (n := canonicalize_name(d.split("[", 1)[0])) in ip.as_of_pins}
+            # The author's exact pin wins over the date (benchmark row 8: a failed
+            # requirements install left tensorflow==2.9.1 to come back as 2.20).
+            versions = {}
+            for d in py_pkgs:
+                n = canonicalize_name(d.split("[", 1)[0])
+                if n in ip.exact_pins:
+                    versions[d] = "==" + ip.exact_pins[n]
+                elif n in ip.as_of_pins:
+                    versions[d] = "<=" + ip.as_of_pins[n]
             ip.add(_py_detected_install_command(py_pkgs, ip.conda_prefix, versions,
                                                 ip.cutoff if as_of else None), DETECTED)
             uses_pip_target = uses_pip_target or not ip.conda_prefix

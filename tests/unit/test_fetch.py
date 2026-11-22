@@ -823,3 +823,28 @@ def test_untrusted_urls_ignore_proxy_and_netrc_from_the_environment():
     """A proxy would resolve the author's host itself (the DNS pin then guards
     nothing), and ~/.netrc would hand the chair's credentials to it."""
     assert base._DIRECT.trust_env is False
+
+
+def test_the_artifact_date_ignores_commits_that_only_touch_documentation(tmp_path):
+    """STRIP (benchmark row 4): code from 2019, a README edit from 2024."""
+    import os
+    import subprocess
+
+    from reprobe.fetch.git_host import artifact_date
+
+    def commit(rel, when):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(when, encoding="utf-8")
+        env = {**os.environ, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+        for cmd in (["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", rel]):
+            subprocess.run(["git", *cmd], cwd=tmp_path, env=env, check=True)
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    commit("README.md", "2019-08-01T00:00:00Z")
+    assert artifact_date(tmp_path) == "2019-08-01"       # only docs: the HEAD date
+    commit("strip.ipynb", "2019-09-17T00:00:00Z")
+    commit("README.md", "2024-11-12T00:00:00Z")
+    commit("docs/paper.pdf", "2024-11-13T00:00:00Z")
+    assert artifact_date(tmp_path) == "2019-09-17"
+    commit("requirements.txt", "2025-01-02T00:00:00Z")
+    assert artifact_date(tmp_path) == "2025-01-02"

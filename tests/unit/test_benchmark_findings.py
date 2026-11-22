@@ -123,7 +123,12 @@ import os, sys
 a = sys.argv[1:]
 open(os.environ["LOG"], "a").write(" ".join(a) + "\\n")
 if a[0] == "download":
-    sys.exit(0)
+    if "--help" in a:
+        print("--uploaded-prior-to")
+    # "delta" has no wheel that old: under a version limit or the date
+    old = any("prior" in x for x in a)
+    sys.exit(1 if (a[-1].startswith("delta") and ("<=" in a[-1] or old))
+             or (a[-1].startswith("eps") and old) else 0)
 pkgs = [x for x in a[1:] if not x.startswith("-") and x != os.environ["W"]]
 if "alpha" in pkgs and "beta" in pkgs:
     sys.exit(1)  # ResolutionImpossible
@@ -136,12 +141,12 @@ sys.exit(0)
 """
 
 
-def _run_scanned(tmp_path, dists):
+def _run_scanned(tmp_path, dists, versions=None, cutoff=None):
     import subprocess
     import sys
 
     from reprobe.envbuild.base import _py_detected_install_command
-    cmd = _py_detected_install_command(dists, None)
+    cmd = _py_detected_install_command(dists, None, versions, cutoff)
     code = cmd.split(" -c '", 1)[1][:-1]
     fake = tmp_path / "fakepip.py"
     fake.write_text(FAKE_PIP, encoding="utf-8")
@@ -192,3 +197,16 @@ def test_scripts_deeper_than_one_folder_are_named_when_nothing_runs(tmp_path):
     res, _ = detect(tmp_path)
     assert not res.steps
     assert any("NOT run" in n and "scripts/multi/multi-kvm.py" in n for n in res.notes)
+
+
+def test_a_name_with_no_wheel_as_of_the_date_falls_back_to_its_current_one(tmp_path):
+    """Rows 16, 20, 30: lws 1.2.7, apache-beam 2.29 (avro-python3), future 0.18.2 are
+    source only; the as-of install left them out entirely."""
+    out, installed = _run_scanned(tmp_path, ["delta", "eps", "gamma"],
+                                  {"delta": "<=1.0", "eps": "==3.0", "gamma": "==2.0"}, "2021-01-01T00:00:00Z")
+    # eps keeps its pin with current dependencies; delta has no old wheel at all
+    assert installed == ["delta", "eps==3.0", "gamma==2.0"]
+    assert "or as the current release: ['delta', 'eps']" in out
+    calls = (tmp_path / "pip.log").read_text().splitlines()
+    assert any(c.startswith("download") and "--uploaded-prior-to=2021-01-01T00:00:00Z" in c
+               and c.endswith("gamma==2.0") for c in calls)

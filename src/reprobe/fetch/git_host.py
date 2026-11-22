@@ -32,6 +32,21 @@ _NEEDS_CREDENTIALS_RE = re.compile(
     r"Authentication failed|Invalid username or (password|token)", re.I)
 
 
+#: Pathspecs a commit may touch and still leave the code as it was (git glob magic).
+_DOC_ONLY = tuple(f":(exclude,glob)**/{g}" for g in (
+    "*.md", "*.rst", "*.pdf", "*.bib", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.svg",
+    "LICENSE*", "CITATION*", "docs/**", ".github/**"))
+
+
+def artifact_date(dest: Path) -> str:
+    """What the install phase calls the artifact's date (YYYY-MM-DD, or ""): the
+    last commit that changed more than documentation. STRIP (benchmark row 4) has
+    code from 2019 and a README edit from 2024; dated 2024 it got Keras 3, which
+    has no np_utils."""
+    out = run_git(["log", "-1", "--format=%cI", "HEAD", "--", ".", *_DOC_ONLY], cwd=dest).stdout.strip()
+    return (out or run_git(["log", "-1", "--format=%cI", "HEAD"], cwd=dest).stdout.strip())[:10]
+
+
 def _clone_failure(url: str, stderr: str) -> str:
     """Turn a credential-prompt clone failure into the finding a reviewer needs.
 
@@ -287,8 +302,7 @@ class GitHostFetcher:
                 raise FetchError(f"git checkout {want_ref} failed: {co.stderr.strip()[:200]}")
 
         sha = run_git(["rev-parse", "HEAD"], cwd=dest).stdout.strip()
-        # the fetched revision's commit date: what the install phase calls the artifact's date
-        when = run_git(["log", "-1", "--format=%cI", "HEAD"], cwd=dest).stdout.strip()[:10]
+        when = artifact_date(dest)
         warnings = []
         # Ask whether THIS REPO tracks files in LFS. The old gate was
         # `git lfs version`, which only proves the CLI exists on the host, so
@@ -311,5 +325,5 @@ class GitHostFetcher:
             pin=Pin(kind="git_sha", value=sha),
             fetch_layer="git-clone", checksum_verified=False,
             warnings=warnings, metadata={"url": url, "ref": want_ref, "artifact_date": when or None,
-                                         "artifact_date_source": "commit date of the fetched revision"},
+                                         "artifact_date_source": "date of the last commit changing more than documentation"},
         )

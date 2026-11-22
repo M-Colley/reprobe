@@ -457,6 +457,20 @@ reproduced against the real code before it was fixed.
   own dependencies resolve as of the same date where pip has
   `--uploaded-prior-to` (Python 3.9+). The report lists the versions and the date
   (`environment.dependencies_as_of`).
+  The first benchmark run with it (9929e71) recovered nothing and lost two steps;
+  fixed:
+  - the date is the last commit changing more than documentation (STRIP: code
+    from 2019, a README edit from 2024);
+  - the as-of releases are upper bounds (`<=`), not pins: each held separately at
+    its newest, TensorFlow 2.18 and numpy 2.1.3 could not install together;
+  - the author's exact pins choose the Python and the as-of releases only break
+    ties (an as-of ipython 8.14 forced Python 3.9, where the pinned scikit-learn
+    0.23.2 has no wheel); detected imports keep the author's exact pins too;
+  - environments on Python 3.9+ get pip ≥ 26, so `--uploaded-prior-to` applies
+    (conda-forge solved an older pip, and a 2021 artifact got numpy 2);
+  - a detected import with no wheel that old (lws 1.2.7, apache-beam 2.29 via
+    avro-python3, future 0.18.2) keeps its limit with current dependencies, else
+    gets its current wheel; the install log names each one.
 - **Guessed `torch`, `torchvision` and `torchaudio` imports get the CPU builds.** No
   container gets a GPU, and PyPI's Linux torch brings ~3 GB of CUDA wheels: two
   benchmark artifacts (SV2TTS, CacheSched) filled the runner's disk with them. The
