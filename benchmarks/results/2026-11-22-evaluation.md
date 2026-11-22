@@ -39,7 +39,7 @@ artifact runs unattended.
 | scalingattacks (15) | `cv2` mapped to the GUI OpenCV wheel, which needs libxcb | ea2fe94 |
 | scalingattacks (15) | TensorFlow 1.13 pins need Python 3.7, which was not a candidate | ea2fe94 |
 | sandbox CI | OOM kill read as plain SIGKILL when moby reset `OOMKilled` | d4fdc68 |
-| sosp-paper211-ae, phoenix (28, 34) | scripts two folders down went unmentioned when nothing ran | after d4fdc68 |
+| sosp-paper211-ae, phoenix (28, 34) | scripts two folders down went unmentioned when nothing ran | 13c4546 |
 | rethinking-serverless (22) | Python 3.13 for pins with wheels up to 3.10 only (found before this set) | 58980d3 |
 | RE-Tool (6) | R plot with `family="Arial"` and no device failed under Rscript | 44555a0 |
 
