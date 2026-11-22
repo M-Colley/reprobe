@@ -99,3 +99,20 @@ def test_an_import_its_own_folder_satisfies_needs_no_path(tmp_path):
     _tree(tmp_path, {"s/run.py": "import helper\n", "s/helper.py": "", "helper.py": ""})
     from reprobe.detect.signatures import import_root
     assert import_root((tmp_path / "s/run.py").resolve(), tmp_path.resolve()) is None
+
+
+def test_package_modules_are_named_when_nothing_runs(tmp_path):
+    """JStap (ACSAC 2019): 26 Python files, all in packages, reported as "1 document"."""
+    _tree(tmp_path, {"classification/__init__.py": "", "classification/learner.py": "print(1)\n",
+                     "README.md": "x"})
+    res, _ = detect(tmp_path)
+    assert "python" in res.artifact_types and not res.steps
+    assert any("modules of a package" in n and "classification/learner.py" in n for n in res.notes)
+
+
+def test_keras_alone_brings_its_tensorflow_backend(tmp_path):
+    from reprobe.detect.signatures import scan_py_packages
+    (tmp_path / "a.py").write_text("import keras\nimport numpy\n", encoding="utf-8")
+    assert "tensorflow" in scan_py_packages(tmp_path, [tmp_path / "a.py"])
+    (tmp_path / "b.py").write_text("import keras\nimport torch\n", encoding="utf-8")
+    assert "tensorflow" not in scan_py_packages(tmp_path, [tmp_path / "b.py"])

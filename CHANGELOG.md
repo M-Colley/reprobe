@@ -428,6 +428,10 @@ reproduced against the real code before it was fixed.
   - a script inside its project (`dcp-main/dcp/core/pipeline.py`, `from dcp…`)
     failed on its own package: the nearest ancestor folder that provides it is
     made importable, as running from there would;
+  - a deposit whose Python files are all package modules (JStap, 26 files)
+    was reported as "1 document", without a word about them;
+  - `import keras` alone installed Keras 3 without the TensorFlow backend
+    the code was written for;
   - with nothing run, scripts were said to be skipped because "other scripts
     were found to run the analysis", and the verdict carried no note.
 - **Old pins get the Python, and the dependencies, of their day.** base-py has

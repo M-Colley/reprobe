@@ -424,6 +424,11 @@ def scan_py_packages(root: Path, files) -> list[str]:
     # `ray[tune]` supersedes a bare `ray`: it is the same distribution, and
     # installing both would leave the run depending on which pip resolved last.
     superseded = {d.split("[", 1)[0] for d in dists if "[" in d}
+    # `import keras` gets Keras 3, which runs on a backend it does not bring; code
+    # importing keras alone was written for its TensorFlow one (STRIP, ACSAC 2019:
+    # "No module named 'tensorflow'"). TensorFlow is Keras 3's default backend.
+    if "keras" in dists and not dists & {"tensorflow", "tensorflow-cpu", "jax", "torch"}:
+        dists.add("tensorflow")
     return sorted(d for d in dists if d not in superseded)
 
 
@@ -1259,6 +1264,16 @@ def scan(src_dir: str | Path) -> DetectResult:
         chosen = list(dict.fromkeys((entry if driven else top) + numbered_py))
         if chosen or py_candidates:
             types.append("python")
+        elif modules := [p for p in py_files if not third_party(p)]:
+            # every file is a module of a package: none is run as a script, and
+            # JStap (26 such files, ACSAC 2019) was reported as "1 document"
+            types.append("python")
+            notes.append(f"{len(modules)} Python file(s) are modules of a package (their folder has "
+                         "__init__.py) and were NOT run as scripts: "
+                         + ", ".join(sorted(rel(p) for p in modules)[:8])
+                         + (" …" if len(modules) > 8 else "")
+                         + ". If one is an entry point (`python -m pkg.module`), declare `run: steps:` "
+                           "in autoui-repro.yml")
         planned += [(p, "python") for p in chosen]
         if not driven and len(top) > 3:
             notes.append("multiple top-level .py scripts and no clear entry point; ordering is best-effort")
