@@ -398,6 +398,9 @@ def _tree_exceeds(root: Path, cap: int) -> bool:
     return False
 
 
+_OOM_RECHECKS, _OOM_RECHECK_S = 4, 0.5
+
+
 def _oom_killed(name: str) -> Optional[bool]:
     try:
         r = subprocess.run(["docker", "inspect", "--format", "{{.State.OOMKilled}}", name],
@@ -572,6 +575,14 @@ def run_container(
                 # No --rm, so the exited container is still there to ask whether
                 # the kernel OOM-killed it; then it goes, on this path too.
                 oom = _oom_killed(name)
+                # The daemon records an OOM kill from an asynchronous cgroup event:
+                # inspected straight after a fast exit, a kill at the cap still read
+                # OOMKilled=false (CI, 2026-11-22). A SIGKILL exit is asked again.
+                for _ in range(_OOM_RECHECKS):
+                    if oom is not False or exit_code != 137:
+                        break
+                    time.sleep(_OOM_RECHECK_S)
+                    oom = _oom_killed(name)
                 _docker_quiet(["rm", "-f", name])
             else:
                 # Every non-normal path (timeout, a budget, KeyboardInterrupt,

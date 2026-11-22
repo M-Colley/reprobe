@@ -416,6 +416,19 @@ reproduced against the real code before it was fixed.
   while base-r was there. R steps now run in base-r; an rpy2 notebook, which
   no image present can run, is skipped with the reason, and its R installs
   are not sent to the R-less fallback.
+- **Old pins get the Python, and the dependencies, of their day.** base-py has
+  one Python (3.13), and a 2022 artifact pinning `scikit-learn==1.1.2` and
+  `pandas==1.4.3` failed to install — no wheels past CPython 3.10, and the
+  source build fails on 3.13 (zenodo.7143413, EuroSys 2023). From PyPI's file
+  lists for the *exactly* pinned releases (and `.python-version`,
+  `runtime.txt`, `requires-python`), the newest Python every pin ships wheels
+  for is built with micromamba, and requirements the pins leave open resolve
+  as of the day after the newest pinned upload (`pip --uploaded-prior-to`), so
+  pandas 1.4.3 does not meet numpy 2. Recorded as `environment.python_version`
+  with the reason; e2e `py-oldpins`. Configured by `install.python_versions`.
+- **An OOM kill is read even when the daemon reports it late.** Inspected
+  straight after a 0.24 s run, a kill at the memory cap read OOMKilled=false
+  (CI sandbox job); a SIGKILL exit is asked again for up to 2 s.
 - **R plots no device was opened for are drawn with cairo_pdf.** Rscript's
   default pdf() device knows only its built-in font families, so
   `family = "Arial"` stopped the script ("invalid font type") where RStudio,

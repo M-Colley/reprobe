@@ -45,6 +45,7 @@ import yaml
 from ..config import Config
 from ..docker_exec import docker_available, image_present
 from ..models import DetectResult, EnvPlan
+from .pyversion import choose_python, declared_python, exact_pins
 from .sanitize import (
     DEFAULT_CONDA_CHANNELS,
     MAX_EMBED_BYTES,
@@ -327,7 +328,8 @@ def plan(
         conda_channels=tuple((config.pins.get("install") or {}).get("conda_channels")
                              or DEFAULT_CONDA_CHANNELS),
         step_dirs=_step_dirs(detect_result),
-        r_install_keys=_r_install_keys(detect_result))
+        r_install_keys=_r_install_keys(detect_result),
+        python_versions=tuple(str(v) for v in (config.pins.get("install") or {}).get("python_versions") or ()))
     install, dep_warnings, conda_prefix = ip.commands, ip.warnings, ip.conda_prefix
 
     flags = detect_result.flags
@@ -372,7 +374,8 @@ def plan(
 
     return EnvPlan(strategy=strategy, image=image, env_provenance=provenance,
                    install_commands=install, install_origins=ip.origins, install_keys=ip.keys,
-                   conda_env_prefix=conda_prefix, warnings=warnings + dep_warnings)
+                   conda_env_prefix=conda_prefix, python_version=ip.python_version,
+                   warnings=warnings + dep_warnings)
 
 
 #: Where the install phase builds an artifact's own conda environment. Under
@@ -504,8 +507,8 @@ def lint_requirements(path: Path) -> list[str]:
     return findings
 
 
-def _requirements_command(src: Path, req_file: str,
-                          conda_prefix: Optional[str]) -> tuple[Optional[str], list[str]]:
+def _requirements_command(src: Path, req_file: str, conda_prefix: Optional[str],
+                          cutoff: Optional[str] = None) -> tuple[Optional[str], list[str]]:
     """`pip install -r <sanitised copy>`, into a built conda env when there is one.
 
     The author's requirements file is filtered (sanitize.filter_requirements): an
@@ -525,22 +528,28 @@ def _requirements_command(src: Path, req_file: str,
     if len(content.encode("utf-8")) > MAX_EMBED_BYTES:
         return None, warnings + [f"'{req_file}' is too large to embed in the install command; it was "
                                  "NOT installed"]
-    return _pip_install_embedded(content, "requirements.txt", conda_prefix), warnings
+    return _pip_install_embedded(content, "requirements.txt", conda_prefix, cutoff), warnings
 
 
-def _pip_install_embedded(content: str, name: str, conda_prefix: Optional[str]) -> str:
+def _pip_install_embedded(content: str, name: str, conda_prefix: Optional[str],
+                          cutoff: Optional[str] = None) -> str:
     """`pip install -r` of requirement lines embedded in the command (never read
-    from the artifact's tree), into the conda env when there is one."""
+    from the artifact's tree), into the conda env when there is one. ``cutoff``
+    (see pyversion.Choice) resolves what the lines leave open as of that date —
+    with a pip that has --uploaded-prior-to (26.0+; Python 3.8's pip does not)."""
     dest = f"{_REQ_DIR}/{name}"
     target = "" if conda_prefix else " --target=/work/.reprobe_deps"
+    if cutoff and re.fullmatch(r"\d{4}-\d\d-\d\dT00:00:00Z", cutoff):
+        target += (f" $({_py(conda_prefix)} -m pip install --help 2>/dev/null | "
+                   f"grep -q -- --uploaded-prior-to && echo --uploaded-prior-to={cutoff})")
     # cd first: pip reads a requirement ending in an archive suffix as a file in ITS
     # working directory, which must not be the artifact's tree
     return (f"{embed_file_command(content, dest)} && cd {_REQ_DIR} && "
             f"{_py(conda_prefix)} -m pip install --no-input{target} -r {dest}")
 
 
-def _pyproject_command(src: Path, rel: str,
-                       conda_prefix: Optional[str]) -> tuple[Optional[str], list[str]]:
+def _pyproject_command(src: Path, rel: str, conda_prefix: Optional[str],
+                       cutoff: Optional[str] = None) -> tuple[Optional[str], list[str]]:
     """The PEP 621 ``[project].dependencies`` of a pyproject.toml, through the same
     filter as a requirements file. The project itself is never built or installed:
     its build backend is the artifact's code, and this phase has network."""
@@ -571,7 +580,30 @@ def _pyproject_command(src: Path, rel: str,
     content = "\n".join(kept) + "\n"
     if len(content.encode("utf-8")) > MAX_EMBED_BYTES:
         return None, warnings + [f"'{rel}' dependencies are too large to embed; NOT installed"]
-    return _pip_install_embedded(content, "pyproject-requirements.txt", conda_prefix), warnings
+    return _pip_install_embedded(content, "pyproject-requirements.txt", conda_prefix, cutoff), warnings
+
+
+def _pyproject_meta(src: Path, rel: str) -> tuple[list[str], Optional[str]]:
+    """``([project].dependencies, requires-python)`` of a pyproject.toml, or empty."""
+    try:
+        data = tomllib.loads(read_dep_file(src / rel))
+    except (tomllib.TOMLDecodeError, OSError, RecursionError):
+        return [], None
+    proj = data.get("project") if isinstance(data.get("project"), dict) else {}
+    deps = proj.get("dependencies")
+    rp = proj.get("requires-python")
+    return ([str(d) for d in deps] if isinstance(deps, list) else []), (str(rp) if rp else None)
+
+
+def _python_env_command(version: str, notebooks: bool) -> str:
+    """A conda env holding only the chosen Python and pip (plus the notebook
+    executor, as for an environment.yml), for the pinned requirements to go into."""
+    if not re.fullmatch(r"3\.\d{1,2}", version):
+        raise ValueError(f"not a Python minor version: {version!r}")
+    extra = " papermill ipykernel nbconvert" if notebooks else ""
+    return (f"mkdir -p {INSTALL_HOME} && cd {INSTALL_HOME} && export MAMBA_ROOT_PREFIX={_MAMBA_CACHE} && "
+            f"HOME={INSTALL_HOME} micromamba create -y -q -p {CONDA_ENV_PREFIX} -c conda-forge "
+            f"python={version} pip{extra}")
 
 
 def _conda_disclosures(path: Path, notebooks: bool) -> list[str]:
@@ -609,8 +641,11 @@ def describe_install_command(cmd: str) -> str:
     report — and showing a truncated blob read as a harness bug."""
     if "-r /work/.reprobe_req/requirements.txt" in cmd:
         return "pip install -r requirements.txt (the sanitised copy)"
-    if "micromamba create" in cmd:
+    if "micromamba create" in cmd and " -f " in cmd:
         return "micromamba create from environment.yml (the sanitised copy)"
+    if "micromamba create" in cmd:
+        v = re.search(r"python=(3\.\d+)", cmd)
+        return f"creation of a Python {v.group(1) if v else '?'} environment for the pinned requirements"
     if "renv::restore" in cmd:
         return "renv::restore of renv.lock"
     if "install.packages(ok" in cmd:
@@ -647,6 +682,8 @@ class _InstallPlan:
     keys: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     conda_prefix: Optional[str] = None
+    python_version: Optional[str] = None     # set when the base image's Python was replaced
+    cutoff: Optional[str] = None             # ...and the date unpinned deps resolve as of
 
     def add(self, cmd: Optional[str], origin: str, key: Optional[str] = None) -> None:
         if cmd:
@@ -693,7 +730,8 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                   detected_py_packages: list[str] | tuple[str, ...] = (),
                   conda_channels: tuple[str, ...] = DEFAULT_CONDA_CHANNELS,
                   step_dirs: tuple[str, ...] = (),
-                  r_install_keys: tuple[str, ...] = ("r",)) -> _InstallPlan:
+                  r_install_keys: tuple[str, ...] = ("r",),
+                  python_versions: tuple[str, ...] = ()) -> _InstallPlan:
     """Any declared or detected dependency file the pinned-base builder does NOT
     install must surface as a warning — the report says what was not installed
     (never over-claim)."""
@@ -708,9 +746,37 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
                            "ignored and the artifact's own files were auto-detected instead")
         dep = ""
 
+    def python_env(lines: list[str], requires_python: Optional[str] = None) -> Optional[str]:
+        """The conda prefix to install into: a Python-X env when the base image's
+        Python cannot take the pinned versions (see pyversion), else None."""
+        if ip.conda_prefix or not python_versions:
+            return ip.conda_prefix
+        choice = choose_python(exact_pins(lines), declared_python(src, requires_python),
+                               python_versions)
+        if choice is None:
+            return None
+        ip.add(_python_env_command(choice.version, notebooks), DETECTED)
+        ip.conda_prefix, ip.python_version, ip.cutoff = CONDA_ENV_PREFIX, choice.version, choice.cutoff
+        ip.warnings.append(
+            f"Python {choice.version} was used instead of the base image's {python_versions[0]}: "
+            f"{choice.reason}. It was installed with micromamba into {CONDA_ENV_PREFIX}"
+            + (" with papermill/ipykernel/nbconvert added so notebooks could execute" if notebooks else "")
+            + (f"; no Python offered fits {', '.join(choice.unsupported[:4])}" if choice.unsupported else "")
+            + (f". Requirements its pins leave open were resolved as of {choice.cutoff[:10]}, the day "
+               "after the newest pinned release was uploaded (pip --uploaded-prior-to), not as of today"
+               if choice.cutoff else ""))
+        return ip.conda_prefix
+
     def requirements(rel: str, conda_prefix: Optional[str]) -> None:
         nonlocal uses_pip_target
-        cmd, w = _requirements_command(src, rel, conda_prefix)
+        if conda_prefix is None and inside_tree(src, src / rel):
+            try:
+                conda_prefix = python_env(filter_requirements(src / rel, src)[0],
+                                          _pyproject_meta(src, "pyproject.toml")[1]
+                                          if (src / "pyproject.toml").is_file() else None)
+            except OSError:
+                pass
+        cmd, w = _requirements_command(src, rel, conda_prefix, ip.cutoff)
         ip.warnings.extend(w)
         ip.add(cmd, AUTHOR)
         uses_pip_target = uses_pip_target or (cmd is not None and not conda_prefix)
@@ -800,7 +866,10 @@ def _install_plan(env: dict[str, Any], src: Path, r_needed: bool,
         if req_file and ("/" not in req_file or not root_pyproject):
             requirements(req_file, ip.conda_prefix)
         elif (pyproject := root_pyproject or find("pyproject.toml")):
-            cmd, w = _pyproject_command(src, pyproject, ip.conda_prefix)
+            if not ip.conda_prefix:
+                deps, rp = _pyproject_meta(src, pyproject)
+                python_env(filter_requirement_lines(deps)[0], rp)
+            cmd, w = _pyproject_command(src, pyproject, ip.conda_prefix, ip.cutoff)
             ip.warnings.extend(w)
             if cmd:
                 ip.add(cmd, AUTHOR)

@@ -174,6 +174,9 @@ class EnvPlan(BaseModel):
     # environment.yml. When set, author code runs with THAT interpreter, not the
     # base image's.
     conda_env_prefix: Optional[str] = None
+    # The Python of that env when the harness chose it for the artifact's pins
+    # (envbuild.pyversion), None when the base image's Python was used.
+    python_version: Optional[str] = None
     base_image_digest: Optional[str] = None
     resolved_deps_digest: Optional[str] = None
     repo2docker_version: Optional[str] = None

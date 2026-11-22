@@ -149,6 +149,19 @@ def test_an_rstudio_project_in_a_subfolder_runs_from_that_folder(tmp_path):
     assert produced.read_text(encoding="utf-8").strip() == "6"
 
 
+def test_old_pins_get_the_python_and_the_numpy_of_their_day(tmp_path):
+    """pandas==1.4.3 ships wheels up to CPython 3.10 and fails to build on 3.13
+    (zenodo.7143413, EuroSys 2023); its open numpy requirement would get numpy 2,
+    which it cannot load. Python 3.10, and numpy as of the pin's upload date."""
+    report, logs = _run(tmp_path, "py-oldpins")
+    assert report.environment.get("python_version") == "3.10", logs
+    step = report.steps[0]
+    assert step.status == "pass", f"{step.status}: {step.diagnostics}\n{logs}"
+    py, pandas, numpy = (tmp_path / report.submission_id / "run" / "results" / "versions.txt"
+                         ).read_text(encoding="utf-8").split()
+    assert (py, pandas) == ("3.10", "1.4.3") and numpy.startswith("1."), numpy
+
+
 def test_an_r_plot_in_a_font_pdf_does_not_know_draws(tmp_path):
     """`family = "Arial"` with no device opened: Rscript's default pdf() stopped
     with "invalid font type" (RE-Tool-Usability-Artifacts, ACSAC 2022)."""

@@ -1524,6 +1524,7 @@ def _env_section(p: EnvPlan) -> dict[str, Any]:
     return {
         "strategy": p.strategy, "image": p.image, "env_provenance": p.env_provenance,
         "install_commands": p.install_commands, "conda_env_prefix": p.conda_env_prefix,
+        "python_version": p.python_version,
         "repo2docker_version": p.repo2docker_version,
         "base_image_digest": p.base_image_digest, "resolved_deps_digest": p.resolved_deps_digest,
         "warnings": p.warnings,

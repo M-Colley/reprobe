@@ -241,6 +241,17 @@ def test_oom_kill_is_read_from_the_exited_container(monkeypatch, tmp_path):
     assert raw.exit_code == 137 and raw.oom_killed is True
 
 
+def test_a_late_oom_flag_on_a_sigkill_exit_is_still_read(monkeypatch, tmp_path):
+    """The daemon sets OOMKilled from an asynchronous cgroup event: inspected
+    straight after a 0.24 s run, a kill at the cap read false (CI sandbox job)."""
+    _patch_docker(monkeypatch, [], lambda timeout: 137, inspect_out="false")
+    answers = iter([False, False, True])
+    monkeypatch.setattr(docker_exec, "_oom_killed", lambda name: next(answers))
+    monkeypatch.setattr(docker_exec, "_OOM_RECHECK_S", 0.0)
+    raw = run_container(_spec(), _limits(), tmp_path / "run.log")
+    assert raw.exit_code == 137 and raw.oom_killed is True
+
+
 def test_runaway_console_output_is_stopped(monkeypatch, tmp_path):
     calls = []
     _patch_docker(monkeypatch, calls, _still_running, stdout="x" * 5000)
