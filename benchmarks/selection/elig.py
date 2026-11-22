@@ -1,4 +1,7 @@
-import json,collections,re
+import collections
+import json
+import re
+
 a=json.load(open('assess.json')); pool=json.load(open('pool.json'))
 def reason(v):
     s=v['status']

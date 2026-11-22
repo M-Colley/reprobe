@@ -1,10 +1,19 @@
-import json,re,subprocess,sys,os,collections,concurrent.futures as cf
+import collections
+import concurrent.futures as cf
+import json
+import os
+import re
+import subprocess
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
 SES=requests.Session(); SES.mount('https://',HTTPAdapter(max_retries=Retry(total=10,backoff_factor=3,status_forcelist=[429,502,503],respect_retry_after_header=True)))
 from urllib.parse import urlparse
+
 from remotezip import RemoteZip
+
 TOK=subprocess.check_output(['gh','auth','token'],text=True).strip()
 GH={'Authorization':'Bearer '+TOK,'Accept':'application/vnd.github+json'}
 pool=json.load(open('pool.json'))
@@ -108,7 +117,7 @@ if __name__=='__main__':
     todo=[r for r in pool if key(r) not in out or out[key(r)].get('status') in('error','dead','unread','nofiles','unsupported_host','nolink') and (out[key(r)].get('host') in('zenodo','',None,'doi.org') or out[key(r)].get('why','').startswith('Zenodo') or out[key(r)]['status']=='nolink')]
     print(len(todo),'todo',flush=True)
     with cf.ThreadPoolExecutor(1) as ex:
-        for r,res in zip(todo,ex.map(assess,todo)):
+        for r,res in zip(todo,ex.map(assess,todo),strict=True):
             out[key(r)]=dict(link=link(r),**res)
     json.dump(out,open('assess.json','w'),indent=1)
     print(collections.Counter(v['status'] for v in out.values()))

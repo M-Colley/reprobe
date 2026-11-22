@@ -1,4 +1,9 @@
-import yaml,glob,re,os,json,sys
+import glob
+import json
+import re
+
+import yaml
+
 rows=[]
 for root in ['sys','sec']:
   for f in sorted(glob.glob(f'{root}/_conferences/*/results.md')):

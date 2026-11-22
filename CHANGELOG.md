@@ -444,6 +444,13 @@ reproduced against the real code before it was fixed.
   - Python 3.7 is a candidate (TensorFlow 1.13 ships wheels up to cp37); the
     scanned-import install no longer needs `importlib.metadata` (e2e
     `py37-notebook`).
+- **Guessed `torch`, `torchvision` and `torchaudio` imports get the CPU builds.** No
+  container gets a GPU, and PyPI's Linux torch brings ~3 GB of CUDA wheels: two
+  benchmark artifacts (SV2TTS, CacheSched) filled the runner's disk with them. The
+  three are downloaded from PyTorch's CPU index with `--no-deps`, so that index
+  supplies nothing else (dependency confusion, `torchtriton` 2022); the PyPI
+  downloads that follow see them through `--find-links`. A requirements file's own
+  torch pin is installed as declared.
 - **An OOM kill is also read from the daemon's event log.** Moby can reset
   `State.OOMKilled` to false when it processes the exit after the OOM event;
   the CI sandbox job saw a kill at the 128 MiB cap read false through every

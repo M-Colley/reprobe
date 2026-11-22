@@ -1,5 +1,8 @@
-import json,re,collections
+import collections
+import json
+import re
 from urllib.parse import urlparse
+
 rows=json.load(open('all.json'))
 sysc=re.compile(r'^(eurosys20(2[1-6])|sosp20(19|2[1-6])|sc2021|atc2026|cais2026)$')
 secc=re.compile(r'^acsac20(1[7-9]|2[0-3])$')

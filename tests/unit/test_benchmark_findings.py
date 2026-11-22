@@ -121,6 +121,7 @@ def test_keras_alone_brings_its_tensorflow_backend(tmp_path):
 FAKE_PIP = """\
 import os, sys
 a = sys.argv[1:]
+open(os.environ["LOG"], "a").write(" ".join(a) + "\\n")
 if a[0] == "download":
     sys.exit(0)
 pkgs = [x for x in a[1:] if not x.startswith("-") and x != os.environ["W"]]
@@ -147,10 +148,27 @@ def _run_scanned(tmp_path, dists):
     w, deps = (tmp_path / "wheels").as_posix(), (tmp_path / "deps").as_posix()
     code = (code.replace('[sys.executable, "-I", "-m", "pip", *a]', f'[sys.executable, "{fake.as_posix()}", *a]')
             .replace("/work/.reprobe_deps", deps).replace("/var/tmp/reprobe-wheels", w)
-            .replace("/var/tmp/reprobe-pip", (tmp_path / "cwd").as_posix()))
+            .replace("/var/tmp/reprobe-pip", (tmp_path / "cwd").as_posix())
+            # what this test interpreter happens to have installed is not the question
+            .replace("(u.find_spec(m) is None and norm(d) not in have)", "True"))
     out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True,
-                         env={**__import__("os").environ, "W": w}, check=True).stdout
+                         env={**__import__("os").environ, "W": w, "LOG": str(tmp_path / "pip.log")},
+                         check=True).stdout
     return out, sorted(__import__("os").listdir(deps)) if (tmp_path / "deps").exists() else []
+
+
+def test_torch_comes_as_the_cpu_build_and_nothing_else_from_that_index(tmp_path):
+    """SV2TTS and CacheSched (rows 16, 18): PyPI's torch filled the disk with CUDA wheels."""
+    from reprobe.envbuild.base import TORCH_CPU_INDEX
+    out, installed = _run_scanned(tmp_path, ["gamma", "torch", "torchaudio"])
+    assert installed == ["gamma", "torch", "torchaudio"]
+    assert "CPU builds (no GPU in the sandbox): ['torch', 'torchaudio']" in out
+    calls = (tmp_path / "pip.log").read_text().splitlines()
+    from_cpu = [c for c in calls if TORCH_CPU_INDEX in c]
+    assert [c.split()[-1] for c in from_cpu] == ["torch", "torchaudio"]
+    assert all("--no-deps" in c for c in from_cpu)
+    # the PyPI downloads see the CPU wheels already in the wheel dir
+    assert all("--find-links" in c for c in calls if c.startswith("download") and c not in from_cpu)
 
 
 def test_one_conflicting_import_no_longer_blocks_all_the_others(tmp_path):

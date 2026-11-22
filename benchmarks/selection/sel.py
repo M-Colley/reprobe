@@ -1,4 +1,8 @@
-import json,csv,collections,requests
+import collections
+import json
+
+import requests
+
 res=json.load(open('res.json'))
 el=[x for x in res if not x['why']]
 el.sort(key=lambda x:(x['r']['title'].casefold(),x['r']['conf']))

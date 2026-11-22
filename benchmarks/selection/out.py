@@ -1,4 +1,9 @@
-import json,csv,collections,re,os
+import collections
+import csv
+import json
+import os
+import re
+
 d=json.load(open('sel.json')); res=json.load(open('res.json'))
 sel=d['sel']; selk={(x['r']['conf'],x['r']['title']) for x in sel}
 VEN={'eurosys':'EuroSys','sosp':'SOSP','sc':'SC','atc':'USENIX ATC','cais':'CAIS','acsac':'ACSAC'}

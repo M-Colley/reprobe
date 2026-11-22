@@ -224,6 +224,10 @@ def _py(conda_prefix: Optional[str]) -> str:
     return f"{conda_prefix}/bin/python -I" if conda_prefix else "python -I"
 
 
+#: PyTorch's CPU-only wheel index (no container here gets a GPU).
+TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+
+
 def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) -> str:
     """Install statically-detected imports the environment does not already ship.
 
@@ -283,7 +287,18 @@ def _py_detected_install_command(dists: list[str], conda_prefix: Optional[str]) 
         'print("reprobe: imports the environment does not provide:", need or "none", flush=True); '
         'W = "/var/tmp/reprobe-wheels"; '
         'run = lambda *a: subprocess.call([sys.executable, "-I", "-m", "pip", *a]); '
-        'got = [d for d in need if run("download", "--no-input", "--only-binary=:all:", "-d", W, d) == 0]; '
+        # No container gets a GPU, and PyPI's Linux torch pulls ~3 GB of CUDA
+        # wheels (benchmark rows 16, 18 filled the runner's disk). The CPU builds
+        # come from PyTorch's own index: only these three names, without their
+        # dependencies, so that index can supply nothing else (dependency
+        # confusion: torchtriton, 2022). The later downloads see them through
+        # --find-links, where `X+cpu` sorts above PyPI's `X`.
+        f'cpu = [d for d in need if d in ("torch", "torchvision", "torchaudio") and run("download", '
+        f'"--no-input", "--only-binary=:all:", "--no-deps", "--index-url", "{TORCH_CPU_INDEX}", '
+        '"-d", W, d) == 0]; '
+        'cpu and print("reprobe: CPU builds (no GPU in the sandbox):", cpu, flush=True); '
+        'got = [d for d in need if run("download", "--no-input", "--only-binary=:all:", '
+        '"--find-links", W, "-d", W, d) == 0]; '
         f"T = [{target}]; "
         'L = T and "/work/.reprobe_deps" or __import__("sysconfig").get_paths()["purelib"]; '
         "ls = lambda: sorted(os.listdir(L)) if os.path.isdir(L) else []; before = ls(); "
