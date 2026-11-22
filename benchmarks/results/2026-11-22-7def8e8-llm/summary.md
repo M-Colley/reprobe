@@ -1,0 +1,57 @@
+## reprobe verdicts vs. awarded badges (20 artifacts)
+
+| strongest badge | not-run | ran cleanly |
+|---|---|---|
+| reproduced | 12 | 0/12 |
+| reusable | 2 | 0/2 |
+| functional | 6 | 0/6 |
+
+## Per artifact
+
+| row | badges | verdict | steps passed | url |
+|---|---|---|---|---|
+| 1 | functional | not-run | 0/0 | https://github.com/MAIAN-tool/MAIAN |
+| 3 | reusable | not-run | 0/0 | https://github.com/Aurore54F/JStap |
+| 7 | functional | not-run | 0/0 | https://github.com/moesabry/ACSAC22-Artifacts |
+| 11 | reusable | not-run | 0/0 | https://github.com/ucsb-seclab/popkorn-artifact/ |
+| 12 | functional | not-run | 0/0 | https://github.com/GUSecLab/smartdns-study |
+| 14 | reusable;reproduced | not-run | 0/0 | https://github.com/innotommy/OAuthpaper-code |
+| 15 | functional | not-run | 0/0 | https://github.com/EQuiw/2023-detection-scalingattacks.git |
+| 18 | available;functional;reproduced | not-run | 0/0 | https://doi.org/10.5281/zenodo.23205571 |
+| 23 | available;functional | not-run | 0/0 | https://doi.org/10.5281/zenodo.13712326 |
+| 24 | available;functional;reproduced | not-run | 0/0 | https://github.com/CentML/LoRAFusion |
+| 25 | available;functional;reproduced | not-run | 0/0 | https://github.com/ddxxdd-code/PASS/tree/main |
+| 26 | available;functional;reproduced | not-run | 0/0 | https://doi.org/10.5281/zenodo.5262865 |
+| 27 | available;functional;reproduced | not-run | 0/0 | https://github.com/fsuri/SOSP21_artifact_eval |
+| 28 | available;functional;reproduced | not-run | 0/0 | https://github.com/VeriGu/sosp-paper211-ae |
+| 31 | available;functional;reproduced | not-run | 0/0 | https://github.com/xlab-uiuc/acto/tree/sosp-ae |
+| 32 | available;functional | not-run | 0/0 | https://github.com/ubc-cirrus-lab/caribou |
+| 33 | available;functional;reproduced | not-run | 0/0 | https://doi.org/10.5281/zenodo.16921000 |
+| 34 | available;functional;reproduced | not-run | 0/0 | https://github.com/OrderLab/phoenix |
+| 35 | available;functional;reproduced | not-run | 0/0 | https://doi.org/10.5281/zenodo.22025609 |
+| 36 | available;functional;reproduced | not-run | 0/0 | https://doi.org/10.5281/zenodo.21285693 |
+
+## LLM run-order proposals (advisory, never applied)
+
+| row | heuristic steps | proposal |
+|---|---|---|
+| 1 | 0 | LLM proposed an alternative run order (advisory; not applied): tool/maian.py, tool/gui-maian.py, tool/run_examples, tool/execute_block.py, tool/execute_instruction.py, tool/parse_code.py, tool/instruction_list.py, tool/values.py, tool/contracts.py, tool/misc.py |
+| 3 | 0 | LLM proposed an alternative run order (advisory; not applied): pdg_generation/pdgs_generation.py, classification/learner.py |
+| 7 | 0 | LLM proposed an alternative run order (advisory; not applied): Experiment Code/CreateSample.py, Experiment Code/RunConfExp.py, Experiment Code/RunFileExp.py, Experiment Code/RunIntExp.py |
+| 11 | 0 | LLM proposed an alternative run order (advisory; not applied): Dockerfile, angr_analysis/kernel_types.py, angr_analysis/angr_full_blown.py |
+| 12 | 0 | LLM proposed an alternative run order (advisory; not applied): scripts/scrub_records.py, scripts/remove_disqualified.py, scripts/dns_knowledgeSpearman.py, scripts/dns_understanding_alluvium.py |
+| 14 | 0 | LLM proposed an alternative run order (advisory; not applied): generate-sites-files.py, idps-identification.py, Analyze_Pathconfusion.py |
+| 15 | 0 | LLM proposed an alternative run order (advisory; not applied): scaleatt/Tutorial-Detection.ipynb |
+| 18 | 0 | LLM proposed an alternative run order (advisory; not applied): CacheSched-artifact/benchmark/run.py |
+| 23 | 0 | LLM proposed an alternative run order (advisory; not applied): Wanchun-Jiang-ICC-Introspective-Congestion-Control-for-Consistent-High-Performance-df7a44e/LICENSE |
+| 24 | 0 | no proposal |
+| 25 | 0 | LLM proposed an alternative run order (advisory; not applied): SPDK_config/batch_rpc_commands/add_nvme_disks.txt, SPDK_config/nvmf_rdma_1_disk_static_config.json, SPDK_config/nvmf_rdma_10_disk_static_config.json, SPDK_config/batch_rpc_commands/qos_unlimited_all_10_disks.txt |
+| 26 | 0 | LLM proposed an alternative run order (advisory; not applied): boringlee24-Ribbon-ca3fbee/requirements.txt, boringlee24-Ribbon-ca3fbee/util.py, boringlee24-Ribbon-ca3fbee/bayesian_optimization.py, boringlee24-Ribbon-ca3fbee/BO/ribbon.py, boringlee24-Ribbon-ca3fbee/BO/gradient.py, boringlee24-Ribbon-ca3fbee/BO/rand_plus.py, boringlee24-Ribbon-ca3fbee/BO/all_scheme.sh |
+| 27 | 0 | LLM proposed an alternative run order (advisory; not applied): README.md |
+| 28 | 0 | LLM proposed an alternative run order (advisory; not applied): install_sekvm.md, README.md |
+| 31 | 0 | LLM proposed an alternative run order (advisory; not applied): acto/checker/test_checker.py, acto/checker/impl/tests/test_state.py, acto/checker/impl/tests/test_snapshot.py, acto/checker/impl/tests/test_crash.py, acto/checker/impl/tests/test_health.py, acto/checker/impl/tests/test_kubectl_cli.py, acto/checker/impl/tests/test_operator_log.py |
+| 32 | 0 | LLM proposed an alternative run order (advisory; not applied): QUICK_START.md |
+| 33 | 0 | LLM proposed an alternative run order (advisory; not applied): dcp-main/dcp/data/dataloader.py, dcp-main/dcp/data/hf_dataset.py, dcp-main/benchmark/preprocessing/LongDataCollection/get_ldc_seqlens.py, dcp-main/benchmark/preprocessing/LongDataCollection/get_ldc_batches.py, dcp-main/benchmark/preprocessing/LongDataCollection/get_ldc_variations.py, dcp-main/benchmark/preprocessing/LongAlign/get_longalign_seqlens.py, dcp-main/benchmark/preprocessing/LongAlign/get_longalign_batches.py, dcp-main/benchmark/preprocessing/LongAlign/get_longalign_variations.py, dcp-main/dcp/core/cost_model.py, dcp-main/dcp/core/scheduler.py, dcp-main/dcp/core/pipeline.py, dcp-main/dcp/core/executor.py, dcp-main/benchmark/microbenchmark/run_experiments.py, dcp-main/benchmark/mlm/pretrain_gpt.py, dcp-main/benchmark/microbenchmark/run_distributed_exp.sh, dcp-main/benchmark/microbenchmark/run_distributed_benchmark.sh, dcp-main/benchmark/microbenchmark/profile_with_nsys.sh, dcp-main/benchmark/microbenchmark/profile_with_pytorch.sh |
+| 34 | 0 | LLM proposed an alternative run order (advisory; not applied): scripts/env_setup.sh, scripts/build_kernel.sh, scripts/build_runtime.sh, apps/build_all.sh, tools/build_all.sh |
+| 35 | 0 | no proposal |
+| 36 | 0 | LLM proposed an alternative run order (advisory; not applied): TuxBot-0.1/all_results/paper_evaluation/results_config_full_param_dcperf_spark_tput_retry/dcperf_spark_tput/bayesian/optimization_history_dcperf_spark_20260328_221037.json |

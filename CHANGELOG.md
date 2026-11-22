@@ -471,6 +471,10 @@ reproduced against the real code before it was fixed.
   - a detected import with no wheel that old (lws 1.2.7, apache-beam 2.29 via
     avro-python3, future 0.18.2) keeps its limit with current dependencies, else
     gets its current wheel; the install log names each one.
+- **The LLM's run-order proposal names only files reprobe runs** (`.py`, `.ipynb`,
+  `.R`, `.Rmd`, `.qmd`), and reads the README of a deposit that holds the repository one
+  folder down. In the plan-only benchmark 8 of 20 proposals named README.md, LICENSE,
+  requirements.txt, a Dockerfile or a results .json.
 - **Guessed `torch`, `torchvision` and `torchaudio` imports get the CPU builds.** No
   container gets a GPU, and PyPI's Linux torch brings ~3 GB of CUDA wheels: two
   benchmark artifacts (SV2TTS, CacheSched) filled the runner's disk with them. The

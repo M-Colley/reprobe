@@ -9,15 +9,20 @@ cap, no GPU. Raw per-artifact verdicts are in the `comparison.csv` of each run f
 |---|---|---|---|---|---|
 | baseline | 44555a0 | 4 | 16 | 16 | 12/75 |
 | first fixes | 18b4796 | 4 | 16 | 16 | 15/52 |
-| final | d4fdc68 | 4 | 16 | 16 | 15/52 |
+| detection fixes | d4fdc68 | 4 | 16 | 16 | 15/52 |
+| as-of install, CPU torch | 9929e71 | 4 | 16 | 16 | 13/52 |
+| as-of install fixed | 7274965 | 5 | 16 | 15 | 16/52 |
 
-**The headline number did not move.** The fixes removed wrong steps, wrong failures,
-and silent omissions (75 to 52 steps: 23 fewer steps that should never have run; 3 more
-passes). They did not make another artifact pass. Each artifact that still fails now
-fails for its own reason (classified below), not because of reprobe.
+The detection fixes (up to d4fdc68) removed wrong steps, wrong failures and silent
+omissions (75 to 52 steps: 23 fewer steps that should never have run; 3 more passes)
+but made no further artifact pass. The as-of-date install and CPU PyTorch (9929e71) first
+lost two steps; with its five defects fixed (7274965) one more artifact runs (SV2TTS,
+row 16) and one drift row (STRIP, row 4) gets past drift to the artifact's own defect.
+Each artifact that still fails now fails for its own reason (classified below), not
+because of reprobe.
 
-Agreement between "ran cleanly" and the badges is low: 2/18 Reproduced, 0/5 Reusable,
-2/12 Functional. This is expected and is not evidence against the badges. Evaluators
+Agreement between "ran cleanly" and the badges is low (7274965): 2/18 Reproduced, 0/5 Reusable,
+3/12 Functional. This is expected and is not evidence against the badges. Evaluators
 follow READMEs: they run shell scripts, pass arguments, download data, and use GPUs
 and clusters. reprobe without an LLM runs only what it can identify as an entry point.
 A badge records that a human could make the artifact work. It does not mean the
@@ -42,18 +47,29 @@ artifact runs unattended.
 | sosp-paper211-ae, phoenix (28, 34) | scripts two folders down went unmentioned when nothing ran | 13c4546 |
 | rethinking-serverless (22) | Python 3.13 for pins with wheels up to 3.10 only (found before this set) | 58980d3 |
 | RE-Tool (6) | R plot with `family="Arial"` and no device failed under Rscript | 44555a0 |
+| SV2TTS, CacheSched (16, 18) | guessed `torch` imports pulled ~3 GB of CUDA wheels and filled the disk | aca5c4d |
+| STRIP, cluster-resource-forecast, POP (4, 20, 30) | open dependencies installed as of today, not of the artifact's date | 9929e71 |
+| STRIP (4) | artifact dated by a 2024 README edit; code from 2019 | 7274965 |
+| STRIP (4) | as-of releases pinned separately (`==`) conflict: TensorFlow 2.18 vs numpy 2.1.3 | 7274965 |
+| ICS concealment (8) | as-of ipython 8.14 chose Python 3.9 over the pinned scikit-learn 0.23.2 (no 3.9 wheel) | 7274965 |
+| ICS concealment (8) | detected imports ignored the author's exact pins (tensorflow 2.9.1 came back as 2.20) | 7274965 |
+| POP (30) | conda-forge solved pip < 26, so `--uploaded-prior-to` never applied (numpy 2 for 2021) | 7274965 |
+| SV2TTS, POP (16, 30) | an as-of release without a wheel (lws 1.2.7, future 0.18.2) was left out | 7274965 |
+| 8 LLM proposals | LLM run order accepted README.md, LICENSE, .json, Dockerfile; no README for one-folder deposits | 67a7f2b |
 
-## Every artifact in the final run, by cause
+## Every artifact in the last run (7274965), by cause
 
 H = outside what reprobe can do without instructions (entry point only in README or
 shell, arguments, build step, cluster or GPU). A = artifact defect (file not in the
-deposit, Colab-only, Python 2). D = drift: an unpinned dependency resolved today has
-removed an API. L = resource limit of the runner.
+deposit, Colab-only, Python 2). D = drift the artifact's date does not fix: the code
+needs an API removed before that date. W = a dependency publishes no wheel and the
+install phase builds no source while the network is open.
 
 | row | artifact | badge | verdict | cause | class |
 |---|---|---|---|---|---|
 | 6 | RE-Tool-Usability-Artifacts | functional | runs 1/1 | — | — |
 | 10 | fault-tolerant-secure-agg | functional | runs 6/6 | — | — |
+| 16 | SV2TTS | functional | runs 1/1 | — (filled the disk with CUDA torch before aca5c4d) | — |
 | 17 | randcompile | reproduced | runs 1/1 | — | — |
 | 29 | hipress | reproduced | runs 1/1 | — | — |
 | 21 | TraceSplitter | available | not run | Available only; nothing to execute required | — |
@@ -74,7 +90,7 @@ removed an API. L = resource limit of the runner.
 | 36 | TuxBot | reproduced | not run | datasets and documents; Python only below two folders | H |
 | 14 | OAuthpaper-code | reproduced | fails 0/1 | `IndexError` on `sys.argv`: needs arguments | H |
 | 15 | scalingattacks | functional | fails 0/1 | Cython extension needs `build_ext`; also a bogus `usenix` requirement | H |
-| 18 | CacheSched | reproduced | fails 0/3 | two CLIs need arguments; scanned install filled the disk (CUDA torch) | H, L |
+| 18 | CacheSched | reproduced | fails 0/3 | two CLIs need arguments (the disk no longer fills) | H |
 | 31 | acto | reproduced | fails 0/1 | needs a Kubernetes cluster | H |
 | 33 | dcp | reproduced | fails 0/1 | `dcp_cpp` is a C++ extension to be built first | H |
 | 2 | shredder | functional | fails 0/4 | Python 2 code (no Python 2 offered) | A |
@@ -83,24 +99,43 @@ removed an API. L = resource limit of the runner.
 | 9 | ENIDrift | functional | fails 0/2 | `data/labels.npy` not in the repository | A |
 | 19 | agent-design-study | reproduced | fails 0/1 | `experiment_config.yaml` not in the repository | A |
 | 22 | rethinking-serverless | functional | fails 1/8 | output folder `analysis_data/` not in the deposit | A |
-| 4 | STRIP | reusable | fails 0/1 | `keras.utils.np_utils` removed in today's Keras | D |
-| 20 | cluster-resource-forecast | reproduced | fails 0/1 | `DataFrame.first` removed in pandas 3 | D |
-| 30 | POP | reproduced | fails 1/2 | `matplotlib.font_manager._rebuild` removed; author requirements fail | D |
-| 13 | dpra | reproduced | fails 0/6 | kernel killed at the 8 GiB cap (3 notebooks) | L |
-| 16 | SV2TTS | functional | fails 0/1 | scanned install filled the disk (CUDA torch wheels) | L |
+| 4 | STRIP | reusable | fails 0/1 | `google.colab` import (Colab-only notebook); as of 2019-09 on Python 3.7 every import installed | A |
+| 30 | POP | reproduced | fails 1/2 | `font_manager._rebuild`, removed in matplotlib 3.4 (2021-03); last code commit 2021-12 | D |
+| 13 | dpra | reproduced | fails 0/6 | `seaborn` style, removed in matplotlib 3.8.0 (2023-09-15), 16 days before the last commit | D |
+| 20 | cluster-resource-forecast | reproduced | fails 0/1 | apache-beam needs avro-python3, which has never shipped a wheel | W |
 
-Totals: 4 run, 1 needs no run, 20 H, 6 A, 3 D, 2 L (row 18 counted under H).
+Totals: 5 run, 1 needs no run, 20 H, 7 A, 2 D, 1 W.
 
-## Open decisions (not implemented)
+## Decisions implemented
 
-1. **Drift (rows 4, 20, 30; 13 also uses a removed seaborn style).** Unpinned
-   dependencies could be resolved as of the artifact's date (`pip
-   --uploaded-prior-to`, already used for pinned deposits). That means installing them
-   into a fresh environment instead of reusing base-py's packages: slower, but it
-   matches what the authors had.
-2. **CUDA PyTorch on a machine without a GPU (rows 16, 18).** The CPU wheels from
-   download.pytorch.org are about 10x smaller. A second index is a dependency-confusion
-   risk (the 2022 `torchtriton` incident), so it would be restricted to torch,
-   torchvision and torchaudio with `--no-deps`.
-3. **README-driven entry points (20 H rows: 15 not run, 5 failing).** These runs used `--no-llm`. Rerunning
-   the set with the LLM-assisted planner measures how many H rows it recovers.
+1. **Open dependencies as of the artifact's date** (9929e71, fixed in 7274965). An
+   artifact at least 365 days old (`install.as_of_min_age_days`) gets a fresh
+   environment. Each open name is bounded by the newest release PyPI had on the date of
+   the last commit that changed more than documentation (or the Zenodo record's
+   creation). Exact pins are kept and choose the Python; dependencies of dependencies
+   resolve as of that date with pip ≥ 26 (Python 3.9+). Effect: STRIP (4) moved from
+   drift to its own defect. POP (30) and dpra (13) turned out not to be fixable by the
+   date: their code needs APIs removed before it. cluster-resource-forecast (20) is
+   blocked by the wheels-only install policy. No row that ran before regressed (6, 10,
+   17, 29 unchanged; 8 back to 4/6).
+2. **CPU PyTorch for guessed imports** (aca5c4d): torch, torchvision, torchaudio only,
+   `--no-deps`, from download.pytorch.org/whl/cpu. SV2TTS (16) runs; CacheSched (18) no
+   longer fills the disk and fails on missing arguments instead.
+3. **LLM run-order proposals** (plan-only, `llm: plan-only` in benchmark.yml; Ollama
+   gemma4:e4b, temperature 0; proposals are advisory and never executed, so no verdict
+   changes). Results for the 20 H rows: `2026-11-22-7def8e8-llm/` and
+   `2026-11-22-67a7f2b-llm/`.
+
+   | | 7def8e8 | 67a7f2b (runnable files only, nested README) |
+   |---|---|---|
+   | proposal with only runnable files | 10 | 11 |
+   | proposal naming README/LICENSE/config/data files | 8 | 0 (filtered) |
+   | no proposal | 2 | 9 |
+
+   Judged against the READMEs where checked: MAIAN (1) named `tool/maian.py` first in
+   7def8e8 and nothing in 67a7f2b (a regression from the prompt change); JStap (3) and
+   MAIAN need command-line arguments the schema cannot express; dcp (33) and Ribbon (26)
+   moved from library modules to experiment drivers. With no argument field, none of
+   the 20 proposals would run as proposed except possibly the notebook for
+   scalingattacks (15), which also needs a Cython build. Executing proposals would need
+   an `args` field and a separate "assisted" verdict that never counts toward a badge.
