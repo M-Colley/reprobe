@@ -262,7 +262,7 @@ def test_batch_passes_each_rows_deposits_to_the_run(tmp_path, monkeypatch):
     cli_mod.batch(str(f), workroot=str(tmp_path / "w"), out=str(tmp_path / "o"),
                   config_dir=None, no_run=True, no_llm=True, no_functional=False,
                   no_install=False, allow_lfs=False, timeout=None, reuse_downloads=False,
-                  resume=False, strict=False)
+                  resume=False, strict=False, assisted=False)
     assert seen == [("https://github.com/a/b", ["https://osf.io/cwd6h"]),
                     ("https://github.com/c/d", [])]
 

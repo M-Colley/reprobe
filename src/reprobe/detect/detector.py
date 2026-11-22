@@ -3,10 +3,11 @@ advisory only when the heuristic is ambiguous (and never as an override)."""
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from typing import Any
 
-from ..models import DetectResult
+from ..models import DetectResult, RunStep
 from . import manifest as manifest_mod
 from . import signatures
 
@@ -50,25 +51,7 @@ def detect(
             # manifest-carrying repo would score WORSE than an unmanaged one.
             m_result.license_file = heuristic.license_file
             m_result.dep_manifest = heuristic.dep_manifest
-            # which image runs a notebook depends on its kernel, which the
-            # manifest does not state; read it from the notebook itself
-            root = src_dir.resolve()
-            pkg_root = signatures.own_package_root(root)
-            for s in m_result.steps:
-                f = (src_dir / s.target).resolve()
-                if not (f.is_relative_to(root) and f.is_file()):
-                    continue
-                if s.kind == "jupyter" and "language" not in s.args:
-                    s.args["language"] = signatures.notebook_language(f)
-                    if s.args["language"] == "python" and signatures.notebook_uses_rpy2(f):
-                        s.args["rpy2"] = True
-                elif s.kind == "r" and "cwd" not in s.args and (wd := signatures.r_working_dir(f, root)):
-                    s.args["cwd"] = wd
-                if "pythonpath" not in s.args and (
-                        s.kind == "python" or s.args.get("language") == "python"):
-                    pp = pkg_root if pkg_root is not None else signatures.import_root(f, root)
-                    if pp is not None:
-                        s.args["pythonpath"] = pp
+            _complete(m_result.steps, src_dir)
             return m_result, meta
         # codecheck or partial manifest: use heuristic steps + lifted expected outputs
         exp = meta.get("expected_outputs", [])
@@ -88,11 +71,41 @@ def detect(
             suggestion = roles.detect_run_order(llm_client, src_dir, heuristic)
             if suggestion is not None:
                 heuristic.llm_confidence = suggestion.get("confidence")
+                # Run only under --assisted, after the verdict, never counted in it.
+                heuristic.llm_steps = _complete([
+                    RunStep(target=s["path"], kind=(k := manifest_mod._kind_for(s["path"], None)),
+                            runner=k, argv=list(s.get("args") or []), description=s.get("why"),
+                            primary=False)
+                    for s in suggestion.get("steps", [])], src_dir)
                 heuristic.notes.append(
-                    "LLM proposed an alternative run order (advisory; not applied): "
-                    + ", ".join(s.get("path", "?") for s in suggestion.get("steps", []))
+                    "LLM proposed an alternative run order (advisory; never counted in the verdict): "
+                    + ", ".join(shlex.join([s.target, *s.argv]) for s in heuristic.llm_steps)
                 )
         except Exception:
             pass
 
     return heuristic, meta
+
+
+def _complete(steps: list[RunStep], src_dir: Path) -> list[RunStep]:
+    """What a step from a manifest or an LLM proposal does not state and the runner
+    needs: a notebook's kernel (which image runs it), an R script's working folder,
+    and the import root of a Python script's own package."""
+    root = src_dir.resolve()
+    pkg_root = signatures.own_package_root(root)
+    for s in steps:
+        f = (src_dir / s.target).resolve()
+        if not (f.is_relative_to(root) and f.is_file()):
+            continue
+        if s.kind == "jupyter" and "language" not in s.args:
+            s.args["language"] = signatures.notebook_language(f)
+            if s.args["language"] == "python" and signatures.notebook_uses_rpy2(f):
+                s.args["rpy2"] = True
+        elif s.kind == "r" and "cwd" not in s.args and (wd := signatures.r_working_dir(f, root)):
+            s.args["cwd"] = wd
+        if "pythonpath" not in s.args and (
+                s.kind == "python" or s.args.get("language") == "python"):
+            pp = pkg_root if pkg_root is not None else signatures.import_root(f, root)
+            if pp is not None:
+                s.args["pythonpath"] = pp
+    return steps

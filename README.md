@@ -19,7 +19,8 @@ The orchestrator is the only trusted process. **Untrusted author code runs only
 inside ephemeral containers** with `--network none`, a non-root user, all
 capabilities dropped, a read-only root filesystem, and cpu/memory/pid/time caps.
 The LLM returns data only — it has no shell, no socket, and cannot execute
-anything. `reprobe --no-llm` is fully functional and deterministic.
+anything. Its proposals run only under `--assisted`, in the same sandbox, after the
+verdict, and never count toward it. `reprobe --no-llm` is fully functional and deterministic.
 
 ## Install
 
@@ -87,6 +88,10 @@ reprobe batch submissions.csv      # add --resume to continue an interrupted sea
 
 # Available badge only, never execute code:
 reprobe run <url> --no-run
+
+# Also run the local LLM's proposed entry points and arguments, after the verdict;
+# reported apart and never counted in the verdict or a badge:
+reprobe run <url> --assisted
 
 # Pull git-lfs data during fetch (opt-in, hardened; default keeps skip-smudge):
 reprobe run <url> --allow-lfs

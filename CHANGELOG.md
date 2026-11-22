@@ -472,9 +472,19 @@ reproduced against the real code before it was fixed.
     avro-python3, future 0.18.2) keeps its limit with current dependencies, else
     gets its current wheel; the install log names each one.
 - **The LLM's run-order proposal names only files reprobe runs** (`.py`, `.ipynb`,
-  `.R`, `.Rmd`, `.qmd`), and reads the README of a deposit that holds the repository one
+  `.R`, `.Rmd`), and reads the README of a deposit that holds the repository one
   folder down. In the plan-only benchmark 8 of 20 proposals named README.md, LICENSE,
-  requirements.txt, a Dockerfile or a results .json.
+  requirements.txt, a Dockerfile or a results .json. (`.qmd` was briefly accepted
+  too; there is no Quarto runner, so such a step was only skipped.)
+- **`--assisted` runs the LLM's proposal, with arguments, and never counts it.** The
+  proposal now carries each file's command-line arguments from the README (at most 20,
+  200 characters each, screened by the guard, passed quoted). After the verdict, the
+  badges and the summary are decided, `run`/`batch --assisted` runs the proposed steps
+  in the same sandbox (installing dependencies first when nothing else ran) and
+  records them under `llm.assisted_run` with `counted_in_verdict: false`. It answers
+  what the verdict cannot: whether the artifact runs once someone follows its README.
+  Without arguments, none of the 20 plan-only proposals could have run (MAIAN, JStap,
+  OAuthpaper, CacheSched need them). Off by default; needs the LLM and a run.
 - **Guessed `torch`, `torchvision` and `torchaudio` imports get the CPU builds.** No
   container gets a GPU, and PyPI's Linux torch brings ~3 GB of CUDA wheels: two
   benchmark artifacts (SV2TTS, CacheSched) filled the runner's disk with them. The

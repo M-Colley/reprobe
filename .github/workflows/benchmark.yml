@@ -17,9 +17,9 @@ on:
         description: "per-step budget in seconds"
         default: "2700"
       llm:
-        description: "off: --no-llm. plan-only: detection with the pinned Ollama model, nothing run"
+        description: "off: --no-llm. plan-only: detection with the pinned Ollama model, nothing run. assisted: full run plus --assisted"
         type: choice
-        options: ["off", "plan-only"]
+        options: ["off", "plan-only", "assisted"]
         default: "off"
 
 permissions:
@@ -59,10 +59,10 @@ jobs:
       - name: Install
         run: pip install -e .
       - name: Pull the pinned base images
-        if: inputs.llm == 'off'
+        if: inputs.llm != 'plan-only'
         run: reprobe pull
       - name: Start the pinned Ollama model
-        if: inputs.llm == 'plan-only'
+        if: inputs.llm != 'off'
         run: |
           read -r IMAGE MODEL < <(python -c "import yaml; l = yaml.safe_load(open('config/pins.yaml'))['llm']; print(l['ollama_image'], l['model'])")
           docker run -d --name ollama -p 127.0.0.1:11434:11434 "$IMAGE"
@@ -80,6 +80,8 @@ jobs:
           python benchmarks/compare.py one "$CSV" "$ROW" > one.csv
           if [ "$LLM" = plan-only ]; then
             reprobe batch one.csv --no-run --config-dir cfg --workroot work --out out || true
+          elif [ "$LLM" = assisted ]; then
+            reprobe batch one.csv --assisted --config-dir cfg --timeout "$TIMEOUT" --workroot work --out out || true
           else
             reprobe batch one.csv --no-llm --timeout "$TIMEOUT" --workroot work --out out || true
           fi

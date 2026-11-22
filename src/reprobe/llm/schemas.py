@@ -14,6 +14,7 @@ RUN_ORDER = {
     "properties": {
         "steps": {"type": "array", "items": {"type": "object",
                   "required": ["path"], "properties": {"path": {"type": "string"},
+                  "args": {"type": "array", "items": {"type": "string"}},
                   "why": {"type": "string"}}}},
         "confidence": {"type": "number"},
         "uncertain": {"type": "array", "items": {"type": "string"}},

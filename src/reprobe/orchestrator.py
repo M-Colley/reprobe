@@ -63,14 +63,16 @@ def _slug(ref: str) -> str:
 def run_options(*, run_mode: str = "full", functional: bool = True, use_llm: bool = True,
                 install: bool = True, allow_net: Optional[list[str]] = None, allow_lfs: bool = False,
                 allow_repo2docker: bool = False, timeout_s: Optional[int] = None,
-                data_sources: Optional[list[str]] = None, reuse_downloads: bool = False) -> dict[str, Any]:
+                data_sources: Optional[list[str]] = None, reuse_downloads: bool = False,
+                assisted: bool = False) -> dict[str, Any]:
     """The run options that change what a report can say, in one canonical form.
     Recorded in every report's provenance and compared by `batch --resume`, so a
     report made under other conditions is re-run rather than reused."""
     return {"run_mode": run_mode, "functional": functional, "use_llm": use_llm,
             "install": install, "allow_net": sorted(allow_net or []), "allow_lfs": allow_lfs,
             "allow_repo2docker": allow_repo2docker, "timeout_s": timeout_s,
-            "data_sources": list(data_sources or []), "reuse_downloads": reuse_downloads}
+            "data_sources": list(data_sources or []), "reuse_downloads": reuse_downloads,
+            "assisted": assisted}
 
 
 def submission_id(ref: str) -> str:
@@ -128,6 +130,7 @@ class Orchestrator:
         sid: Optional[str] = None,
         data_sources: Optional[list[str]] = None,
         reuse_downloads: bool = False,
+        assisted: bool = False,
     ) -> Report:
         sid = sid or submission_id(ref)
         # Files merged in from a data deposit, relative to srcdir. They are in the
@@ -157,7 +160,8 @@ class Orchestrator:
         report.provenance["run_options"] = run_options(
             run_mode=report.run_mode, functional=functional, use_llm=use_llm, install=install,
             allow_net=allow_net, allow_lfs=allow_lfs, allow_repo2docker=allow_repo2docker,
-            timeout_s=timeout_s, data_sources=data_sources, reuse_downloads=reuse_downloads)
+            timeout_s=timeout_s, data_sources=data_sources, reuse_downloads=reuse_downloads,
+            assisted=assisted)
 
         llm_client = None
         if use_llm:
@@ -229,21 +233,12 @@ class Orchestrator:
         used_images: set[str] = set()        # every distinct image that ran a container
         unity_section = None
         ran = False
+        allow_egress_runtime = bool(allow_net)
         if do_run and detect_res.steps:
             ran = True
-            rundir = fresh_dir(work, rundir, "run")
-            self._copy_run_tree(srcdir, rundir, report)
-            if not dry_run:
-                reaped = reap_orphans()
-                if reaped:
-                    report.environment.setdefault("notes", []).append(
-                        f"removed {len(reaped)} container(s) left behind by an earlier, interrupted "
-                        "reprobe run before starting this one")
-            self._dataset_phase(manifest_meta, rundir, report, dry_run=dry_run)
-            self._install_phase(env_plan, rundir, logdir, install=install, dry_run=dry_run,
-                                report=report, reuse_downloads=reuse_downloads)
-
-            allow_egress_runtime = bool(allow_net)
+            rundir = self._prepare_run(work, rundir, srcdir, logdir, env_plan, manifest_meta, report,
+                                       install=install, dry_run=dry_run,
+                                       reuse_downloads=reuse_downloads)
             if allow_egress_runtime:
                 # a badge-confidence downgrade is a warning, not an FYI
                 report.environment.setdefault("warnings", []).append(
@@ -251,91 +246,10 @@ class Orchestrator:
                     "confidence downgraded. NOTE: per-host allowlisting is not yet enforced — this grants "
                     "full egress for the run phase.")
 
-            for i, step in enumerate(detect_res.steps):
-                runner = runner_for(step, self.runners)
-                if runner is None:
-                    results.append(RunResult(runner=step.runner or "?", target=step.target,
-                                             status="skipped", executed=False,
-                                             diagnostics={"reason": "no runner",
-                                                          "loaded_runners": sorted(self.runners)}))
-                    continue
-                refused = None if getattr(runner, "host_only", False) else (
-                    _step_target_problem(step.target, rundir) or runner.unsupported(step))
-                fallback = env_plan.env_provenance == "fallback-generic"
-                if not refused and fallback and (step.args or {}).get("rpy2"):
-                    # The generic fallback stands in for base-py only, and it has no R:
-                    # the notebook would fail on rpy2, read as the artifact's failure.
-                    refused = ("this notebook drives R through rpy2, and the pinned base image is not "
-                               "present: the generic fallback image has no R — not run, so no "
-                               "statement about it")
-                if refused:
-                    results.append(RunResult(runner=runner.id, target=step.target,
-                                             status="skipped", executed=False,
-                                             diagnostics={"reason": refused}))
-                    continue
-                # The fallback replaces base-py only: an R step ran in it too and
-                # failed on a missing Rscript, while base-r was there to run it.
-                image = None if getattr(runner, "host_only", False) else (
-                    env_plan.image
-                    if env_plan.env_provenance == "author-specified"
-                    or (fallback and runner.image_key_for(step) == "python")
-                    else self.config.base_image(runner.image_key_for(step)) or env_plan.image)
-                step_limits = self.config.limits_for(runner.id)
-                if timeout_s:
-                    # docker_exec still clamps this to limits.yaml:max_timeout_s —
-                    # the operator picks a budget, config keeps the ceiling.
-                    step_limits["timeout_s"] = timeout_s
-                ctx = RunContext(step=step, rundir=rundir, src_dir=srcdir, out_dir=outdir,
-                                 image=image, config=self.config,
-                                 limits=step_limits,
-                                 pre_index=snapshot(rundir),
-                                 conda_env_prefix=env_plan.conda_env_prefix)
-                spec = runner.container_spec(ctx)
-                if spec is None:                       # host-only runner (Unity T0)
-                    res = runner.interpret(None, ctx)
-                    res.executed = False               # authoritative: no author code ran
-                    if runner.id == "unity":
-                        unity_section = _unity_section(res)
-                else:
-                    if allow_egress_runtime:
-                        spec = spec.model_copy(update={"network": "egress"})
-                    if spec.image:
-                        used_images.add(spec.image)
-                    log_path = logdir / f"step{i:02d}-{runner.id}.log"
-                    raw = run_container(spec, ctx.limits, log_path,
-                                        allow_egress=allow_egress_runtime, dry_run=dry_run,
-                                        work_root=rundir)
-                    res = runner.interpret(raw, ctx)
-                    self._diagnose(res, llm_client, env_plan, step, logdir, runner.image_key_for(step),
-                                   offline=not allow_egress_runtime)
-                    if (not dry_run and hasattr(runner, "assisted_rstudio_command")
-                            and (res.diagnostics.get("harness_diagnosis") or {}).get("kind") == "rstudio"):
-                        res.diagnostics["assisted_retry"] = _rstudio_retry(
-                            runner, ctx, logdir / f"step{i:02d}-{runner.id}-assisted.log",
-                            allow_egress=allow_egress_runtime)
-                results.append(res)
-                # every install group the step relies on: its image's, the conda env
-                # (built in the python group) when it runs in one, and the shared R
-                # library for a Python notebook driving R
-                deps = {runner.image_key_for(step)}
-                if env_plan.conda_env_prefix:
-                    deps.add("python")
-                if (step.args or {}).get("rpy2"):
-                    deps.add("r")
-                install_key[id(res)] = deps
-                self._collect_artifacts([res], rundir, outdir)
-                if _daemon_down(res):
-                    # Once the daemon is gone every remaining step fails in
-                    # milliseconds for the same host reason, and each one reads in
-                    # the report like an independent finding about the artifact.
-                    # Record the truth — they were never attempted — and stop.
-                    for rest in detect_res.steps[i + 1:]:
-                        results.append(RunResult(
-                            runner=rest.runner or "?", target=rest.target,
-                            status="skipped", executed=False,
-                            diagnostics={"reason": "not attempted — the Docker daemon became "
-                                                   f"unreachable during `{step.target}`"}))
-                    break
+            results, install_key, used_images, unity_section = self._run_steps(
+                detect_res.steps, env_plan=env_plan, rundir=rundir, srcdir=srcdir, outdir=outdir,
+                logdir=logdir, llm_client=llm_client, timeout_s=timeout_s,
+                allow_egress=allow_egress_runtime, dry_run=dry_run)
             # Pin the exact image bytes that ran (pins.yaml carries a mutable tag).
             # A mixed python+R run uses more than one base, so record a digest per
             # distinct image actually used — not just the single env image (which
@@ -389,10 +303,172 @@ class Orchestrator:
             if summary:
                 report.llm["summary"] = summary
 
+        # -- (8) ASSISTED RUN (--assisted; never counted) ---------------- #
+        # After the verdict, the badges and the summary are fixed, so nothing it
+        # does can reach them.
+        if assisted and do_run and llm_client is not None:
+            if not ran:
+                rundir = self._prepare_run(work, rundir, srcdir, logdir, env_plan, manifest_meta,
+                                           report, install=install, dry_run=dry_run,
+                                           reuse_downloads=reuse_downloads)
+                report.environment.setdefault("notes", []).append(
+                    "the install phase ran for the assisted run only, after the verdict was decided")
+            report.llm["assisted_run"] = self._assisted_run(
+                detect_res.llm_steps, report, env_plan=env_plan, rundir=rundir, srcdir=srcdir,
+                outdir=outdir, logdir=logdir, timeout_s=timeout_s,
+                allow_egress=allow_egress_runtime, dry_run=dry_run)
+
         self._write(outdir, report)
         return report
 
     # ------------------------------------------------------------------ #
+    def _prepare_run(self, work: Path, rundir: Path, srcdir: Path, logdir: Path, env_plan: EnvPlan,
+                     manifest_meta: dict[str, Any], report: Report, *, install: bool, dry_run: bool,
+                     reuse_downloads: bool) -> Path:
+        """A fresh run tree with the datasets fetched and the dependencies installed."""
+        rundir = fresh_dir(work, rundir, "run")
+        self._copy_run_tree(srcdir, rundir, report)
+        if not dry_run:
+            reaped = reap_orphans()
+            if reaped:
+                report.environment.setdefault("notes", []).append(
+                    f"removed {len(reaped)} container(s) left behind by an earlier, interrupted "
+                    "reprobe run before starting this one")
+        self._dataset_phase(manifest_meta, rundir, report, dry_run=dry_run)
+        self._install_phase(env_plan, rundir, logdir, install=install, dry_run=dry_run,
+                            report=report, reuse_downloads=reuse_downloads)
+        return rundir
+
+    def _assisted_run(self, steps: list, report: Report, **kw) -> dict[str, Any]:
+        """Run the LLM's proposed run order, with its arguments, and say what happened.
+
+        Supplementary evidence, never the verdict or a badge: the order and the
+        arguments came from a model reading the README, not from the artifact. It
+        answers whether the artifact runs once someone follows its instructions,
+        which the verdict (it runs as deposited, unattended) cannot. It runs after
+        the artifact's own steps, in the same run tree and sandbox."""
+        out: dict[str, Any] = {"counted_in_verdict": False, "source": "llm-advisory",
+                               "model": report.llm.get("model"),
+                               "confidence": report.detect.get("llm_confidence")}
+        if not steps:
+            out["status"] = "no-proposal"
+            out["summary"] = ("Assisted run not attempted: the LLM made no usable run-order "
+                              "proposal (it is asked only when no entry point is clear).")
+            return out
+        if err := badge_rules.install_error(report.environment):
+            out["install_error"] = err
+        results, *_ = self._run_steps(steps, llm_client=None, log_prefix="assisted-",
+                                      collect=False, **kw)
+        out["steps"] = [{"target": st.target, "argv": st.argv, "why": st.description,
+                         "status": r.status, "exit_code": r.exit_code, "duration_s": r.duration_s,
+                         "log_path": r.log_path,
+                         "diagnosis": (r.diagnostics.get("harness_diagnosis") or {}).get("likely_cause")
+                         or r.diagnostics.get("reason")}
+                        for st, r in zip(steps, results, strict=True)]
+        done = sum(r.status in ("pass", "partial") for r in results)
+        out["status"] = "ran"
+        out["summary"] = (f"Assisted run (not counted in the verdict or any badge): {done} of "
+                          f"{len(results)} step(s) proposed by {out['model'] or 'the LLM'} ran to "
+                          "completion with the proposed arguments.")
+        return out
+
+    def _run_steps(self, steps: list, *, env_plan: EnvPlan, rundir: Path, srcdir: Path, outdir: Path,
+                   logdir: Path, llm_client, timeout_s: Optional[int], allow_egress: bool,
+                   dry_run: bool, log_prefix: str = "", collect: bool = True):
+        """Run each step in the sandbox. Returns the results, the install groups each
+        result relied on (by id), the images that ran, and the Unity section."""
+        results: list[RunResult] = []
+        install_key: dict[int, set[str]] = {}
+        used_images: set[str] = set()
+        unity_section = None
+        for i, step in enumerate(steps):
+            runner = runner_for(step, self.runners)
+            if runner is None:
+                results.append(RunResult(runner=step.runner or "?", target=step.target,
+                                         status="skipped", executed=False,
+                                         diagnostics={"reason": "no runner",
+                                                      "loaded_runners": sorted(self.runners)}))
+                continue
+            refused = None if getattr(runner, "host_only", False) else (
+                _step_target_problem(step.target, rundir) or runner.unsupported(step))
+            fallback = env_plan.env_provenance == "fallback-generic"
+            if not refused and fallback and (step.args or {}).get("rpy2"):
+                # The generic fallback stands in for base-py only, and it has no R:
+                # the notebook would fail on rpy2, read as the artifact's failure.
+                refused = ("this notebook drives R through rpy2, and the pinned base image is not "
+                           "present: the generic fallback image has no R — not run, so no "
+                           "statement about it")
+            if refused:
+                results.append(RunResult(runner=runner.id, target=step.target,
+                                         status="skipped", executed=False,
+                                         diagnostics={"reason": refused}))
+                continue
+            # The fallback replaces base-py only: an R step ran in it too and
+            # failed on a missing Rscript, while base-r was there to run it.
+            image = None if getattr(runner, "host_only", False) else (
+                env_plan.image
+                if env_plan.env_provenance == "author-specified"
+                or (fallback and runner.image_key_for(step) == "python")
+                else self.config.base_image(runner.image_key_for(step)) or env_plan.image)
+            step_limits = self.config.limits_for(runner.id)
+            if timeout_s:
+                # docker_exec still clamps this to limits.yaml:max_timeout_s —
+                # the operator picks a budget, config keeps the ceiling.
+                step_limits["timeout_s"] = timeout_s
+            ctx = RunContext(step=step, rundir=rundir, src_dir=srcdir, out_dir=outdir,
+                             image=image, config=self.config,
+                             limits=step_limits,
+                             pre_index=snapshot(rundir),
+                             conda_env_prefix=env_plan.conda_env_prefix)
+            spec = runner.container_spec(ctx)
+            if spec is None:                       # host-only runner (Unity T0)
+                res = runner.interpret(None, ctx)
+                res.executed = False               # authoritative: no author code ran
+                if runner.id == "unity":
+                    unity_section = _unity_section(res)
+            else:
+                if allow_egress:
+                    spec = spec.model_copy(update={"network": "egress"})
+                if spec.image:
+                    used_images.add(spec.image)
+                log_path = logdir / f"{log_prefix}step{i:02d}-{runner.id}.log"
+                raw = run_container(spec, ctx.limits, log_path,
+                                    allow_egress=allow_egress, dry_run=dry_run,
+                                    work_root=rundir)
+                res = runner.interpret(raw, ctx)
+                self._diagnose(res, llm_client, env_plan, step, logdir, runner.image_key_for(step),
+                               offline=not allow_egress)
+                if (not dry_run and hasattr(runner, "assisted_rstudio_command")
+                        and (res.diagnostics.get("harness_diagnosis") or {}).get("kind") == "rstudio"):
+                    res.diagnostics["assisted_retry"] = _rstudio_retry(
+                        runner, ctx, logdir / f"{log_prefix}step{i:02d}-{runner.id}-assisted.log",
+                        allow_egress=allow_egress)
+            results.append(res)
+            # every install group the step relies on: its image's, the conda env
+            # (built in the python group) when it runs in one, and the shared R
+            # library for a Python notebook driving R
+            deps = {runner.image_key_for(step)}
+            if env_plan.conda_env_prefix:
+                deps.add("python")
+            if (step.args or {}).get("rpy2"):
+                deps.add("r")
+            install_key[id(res)] = deps
+            if collect:
+                self._collect_artifacts([res], rundir, outdir)
+            if _daemon_down(res):
+                # Once the daemon is gone every remaining step fails in
+                # milliseconds for the same host reason, and each one reads in
+                # the report like an independent finding about the artifact.
+                # Record the truth — they were never attempted — and stop.
+                for rest in steps[i + 1:]:
+                    results.append(RunResult(
+                        runner=rest.runner or "?", target=rest.target,
+                        status="skipped", executed=False,
+                        diagnostics={"reason": "not attempted — the Docker daemon became "
+                                               f"unreachable during `{step.target}`"}))
+                break
+        return results, install_key, used_images, unity_section
+
     def _note_prose_only_data(self, srcdir: Path, report: Report) -> None:
         """Say so when the artifact's data lives somewhere its README only names
         in prose. Without this the run fails at the first missing input and the

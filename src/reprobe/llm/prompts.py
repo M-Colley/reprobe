@@ -37,11 +37,13 @@ The deterministic detector proposed this order:
 {heuristic}
 
 Propose the order in which the analysis files should be executed to reproduce
-the results. Return JSON: {{"steps": [{{"path": "...", "why": "..."}}],
+the results. Return JSON: {{"steps": [{{"path": "...", "args": ["..."], "why": "..."}}],
 "confidence": 0.0-1.0, "uncertain": ["..."], "notes": "..."}}.
 Only use paths from the list above. Name only the files a person runs directly
-(.py, .ipynb, .R, .Rmd, .qmd): entry points, not modules they import, and not
-documentation, configuration or data files."""
+(.py, .ipynb, .R, .Rmd): entry points, not modules they import, and not
+documentation, configuration or data files. "args" are the command-line
+arguments the README gives for that file, one string each, with file arguments
+as paths from the list above; [] when it takes none."""
 
 DIAGNOSE_FAILURE = """A reproduction step failed.
 

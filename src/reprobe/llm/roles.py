@@ -63,8 +63,11 @@ def _gate(obj: dict[str, Any], client: OllamaClient) -> dict[str, Any]:
     return obj
 
 
-#: What the runners execute (reprobe/runners): Python, notebooks, R, R Markdown, Quarto.
-RUNNABLE_SUFFIXES = (".py", ".ipynb", ".r", ".rmd", ".qmd")
+#: What the runners execute (reprobe/runners): Python, notebooks, R, R Markdown.
+#: No Quarto runner exists, so a .qmd step would only be skipped.
+RUNNABLE_SUFFIXES = (".py", ".ipynb", ".r", ".rmd")
+#: Bounds on proposed command-line arguments (--assisted passes them, quoted, to the script).
+MAX_ARGS, MAX_ARG_LEN = 20, 200
 
 
 def detect_run_order(client: OllamaClient, src_dir: str | Path, heuristic) -> Optional[dict[str, Any]]:
@@ -97,6 +100,8 @@ def detect_run_order(client: OllamaClient, src_dir: str | Path, heuristic) -> Op
     obj["steps"] = [s for s in obj["steps"] if isinstance(s, dict) and s.get("path") in allowed]
     if not obj["steps"]:
         return None
+    for s in obj["steps"]:
+        s["args"] = [a[:MAX_ARG_LEN] for a in s.get("args") or []][:MAX_ARGS]
     return _gate(obj, client)
 
 

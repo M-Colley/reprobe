@@ -235,13 +235,13 @@ Reports **which tier it reached**, never a bare pass/fail.
 
 **Three bounded roles only** (`llm/prompts.py`, temperature 0, `format: json`, hard token + 60 s wall-clock caps, validated against `llm/schemas.py`):
 
-1. **`detect_run_order`** — *only when no manifest exists.* In: file tree (paths) + README excerpt + detected manifests. Out: `{steps:[{path,why}], confidence, uncertain[], notes}`. The deterministic detector's ordering is the **default**; the LLM ordering is shown as an alternative for the chair.
+1. **`detect_run_order`** — *only when no manifest exists.* In: file tree (paths) + README excerpt + detected manifests. Out: `{steps:[{path,args,why}], confidence, uncertain[], notes}`. The deterministic detector's ordering is the **default**; the LLM ordering is shown as an alternative for the chair.
 2. **`diagnose_failure`** — In: failing step + truncated stderr + env summary. Out: `{likely_cause, suggested_fixes[], confidence, is_advisory:true}`.
 3. **`summarize`** — In: the finished `report.json` (facts only). Out: a plain-language paragraph. It summarizes facts the harness already computed; it cannot change a badge.
 
 **The hard "never silently runs code" guarantee is structural, not a prompt instruction:**
 - The LLM client returns **data only**. There is no tool/function-calling surface wired to it — it physically cannot execute anything.
-- LLM output is **advisory-only** — nothing it returns is ever applied, at any confidence. The llm package enforces `pins.yaml llm.confidence_threshold` by stamping below-threshold advice `meets_threshold: false` ("shown for transparency only, never applied"), and run-order suggestions are validated against the real file tree before being surfaced.
+- LLM output is **advisory-only** — nothing it returns is ever applied to the verdict or a badge, at any confidence. The one opt-in exception to "never run": `--assisted` runs the proposed run order with its proposed arguments (bounded, guard-screened, shell-quoted) in the same sandbox, after the verdict, badges and summary are decided, and records it under `llm.assisted_run` with `counted_in_verdict: false`. The llm package enforces `pins.yaml llm.confidence_threshold` by stamping below-threshold advice `meets_threshold: false` ("shown for transparency only, never applied"), and run-order suggestions are validated against the real file tree before being surfaced.
 - `llm/guard.py` validates every response against the passive schema and rejects anything with shell/exec strings outside declared fields. Every LLM-derived report statement is labeled `source: "llm-advisory"` with its confidence, visually distinct from harness-verified facts.
 - `--no-llm` makes the harness **fully functional and deterministic** with the LLM off (detection falls back to `signatures.py`; reports lose only the narrative summary). Golden tests must pass with the LLM disabled — proving the LLM is non-load-bearing.
 

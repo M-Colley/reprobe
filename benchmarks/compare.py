@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shlex
 import sys
 from collections import Counter
 from pathlib import Path
@@ -78,6 +79,20 @@ def _llm(rep: dict | None) -> str:
     return next((n for n in notes if n.startswith("LLM proposed")), "no proposal")
 
 
+def _assisted(rep: dict | None) -> str:
+    """What the --assisted run of the LLM's proposal did: "k/n" steps that ran to
+    completion, then each command and its status."""
+    ar = ((rep or {}).get("llm") or {}).get("assisted_run") or {}
+    if not ar:
+        return ""
+    steps = ar.get("steps") or []
+    if not steps:
+        return ar.get("status", "")
+    done = sum(s.get("status") in ("pass", "partial") for s in steps)
+    return f"{done}/{len(steps)}: " + "; ".join(
+        f"{shlex.join([s.get('target', ''), *(s.get('argv') or [])])} = {s.get('status')}" for s in steps)
+
+
 def cmd_compare(path: str, reports: Path, out: Path) -> None:
     _, rows = read_rows(path)
     table = []
@@ -97,6 +112,7 @@ def cmd_compare(path: str, reports: Path, out: Path) -> None:
             "steps_passed": sum(1 for s in steps if s.get("status") == "pass"),
             "step_statuses": ";".join(sorted({str(s.get("status")) for s in steps})),
             "llm": _llm(rep),
+            "assisted": _assisted(rep),
         })
     out.mkdir(parents=True, exist_ok=True)
     with (out / "comparison.csv").open("w", encoding="utf-8", newline="") as fh:

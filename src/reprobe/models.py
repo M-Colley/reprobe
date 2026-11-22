@@ -143,6 +143,9 @@ class DetectResult(BaseModel):
     dep_manifest: Optional[str] = None
     run_plan_source: Literal["manifest", "llm", "heuristic"] = "heuristic"
     llm_confidence: Optional[float] = None
+    # The LLM's proposed run order, with arguments. Advisory: run only under
+    # --assisted, after the verdict, and never counted in it or in a badge.
+    llm_steps: list[RunStep] = Field(default_factory=list)
     flags: list[str] = Field(default_factory=list)   # e.g. "needs-repo2docker"
     notes: list[str] = Field(default_factory=list)
     # R package names statically discovered in the source (library()/require()/

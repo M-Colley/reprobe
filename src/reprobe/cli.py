@@ -49,6 +49,11 @@ def run(
     config_dir: Optional[str] = typer.Option(None, help="override config/ directory"),
     no_run: bool = typer.Option(False, "--no-run", help="fetch + detect + Available badge only; do not execute code"),
     no_llm: bool = typer.Option(False, "--no-llm", help="disable the local LLM (fully deterministic)"),
+    assisted: bool = typer.Option(
+        False, "--assisted",
+        help="after the verdict, also run the LLM's proposed run order with its proposed "
+             "arguments, in the same sandbox; reported apart, never counted in the verdict "
+             "or a badge"),
     no_functional: bool = typer.Option(False, "--no-functional", help="do not evaluate the Functional candidate"),
     no_install: bool = typer.Option(False, "--no-install", help="skip the dependency-install phase"),
     allow_repo2docker: bool = typer.Option(False, "--allow-repo2docker", help="permit repo2docker fallback build"),
@@ -77,9 +82,10 @@ def run(
 
     Exit status: 0 a report was written; 1 (only with --strict) the verdict needs
     human review; 3 the harness failed (infra-error) and made no statement."""
+    _check_assisted(assisted, no_llm=no_llm, no_run=no_run)
     orch = _orch(workroot, config_dir)
     report = orch.run(
-        ref, do_run=not no_run, functional=not no_functional, use_llm=not no_llm,
+        ref, do_run=not no_run, functional=not no_functional, use_llm=not no_llm, assisted=assisted,
         allow_repo2docker=allow_repo2docker, allow_net=allow_net, allow_lfs=allow_lfs,
         install=not no_install, dry_run=dry_run, timeout_s=timeout,
         data_sources=list(data or []), reuse_downloads=reuse_downloads,
@@ -87,6 +93,13 @@ def run(
     _print_report_summary(report, Path(workroot) / report.submission_id / "report")
     if code := _exit_code([report.verdict], strict=strict):
         raise typer.Exit(code)
+
+
+def _check_assisted(assisted: bool, *, no_llm: bool, no_run: bool) -> None:
+    if assisted and (no_llm or no_run):
+        console.print("[red]--assisted runs the LLM's proposals: it needs the LLM and a run "
+                      "(not --no-llm or --no-run)[/red]")
+        raise typer.Exit(2)
 
 
 # Exit codes. A finding about the artifact — it fails, it needs review — is what
@@ -223,6 +236,8 @@ def batch(
     config_dir: Optional[str] = typer.Option(None),
     no_run: bool = typer.Option(False, "--no-run"),
     no_llm: bool = typer.Option(False, "--no-llm"),
+    assisted: bool = typer.Option(False, "--assisted",
+                                  help="also run the LLM's proposals; see `reprobe run --help`"),
     no_functional: bool = typer.Option(False, "--no-functional",
                                        help="do not evaluate the Functional candidate"),
     no_install: bool = typer.Option(False, "--no-install", help="skip the dependency-install phase"),
@@ -250,6 +265,7 @@ def batch(
     from .models import Report
     from .report import dashboard as dash
 
+    _check_assisted(assisted, no_llm=no_llm, no_run=no_run)
     refs = _read_refs(csv_path)
     orch = _orch(workroot, config_dir)
     outdir = Path(out)
@@ -265,7 +281,7 @@ def batch(
             "run_options": run_options(
                 run_mode="full" if not no_run else "no-run", functional=not no_functional,
                 use_llm=not no_llm, install=not no_install, allow_lfs=allow_lfs, timeout_s=timeout,
-                data_sources=data, reuse_downloads=reuse_downloads),
+                data_sources=data, reuse_downloads=reuse_downloads, assisted=assisted),
         }
         rep = _resumed_report(Path(workroot) / sid / "report" / "report.json", expected) \
             if resume else None
@@ -276,7 +292,8 @@ def batch(
                 rep = orch.run(ref, do_run=not no_run, use_llm=not no_llm, sid=sid,
                                functional=not no_functional, install=not no_install,
                                allow_lfs=allow_lfs, timeout_s=timeout,
-                               reuse_downloads=reuse_downloads, data_sources=data)
+                               reuse_downloads=reuse_downloads, data_sources=data,
+                               assisted=assisted)
             except Exception as e:  # one bad submission must never abort the season
                 console.print(f"[red]  harness error[/red]: {type(e).__name__}: {e}")
                 rep = Report(submission_id=sid, harness_version=f"reprobe {_v}",

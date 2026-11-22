@@ -133,6 +133,11 @@ _TPL = Template(r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 {% if r.llm.summary %}<div class="card"><b>Summary</b>
  <div class="adv">{{ r.llm.summary }}<div class="muted">— {{ r.llm.model }}; LLM-advisory, not a verified fact</div></div></div>{% endif %}
 
+{% if r.llm.assisted_run %}{% set ar = r.llm.assisted_run %}<div class="card"><b>Assisted run</b>
+ <div class="adv">{{ ar.summary }}{% if ar.install_error %}<div class="muted">⚠️ {{ ar.install_error }}</div>{% endif %}
+ <ul>{% for st in ar.steps %}<li><code>{{ st.target }}{% for a in st.argv %} {{ a }}{% endfor %}</code>: {{ st.status }}{% if st.exit_code is not none %} (exit {{ st.exit_code }}){% endif %}{% if st.diagnosis %} — {{ st.diagnosis }}{% endif %}</li>{% endfor %}</ul>
+ <div class="muted">Run order and arguments proposed by {{ ar.model }}; LLM-advisory, not counted in the verdict or any badge.</div></div></div>{% endif %}
+
 <div class="card"><b>What was NOT checked</b>
  <div class="nv"><ul>{% for x in not_verified %}<li>{{ x }}</li>{% endfor %}</ul></div></div>
 
