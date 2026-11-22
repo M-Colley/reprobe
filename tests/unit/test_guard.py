@@ -92,6 +92,24 @@ def test_detect_run_order_drops_paths_outside_tree(tmp_path):
     assert "never applied" in out["threshold_note"]
 
 
+def test_detect_run_order_keeps_only_files_reprobe_runs(tmp_path):
+    """Benchmark rows 23, 27, 36: README.md, LICENSE, a .json results file."""
+    for n in ("README.md", "LICENSE", "run.py", "results.json"):
+        (tmp_path / n).write_text("x")
+    client = _FakeClient({"steps": [{"path": n} for n in ("README.md", "LICENSE", "run.py", "results.json")],
+                          "confidence": 0.9})
+    assert [s["path"] for s in roles.detect_run_order(client, tmp_path, _heuristic())["steps"]] == ["run.py"]
+
+
+def test_detect_run_order_reads_the_readme_of_a_one_folder_deposit(tmp_path):
+    (tmp_path / "repo-v1").mkdir()
+    (tmp_path / "repo-v1" / "README.md").write_text("run main.py")
+    (tmp_path / "repo-v1" / "main.py").write_text("pass")
+    client = _FakeClient({"steps": [{"path": "repo-v1/main.py"}], "confidence": 0.9})
+    roles.detect_run_order(client, tmp_path, _heuristic())
+    assert "run main.py" in client.prompt
+
+
 def test_detect_run_order_none_when_all_paths_hallucinated(tmp_path):
     (tmp_path / "analysis.py").write_text("pass")
     client = _FakeClient({"steps": [{"path": "ghost.py"}], "confidence": 0.9})

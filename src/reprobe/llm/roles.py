@@ -63,6 +63,10 @@ def _gate(obj: dict[str, Any], client: OllamaClient) -> dict[str, Any]:
     return obj
 
 
+#: What the runners execute (reprobe/runners): Python, notebooks, R, R Markdown, Quarto.
+RUNNABLE_SUFFIXES = (".py", ".ipynb", ".r", ".rmd", ".qmd")
+
+
 def detect_run_order(client: OllamaClient, src_dir: str | Path, heuristic) -> Optional[dict[str, Any]]:
     root = Path(src_dir)
     rel_paths = [
@@ -71,10 +75,12 @@ def detect_run_order(client: OllamaClient, src_dir: str | Path, heuristic) -> Op
         if p.is_file() and ".git" not in p.parts
     ]
     tree = "\n".join(rel_paths)[:4000]
+    # A Zenodo deposit is often one folder holding the repository (benchmark rows
+    # 23, 26): its README is one level down.
     readme = ""
-    for n in ("README.md", "README.txt", "README"):
-        if (root / n).is_file():
-            readme = (root / n).read_text(encoding="utf-8", errors="replace")[:2000]
+    for f in [*sorted(root.glob("README*")), *sorted(root.glob("*/README*"))]:
+        if f.is_file() and f.suffix.lower() in ("", ".md", ".txt", ".rst"):
+            readme = f.read_text(encoding="utf-8", errors="replace")[:2000]
             break
     heur = ", ".join(s.target for s in heuristic.steps) or "(none)"
     prompt = prompts.DETECT_RUN_ORDER.format(
@@ -84,8 +90,10 @@ def detect_run_order(client: OllamaClient, src_dir: str | Path, heuristic) -> Op
     if obj is None:
         return None
     # "Only use paths from the list above" is enforced, not requested: drop any
-    # step whose path is not a real file in the (untruncated) tree.
-    allowed = set(rel_paths)
+    # step whose path is not a real file in the (untruncated) tree, or is not a
+    # kind of file reprobe runs (the benchmark's proposals named README.md,
+    # LICENSE, requirements.txt, a Dockerfile and a .json results file).
+    allowed = {p for p in rel_paths if Path(p).suffix.lower() in RUNNABLE_SUFFIXES}
     obj["steps"] = [s for s in obj["steps"] if isinstance(s, dict) and s.get("path") in allowed]
     if not obj["steps"]:
         return None

@@ -39,7 +39,9 @@ The deterministic detector proposed this order:
 Propose the order in which the analysis files should be executed to reproduce
 the results. Return JSON: {{"steps": [{{"path": "...", "why": "..."}}],
 "confidence": 0.0-1.0, "uncertain": ["..."], "notes": "..."}}.
-Only use paths from the list above."""
+Only use paths from the list above. Name only the files a person runs directly
+(.py, .ipynb, .R, .Rmd, .qmd): entry points, not modules they import, and not
+documentation, configuration or data files."""
 
 DIAGNOSE_FAILURE = """A reproduction step failed.
 
