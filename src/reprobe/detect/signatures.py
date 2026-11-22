@@ -1278,9 +1278,12 @@ def scan(src_dir: str | Path) -> DetectResult:
         planned += [(p, "python") for p in chosen]
         if not driven and len(top) > 3:
             notes.append("multiple top-level .py scripts and no clear entry point; ordering is best-effort")
-        # Scripts one directory down are named too: `scripts/01_x.py` and friends
-        # were dropped without a word when the plan came from elsewhere.
-        unscheduled["Python"] = [rel(p) for p in py_candidates if p not in chosen and depth(p) <= 2]
+        # Every script not run is named, shallow ones first: `scripts/01_x.py` was
+        # dropped without a word when the plan came from elsewhere, and deeper ones
+        # (`scripts/multi/multi-kvm.py`, SOSP 2021) left "no runnable analyses
+        # detected" with no mention of the code that was there.
+        unscheduled["Python"] = [rel(p) for p in sorted((p for p in py_candidates if p not in chosen),
+                                                        key=lambda p: (depth(p), rel(p)))]
 
     # ONE order across languages: `01_preprocess.py` runs before `02_model.R`.
     # Without step numbers, README order, then the stage a name suggests (prep,

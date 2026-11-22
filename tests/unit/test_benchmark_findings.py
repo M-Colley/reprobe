@@ -165,3 +165,12 @@ def test_imports_without_conflict_install_in_one_step(tmp_path):
     out, installed = _run_scanned(tmp_path, ["alpha", "gamma"])
     assert installed == ["alpha", "gamma"] and "left out" not in out
     assert "could NOT install (reported, not faked): none" in out
+
+
+def test_scripts_deeper_than_one_folder_are_named_when_nothing_runs(tmp_path):
+    """sosp-paper211-ae and phoenix (SOSP 2021): `scripts/multi/multi-kvm.py` and
+    `experiments/redis/finddrop.py` went unmentioned under "no runnable analyses"."""
+    _tree(tmp_path, {"scripts/multi/multi-kvm.py": "import sys\n", "README.md": "x"})
+    res, _ = detect(tmp_path)
+    assert not res.steps
+    assert any("NOT run" in n and "scripts/multi/multi-kvm.py" in n for n in res.notes)
