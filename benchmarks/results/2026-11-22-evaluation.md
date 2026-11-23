@@ -56,6 +56,17 @@ artifact runs unattended.
 | POP (30) | conda-forge solved pip < 26, so `--uploaded-prior-to` never applied (numpy 2 for 2021) | 7274965 |
 | SV2TTS, POP (16, 30) | an as-of release without a wheel (lws 1.2.7, future 0.18.2) was left out | 7274965 |
 | 8 LLM proposals | LLM run order accepted README.md, LICENSE, .json, Dockerfile; no README for one-folder deposits | 67a7f2b |
+| LLM run order | `.qmd` accepted as runnable; there is no Quarto runner | d00fc3e |
+| 10 LLM proposals | a discarded proposal left no reason in the report | 2a2b0f3 |
+| MAIAN (1) | proposal named `maian.py` for `tool/maian.py` and was discarded | a7175f2 |
+| MAIAN (1) | assisted run with no detected steps got an environment planned for no code: no as-of install (web3 8.0 for a 2018 artifact) | e7bf3e0 |
+
+Found and not yet fixed:
+
+| artifact (row) | defect |
+|---|---|
+| MAIAN (1) | the as-of install chose Python 3.13 for a 2018 artifact: with no exact pins, the Python tie-break ignores the date. web3 3.16.5's 2018 dependencies have no 3.13 wheels, its current release conflicts with `rlp<=0.6.0`, and web3 was left out |
+| scalingattacks (15) | each detected import is downloaded on its own: `opencv-python-headless<=4.8.0.76` resolves to 4.8 without seeing the pinned `numpy==1.16.3`, and the joint install then conflicts, so cv2 is missing |
 
 ## Every artifact in the last run (7274965), by cause
 
@@ -137,5 +148,52 @@ Totals: 5 run, 1 needs no run, 20 H, 7 A, 2 D, 1 W.
    MAIAN need command-line arguments the schema cannot express; dcp (33) and Ribbon (26)
    moved from library modules to experiment drivers. With no argument field, none of
    the 20 proposals would run as proposed except possibly the notebook for
-   scalingattacks (15), which also needs a Cython build. Executing proposals would need
-   an `args` field and a separate "assisted" verdict that never counts toward a badge.
+   scalingattacks (15), which also needs a Cython build. Executing proposals needed an
+   `args` field and a separate result that never counts toward a badge: item 4.
+4. **Assisted run** (`--assisted`, d00fc3e; fixed in 2a2b0f3, a7175f2, e7bf3e0;
+   `llm: assisted` in benchmark.yml). The proposal carries each file's command-line
+   arguments (at most 20 of 200 characters, guard-screened, shell-quoted). After the
+   verdict, badges and summary are decided, the proposed steps run in the same sandbox;
+   when nothing ran for the verdict, the environment is planned from the proposed steps.
+   The result is stored under `llm.assisted_run` with `counted_in_verdict: false`.
+   Results for the 20 H rows at e7bf3e0: `2026-11-22-e7bf3e0-assisted/` (first run with
+   the defects: `2026-11-22-d00fc3e-assisted/`; discard reasons, plan-only:
+   `2026-11-22-2a2b0f3-llm/`). Verdicts and steps are identical to 7274965 on all 20 rows.
+
+   **No artifact ran under assisted execution.** 11 of 20 got a proposal of 26 steps; 25
+   failed and one exited 0 without output (JStap, run with the placeholder argument
+   `FOLDER_NAME`). Arguments were given for 2 of 26 steps: MAIAN's are the README's
+   (`-s ParityWalletLibrary.sol WalletLibrary -c 0`), JStap's a placeholder.
+
+   | row | artifact | proposed (e7bf3e0) | what stopped it |
+   |---|---|---|---|
+   | 1 | MAIAN | `tool/maian.py -s ParityWalletLibrary.sol WalletLibrary -c 0` | web3 not installed (reprobe defect, open: Python 3.13 for 2018) |
+   | 3 | JStap | `pdg_generation/pdgs_generation.py FOLDER_NAME` | placeholder argument; exit 0, no output |
+   | 7 | ACSAC22-Artifacts | 3 experiment scripts, no arguments | input folders `sample/`, `Initial/` not in the deposit |
+   | 11 | popkorn-artifact | `angr_analysis/angr_full_blown.py` | angr did not install (pip ResolutionImpossible on Python 3.12) |
+   | 12 | smartdns-study | 4 scripts, no arguments | `data/*.csv` not in the deposit (3); `NameError: ArgumentParser` (1) |
+   | 14 | OAuthpaper-code | `Analyze_Pathconfusion.py`, no arguments | needs `sys.argv[1]` |
+   | 15 | scalingattacks | `scaleatt/Tutorial-Detection.ipynb` | cv2 not installed (reprobe defect, open) |
+   | 18 | CacheSched | 4 CLIs, no arguments | required arguments not given (4) |
+   | 31 | acto | `reproduce_bugs.py` | ran; `ZeroDivisionError`: no bug reproduced without a Kubernetes cluster |
+   | 33 | dcp | 8 scripts, no arguments | arguments (3), data not in deposit (3), C++ extension (1), Redis server (1) |
+   | 35 | I3DP | `I3DP-1.0.0/run_benchmarks.py`, no arguments | needs `OPENROUTER_API_KEY` or `--llm-replay PATH` |
+   | 24, 26, 34, 36 | LoRAFusion, Ribbon, phoenix, TuxBot | shell scripts (discarded) | no shell runner |
+   | 23, 32 | ICC, caribou | README / QUICK_START.md (discarded) | not code |
+   | 25, 28 | PASS, sosp-paper211-ae | nothing named | — |
+   | 27 | SOSP21_artifact_eval | no JSON response within 900 s | — |
+
+   By cause, over the 11 proposals: missing arguments 5 (14, 18, 33, 35, and the
+   placeholder in 3), inputs not in the deposit 3 (7, 12, 33), dependencies not
+   installed 3 (1, 11, 15; two of them reprobe defects), infrastructure 1 (31). The
+   model reads arguments from the README excerpt (2000 characters) in 1 of 11 cases.
+   It names shell scripts as the entry point for 4 to 5 of the 9 without a proposal,
+   which agrees with the H classification above (README- and shell-driven).
+
+   **The proposals are not reproducible from run to run.** Same prompt, same Ollama
+   image digest, same model tag (`gemma4:e4b`), temperature 0, CPU runners: between
+   2a2b0f3 and e7bf3e0 the response changed for 4 of the 11 rows without a proposal
+   (23, 25, 26, 27), and between d00fc3e and e7bf3e0 the step lists of 18 (3 → 4) and
+   33 (9 → 8) changed. An assisted result is evidence about one run of the model, not
+   a property of the artifact. The model is pinned by tag only, not by digest as
+   DESIGN.md §6 states, so its weights are not fixed either.
